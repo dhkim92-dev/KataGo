@@ -9,6 +9,43 @@
 #include "../core/logger.h"
 #include "../neuralnet/vulkanhelpers.h"
 
+std::string VkHelpers::vkErrorToString(VkResult res) {
+  switch(res) {
+    case VK_SUCCESS: return "VK_SUCCESS";
+    case VK_NOT_READY: return "VK_NOT_READY";
+    case VK_TIMEOUT: return "VK_TIMEOUT";
+    case VK_EVENT_SET: return "VK_EVENT_SET";
+    case VK_EVENT_RESET: return "VK_EVENT_RESET";
+    case VK_INCOMPLETE: return "VK_INCOMPLETE";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+    case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+    case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+    // Add more cases as needed
+    default: return "Unknown VkResult error code";
+  }
+}
+
+std::string VkHelpers::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
+  switch(type) {
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER: return "Other";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "Discrete GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "Virtual GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
+    default: return "Unknown Device Type";
+  }
+}
+
+
 
 VkInstance VkHelpers::createVulkanInstance() {
   VkInstance instance = VK_NULL_HANDLE;
@@ -180,25 +217,36 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   return vulkanDevice;
 }
 
-VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
+VkShaderModule VkHelpers::createShaderModuleFromSPIRVBytes(
     VkDevice device,
-    const std::vector<VkDescriptorSetLayoutBinding>& bindings,
-    VkResult *res
+    const std::vector<unsigned char>& spirvBytes,
+    VkResult* result
 ) {
-  VkDescriptorSetLayoutCreateInfo layoutCI = {};
-  layoutCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  layoutCI.bindingCount = static_cast<uint32_t>(bindings.size());
-  layoutCI.pBindings = bindings.data();
-  VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-  *res = vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &descriptorSetLayout);
-  return descriptorSetLayout;
+  VkShaderModuleCreateInfo shaderModuleCI = {};
+  shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  shaderModuleCI.codeSize = spirvBytes.size();
+  shaderModuleCI.pCode = reinterpret_cast<const uint32_t*>(spirvBytes.data());
+  VkShaderModule shaderModule = VK_NULL_HANDLE;
+  *result = vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule);
+  return shaderModule;
+}
+
+VkPipelineCache VkHelpers::createPipelineCache(
+  VkDevice device,
+  VkResult *result
+) {
+  VkPipelineCacheCreateInfo pipelineCacheCI = {};
+  pipelineCacheCI.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+  *result = vkCreatePipelineCache(device, &pipelineCacheCI, nullptr, &pipelineCache);
+  return pipelineCache;
 }
 
 VkPipelineLayout VkHelpers::createPipelineLayout(
     VkDevice device,
     const std::vector<VkDescriptorSetLayout>& descriptorSetLayouts,
     const std::vector<VkPushConstantRange>& pushConstantRanges,
-    VkResult *res
+    VkResult *result
 ) {
   VkPipelineLayoutCreateInfo pipelineLayoutCI = {};
   pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -207,7 +255,7 @@ VkPipelineLayout VkHelpers::createPipelineLayout(
   pipelineLayoutCI.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
   pipelineLayoutCI.pPushConstantRanges = pushConstantRanges.data();
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-  *res = vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout);
+  *result = vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout);
   return pipelineLayout;
 }
 
@@ -216,8 +264,9 @@ VkPipeline VkHelpers::createComputePipeline(
     VkPipelineLayout pipelineLayout,
     VkPipelineCache pipelineCache,
     VkShaderModule computeShaderModule,
-    VkResult *res,
-    const char* entryPointName = "main"
+    VkResult *result,
+    VkSpecializationInfo* specializationInfo,
+    std::string entryPointName
 ) {
   VkComputePipelineCreateInfo pipelineCI = {};
   pipelineCI.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -225,10 +274,25 @@ VkPipeline VkHelpers::createComputePipeline(
   pipelineCI.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   pipelineCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   pipelineCI.stage.module = computeShaderModule;
-  pipelineCI.stage.pName = entryPointName;
+  pipelineCI.stage.pName = entryPointName.data();
+  pipelineCI.stage.pSpecializationInfo = specializationInfo;
   VkPipeline pipeline = VK_NULL_HANDLE;
-  *res = vkCreateComputePipelines(device, pipelineCache, 1, &pipelineCI, nullptr, &pipeline);
+  *result = vkCreateComputePipelines(device, pipelineCache, 1, &pipelineCI, nullptr, &pipeline);
   return pipeline;
+}
+
+VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
+    VkDevice device,
+    const std::vector<VkDescriptorSetLayoutBinding>& bindings,
+    VkResult *result
+) {
+  VkDescriptorSetLayoutCreateInfo layoutCI = {};
+  layoutCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  layoutCI.bindingCount = static_cast<uint32_t>(bindings.size());
+  layoutCI.pBindings = bindings.data();
+  VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+  *result = vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &descriptorSetLayout);
+  return descriptorSetLayout;
 }
 
 

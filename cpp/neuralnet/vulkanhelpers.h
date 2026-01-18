@@ -73,10 +73,10 @@ struct VulkanBuffer {
  */
 namespace VkHelpers {
 
-  VkInstance createVulkanInstance();
-  std::vector<VulkanDeviceInfo> enumerateVulkanDevices(VkInstance instance,Logger* logger);
   std::string vkErrorToString(VkResult res);
   std::string vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type);
+  VkInstance createVulkanInstance();
+  std::vector<VulkanDeviceInfo> enumerateVulkanDevices(VkInstance instance,Logger* logger);
   VulkanDevice* createVulkanDevice(
     VulkanDeviceInfo deviceInfo,
     std::vector<const char *> requiredExtensions,
@@ -86,19 +86,19 @@ namespace VkHelpers {
   VkShaderModule createShaderModuleFromSPIRVBytes(
     VkDevice device,
     const std::vector<unsigned char>& spirvBytes,
-    VkResult *res
+    VkResult *result
   );
 
   VkPipelineCache createPipelineCache(
     VkDevice device,
-    VkResult *res
+    VkResult *result
   );
 
   VkPipelineLayout createPipelineLayout(
     VkDevice device,
     const std::vector<VkDescriptorSetLayout>& descriptorSetLayouts,
     const std::vector<VkPushConstantRange>& pushConstantRanges,
-    VkResult *res
+    VkResult *result
   );
 
   VkPipeline createComputePipeline(
@@ -106,14 +106,15 @@ namespace VkHelpers {
     VkPipelineLayout pipelineLayout,
     VkPipelineCache pipelineCache,
     VkShaderModule computeShaderModule,
-    VkResult* res,
-    const char* entryPointName = "main"
+    VkResult* result,
+    VkSpecializationInfo* specializationInfo = nullptr,
+    std::string entryPointName = "main"
   );
 
   VkDescriptorSetLayout createDescriptorSetLayout(
     VkDevice device,
     const std::vector<VkDescriptorSetLayoutBinding>& bindings,
-    VkResult *res
+    VkResult *result
   );
 
   inline VkDescriptorSetLayoutBinding descriptorSetLayoutBinding(
@@ -144,6 +145,13 @@ namespace VkDebug {
 #define CHECK_VK(res) { \
   if(res != VK_SUCCESS) { \
     std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+    exit(EXIT_FAILURE); \
+  } \
+}
+
+#define CHECK_VK_MSG(msg, res) { \
+  if(res != VK_SUCCESS) { \
+    std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl; \
     exit(EXIT_FAILURE); \
   } \
 }
