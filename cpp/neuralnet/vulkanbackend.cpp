@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <memory>
 #include "../core/global.h"
+#include "../core/simpleallocator.h"
 #include "../neuralnet/vulkanhelpers.h"
 #include "../external/vulkan/vulkanshaders.h"
 #include "../neuralnet/nninterface.h"
@@ -24,10 +25,8 @@ struct ComputeContext {
   const int nnYLen;
   const enabled_t usingFP16Mode;
   const enabled_t usingNHWCMode;
-
   VulkanContext* vulkanContext; 
-  std::unordered_map<uint32_t, ComputePipelines&> pipelinesPerDev;
-
+  std::unordered_map<uint32_t, ComputePipelines *> pipelinesPerDev;
   
   ComputeContext(
     int nnXLen,
@@ -52,7 +51,6 @@ struct ComputeContext {
         }
 
         VulkanDeviceInfo& deviceInfo = allDeviceInfos[gpuIdx];
-
         std::vector<const char*> requiredExtensions = {
         };
 
@@ -66,7 +64,8 @@ struct ComputeContext {
         }
 
         // TODO: Not like OpenCL, Vulkan can access Tensor cores via extensions. I will support it later.
-        //       VK_KHR_cooperative_matrix extension is required for NHWC mode.
+        //       VK_KHR_cooperative_matrix extension is required for tensor cores usage.
+
         // Check for NHWC support if requested
         if ( usingNHWCMode == enabled_t::True && !isDeviceSupportNHWC(deviceInfo) ) {
           throw StringError("Requested NHWC mode but device " + deviceInfo.deviceName + " does not support it");
@@ -77,11 +76,14 @@ struct ComputeContext {
         }
 
         VulkanDevice* vulkanDevice = VkHelpers::createVulkanDevice(
+          instance,
           deviceInfo,
           requiredExtensions,
           logger
         );
         vulkanDevices.push_back(vulkanDevice);
+        ComputePipelines* pipelines = new ComputePipelines(vulkanDevice->device);
+        this->pipelinesPerDev.emplace(gpuIdx, pipelines);
       }
 
       vulkanContext = new VulkanContext(
@@ -91,7 +93,23 @@ struct ComputeContext {
       );
   }
 
-private:
+  ~ComputeContext() {
+    for ( auto& kv : pipelinesPerDev ) {
+      ComputePipelines* pipelines = kv.second;
+      delete pipelines;
+    }
+
+    for ( VulkanDevice *device : vulkanContext->devicesToUse ) {
+      delete device;
+    }
+    vulkanContext->devicesToUse.clear();
+
+    delete vulkanContext;
+  }
+
+  ComputeContext() = delete;
+  ComputeContext(const ComputeContext&) = delete;
+  ComputeContext& operator=(const ComputeContext&) = delete;
 
   bool isDeviceSupportFp16(const VulkanDeviceInfo& deviceInfo) {
     //Check for fp16 feature
@@ -104,6 +122,54 @@ private:
   }
 };
 
+ComputeContext* NeuralNet::createComputeContext(
+  const std::vector<int>& gpuIdxs,
+  Logger *logger,
+  int nnXLen,
+  int nnYLen,
+  const std::string& openCLTunerFile,
+  const std::string& homeDataDirOverride,
+  bool openCLTunePerBoardSize,
+  enabled_t useFP16Mode,
+  enabled_t useNHWCMode,
+  const LoadedModel* loadedModel
+) {
+  return new ComputeContext(
+    nnXLen,
+    nnYLen,
+    useFP16Mode,
+    useNHWCMode,
+    std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
+    logger
+  );
+}
+
+void NeuralNet::freeComputeContext(ComputeContext* context) {
+  delete context;
+}
+
+static ComputeContext* createComputeContextForTesting(
+  const std::vector<int>& gpuIdxs,
+  Logger *logger,
+  int nnXLen,
+  int nnYLen,
+  bool useFp16,
+  bool useNHWC
+) {
+  enabled_t useFP16Mode = useFp16 ? enabled_t::True : enabled_t::False;
+  enabled_t useNHWCMode = useNHWC ? enabled_t::True : enabled_t::False;
+
+  return new ComputeContext(
+    nnXLen,
+    nnYLen,
+    useFP16Mode,
+    useNHWCMode,
+    std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
+    logger
+  );
+}
+
+/* ########################### Buffers ######################### */
 struct Buffers {
   VulkanBuffer input;
   VulkanBuffer inputGlobal;  
@@ -131,6 +197,54 @@ struct Buffers {
   VulkanBuffer convWorkspace;
   VulkanBuffer convWorkspace2;
 };
+
+struct ScratchBuffers {
+  const size_t batchXYFloatBytes;
+  const size_t batchFloatBytes;
+  const size_t batchXYBytes;
+  const size_t batchBytes;
+
+  const ComputeHandleInternal *handle;
+  SimpleAllocator<VulkanBuffer*>* allocator;
+
+  ScratchBuffers() = delete;
+  ScratchBuffers(const ScratchBuffers&) = delete;
+  ScratchBuffers& operator=(const ScratchBuffers&) = delete;
+
+  ScratchBuffers(
+    ComputeHandleInternal* handle_,
+    int maxBatchSize,
+    int nnXLen,
+    int nnYLen
+  ): 
+    batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
+    batchFloatBytes(sizeof(float) * maxBatchSize),
+    batchXYBytes(sizeof(uint8_t) * maxBatchSize * nnXLen * nnYLen),
+    batchBytes(sizeof(uint8_t) * maxBatchSize),
+    handle(handle_)
+  {
+    std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
+      return VkHelpers::createDeviceBuffer(
+        handle->vulkanDevice,
+        size,
+        nullptr
+      );
+    };
+    std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
+      VkHelpers::releaseVulkanBuffer(
+        handle->vulkanDevice,
+        buffer
+      );
+    };
+
+    allocator = new SimpleAllocator<VulkanBuffer *>(
+      allocFunc,
+      freeFunc
+    );
+  }
+};
+
+
 
 struct Model;
 
@@ -165,17 +279,45 @@ struct ComputeHandle {
     );
     this->handle = std::unique_ptr<ComputeHandleInternal>(handlePtr);
   }
+
+  ~ComputeHandle() {}
+
+  ComputeHandle() = delete;
+  ComputeHandle(const ComputeHandle&) = delete;
+  ComputeHandle& operator=(const ComputeHandle&) = delete;
 };
 
-struct ComputeHandleInternal {
-  ComputeContext* context;
-  VkDevice vulkanDevice;
-  VkQueue vulkanQueue;
+ComputeHandle* NeuralNet::createComputeHandle(
+  ComputeContext* context,
+  const LoadedModel* loadedModel,
+  Logger *logger,
+  int maxBatchSize,
+  bool requiredExactNNLen,
+  bool inputsUseNHWC,
+  int gpuIdxForThisThread,
+  int serverThreadIdx
+) {
+  auto deviceStr = [&]() {
+    if(gpuIdxForThisThread < 0) 
+      return std::string("");
+    return " Device " + Global::intToString(gpuIdxForThisThread);
+  };
 
-  bool usingFP16Storage;
-  bool usingFP16Compute;
-  bool usingFP16TensorCores;
-  bool usingFP16TensorCoreForConv1x1;
+  if ( logger != nullptr ) {
+    // logger->write("Vulkan backend trhead " + Global::intToString(serverThreadIdx) + " Model version " + Global::intToString(loadedModel->modelDesc.modelVersion));
+    // logger->write("Vulkan backend thread " + Global::intToString(serverThreadIdx) + " using FP16 mode: " + context->usingFP16Mode.toString() + "," + " NHWC mode: " + context->usingNHWCMode.toString() + deviceStr() );
+  }
+}
+
+struct ComputeHandleInternal {
+  const ComputeContext* context;
+  const VulkanDevice* vulkanDevice;
+  VkDevice device;
+  VkQueue queue;
+  // bool usingFP16Storage;
+  // bool usingFP16Compute;
+  // bool usingFP16TensorCores;
+  // bool usingFP16TensorCoreForConv1x1;
 
   ComputeHandleInternal(
     ComputeContext* ctx,
@@ -184,12 +326,10 @@ struct ComputeHandleInternal {
     bool useNHWC
   ) {
     this->context = ctx;
-    const VulkanDevice* vulkanDevice = ctx->vulkanContext->findGpuExn(gpuIdx);
-    this->vulkanDevice = vulkanDevice->device;
-    this->vulkanQueue = vulkanDevice->queue;
-
+    this->vulkanDevice = ctx->vulkanContext->findGpuExn(gpuIdx);
+    this->queue = this->vulkanDevice->queue;
+    this->device = this->vulkanDevice->device;
   }
-
 };
 
 /**
@@ -274,7 +414,7 @@ struct ComputePipelines {
   Pipeline batchNormMaskReluFp32;
   Pipeline batchNormMaskMishFp32;
 
-  // pooling pipelines
+  // Pooling pipelines
   Pipeline globalPoolingChannelsFp32;
   Pipeline valueHeadPoolingChannelsFp32;
   
@@ -556,22 +696,6 @@ private :
     createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(NCHWPushConstantParams), extractChannel0NCHWFp32);
   }
 };
-
-
-
-
-ComputePipelines* createComputePipelines(
-  ComputeContext* context,
-  int gpuIdx,
-  bool useFP16TensorCores,
-  bool useFP16TensorCoresFor1x1,
-  bool useNHWC,
-  Logger* logger
-) {
-  VkDevice device = context->vulkanContext->findGpuExn(gpuIdx)->device;
-  ComputePipelines* pipelines = new ComputePipelines(device);
-  return pipelines;
-}
 
 void NeuralNet::globalInitialize() {
   static_assert(sizeof(int) >= 4, "");

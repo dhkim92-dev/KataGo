@@ -4,10 +4,102 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vector>
+
+#ifndef VMA_IMPLEMENTATION
+#define VMA_IMPLEMENTATION
 #include <vma/vk_mem_alloc.h>
+#endif
 #include "../core/global.h"
 #include "../core/logger.h"
 #include "../neuralnet/vulkanhelpers.h"
+
+VulkanDevice::~VulkanDevice() {
+  if (this->device != VK_NULL_HANDLE) {
+    vkQueueWaitIdle(this->queue);
+    vkDeviceWaitIdle(this->device);
+    vkDestroyDevice(this->device, nullptr);
+    this->device = VK_NULL_HANDLE;
+  }
+}
+
+VulkanContext::VulkanContext(
+  VkInstance instance,
+  const std::vector<VulkanDevice *>& devicesToUse,
+  Logger* logger
+) {
+  this->instance = instance;
+  this->devicesToUse = devicesToUse;
+  this->defaultGpuIdx = 0;
+  for ( const VulkanDevice* device : devicesToUse ) {
+    if ( std::find(this->uniqueDeviceNamesToUse.begin(), this->uniqueDeviceNamesToUse.end(), device->info.deviceName) == this->uniqueDeviceNamesToUse.end() ) {
+      this->uniqueDeviceNamesToUse.push_back(device->info.deviceName);
+    }
+  }
+
+  #ifdef VULKAN_API_DEBUG
+  // Setup debug messenger
+  VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = {};
+  debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+  debugCreateInfo.messageSeverity = 
+    VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | 
+    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | 
+    VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+  debugCreateInfo.messageType = 
+    VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+  debugCreateInfo.pfnUserCallback = nullptr; // You can set a callback function here if needed
+  debugCreateInfo.pUserData = nullptr; // Optional user data
+  auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+  if (func != nullptr) {
+    VkResult res = func(instance, &debugCreateInfo, nullptr, &this->debugMessenger);
+    CHECK_VK_MSG("CreateDebugUtilsMessengerEXT", res);
+  } else {
+    logger->write("Warning: Could not set up Vulkan debug messenger.");
+  }
+  #endif
+}
+
+VulkanContext::~VulkanContext() {
+  for ( VulkanDevice* device : this->devicesToUse ) {
+    delete device;
+    device = nullptr;
+  }
+  this->devicesToUse.clear();
+  if (this->instance != VK_NULL_HANDLE) {
+    vkDestroyInstance(this->instance, nullptr);
+    this->instance = VK_NULL_HANDLE;
+  }
+}
+
+const VulkanDevice* VulkanContext::findGpuExn(int gpuIdx) const {
+  for ( const VulkanDevice* device : this->devicesToUse ) {
+    if ( device->info.deviceId == static_cast<uint32_t>(gpuIdx) ) {
+      return device;
+    }
+  }
+  throw StringError("Could not find Vulkan device with GPU index " + std::to_string(gpuIdx));
+}
+
+std::vector<const VulkanDevice*> VulkanContext::findDevicesToUseWithName(const std::string& name) const {
+  std::vector<const VulkanDevice*> devices;
+  for ( const VulkanDevice* device : this->devicesToUse ) {
+    if ( device->info.deviceName == name ) {
+      devices.push_back(device);
+    }
+  }
+  return devices;
+}
+
+std::vector<VkDevice> VulkanContext::findDeviceIdsToUseWithName(const std::string& name) const {
+  std::vector<VkDevice> deviceIds;
+  for ( const VulkanDevice* device : this->devicesToUse ) {
+    if ( device->info.deviceName == name ) {
+      deviceIds.push_back(device->device);
+    }
+  }
+  return deviceIds;
+}
 
 std::string VkHelpers::vkErrorToString(VkResult res) {
   switch(res) {
@@ -45,8 +137,6 @@ std::string VkHelpers::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
   }
 }
 
-
-
 VkInstance VkHelpers::createVulkanInstance() {
   VkInstance instance = VK_NULL_HANDLE;
   std::vector<const char*> requiredLayers = {
@@ -69,7 +159,7 @@ VkInstance VkHelpers::createVulkanInstance() {
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   appInfo.pApplicationName = "KataGo";
   appInfo.applicationVersion = VK_MAKE_VERSION(1, 6, 4);
-  appInfo.pEngineName = "KatagoEngine";
+  appInfo.pEngineName = "Katago Vulkan Backend";
   appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
   appInfo.apiVersion = VK_API_VERSION_1_2;
   VkInstanceCreateInfo instanceCI = {};
@@ -154,9 +244,10 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
 }
 
 VulkanDevice* VkHelpers::createVulkanDevice(
-    VulkanDeviceInfo deviceInfo,
-    std::vector<const char *> requiredExtensions,
-    Logger* logger
+  VkInstance instance,
+  VulkanDeviceInfo deviceInfo,
+  std::vector<const char *> requiredExtensions,
+  Logger* logger
 ) {
   VkPhysicalDevice physicalDevice = deviceInfo.physicalDevice;
 
@@ -214,6 +305,23 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   vulkanDevice->device = device;
   vulkanDevice->queue = queue;
 
+  VmaAllocator allocator = VK_NULL_HANDLE;
+
+  VmaAllocatorCreateInfo allocatorCI = {};
+  allocatorCI.physicalDevice = physicalDevice;
+  allocatorCI.device = device;
+  allocatorCI.instance = instance;
+
+#ifndef VK_API_VERSION_1_3
+  allocatorCI.vulkanApiVersion = VK_API_VERSION_1_2;
+  allocatorCI.flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;= 
+#else
+  allocatorCI.vulkanApiVersion = VK_API_VERSION_1_3;
+#endif
+
+  res = vmaCreateAllocator(&allocatorCI, &allocator);
+  CHECK_VK_MSG("VMA create for device : " + deviceInfo.deviceName, res);
+  vulkanDevice->allocator = allocator;
   return vulkanDevice;
 }
 
@@ -295,6 +403,98 @@ VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
   return descriptorSetLayout;
 }
 
+VulkanBuffer* VkHelpers::createDeviceBuffer(
+  const VulkanDevice *device,
+  size_t size,
+  VkResult *result
+) {
+  VulkanBuffer *buffer = new VulkanBuffer();
+  buffer->device = device;
+  buffer->buffer = VK_NULL_HANDLE;
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = size;
+  bufferCI.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocCI = {};
+  allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  VkResult res = vmaCreateBuffer(
+    device->allocator,
+    &bufferCI,
+    &allocCI,
+    &buffer->buffer,
+    &buffer->allocation,
+    &buffer->allocationInfo
+  );
+  *result = res;
+  return buffer;
+}
 
+VulkanBuffer* VkHelpers::createStagingBuffer(
+  const VulkanDevice *device,
+  size_t size,
+  VkResult *result
+) {
+  VulkanBuffer *buffer = new VulkanBuffer();
+  buffer->device = device;
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = size;
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocCI = {};
+  allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+  VkResult res = vmaCreateBuffer(
+    device->allocator,
+    &bufferCI,
+    &allocCI,
+    &buffer->buffer,
+    &buffer->allocation,
+    &buffer->allocationInfo
+  );
+  *result = res;
+  return buffer;
+}
+
+VulkanBuffer* VkHelpers::createReadbackBuffer(
+  const VulkanDevice *device,
+  size_t size,
+  VkResult *result
+) {
+  VulkanBuffer *buffer = new VulkanBuffer();
+  buffer->device = device;
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = size;
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocCI = {};
+  allocCI.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+  VkResult res = vmaCreateBuffer(
+    device->allocator,
+    &bufferCI,
+    &allocCI,
+    &buffer->buffer,
+    &buffer->allocation,
+    &buffer->allocationInfo
+  );
+  *result = res;
+  return buffer;
+}
+
+void VkHelpers::releaseVulkanBuffer(
+  const VulkanDevice *device,
+  VulkanBuffer *buffer
+) {
+  if(buffer != nullptr) {
+    vmaDestroyBuffer(
+      device->allocator,
+      buffer->buffer,
+      buffer->allocation
+    );
+    delete buffer;
+    buffer = nullptr;
+  }
+}
 
 #endif

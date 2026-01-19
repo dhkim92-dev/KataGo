@@ -26,6 +26,8 @@ struct VulkanDevice {
   VulkanDeviceInfo info;
   VkDevice device;
   VkQueue queue;
+  VmaAllocator allocator;
+  ~VulkanDevice();
 };
 
 struct VulkanContext {
@@ -51,19 +53,12 @@ struct VulkanContext {
 };
 
 struct VulkanBuffer {
-  VkDevice device;
+  const VulkanDevice* device;
   VkBuffer buffer;
   VmaAllocation allocation;
   VmaAllocationInfo allocationInfo;
-  size_t size;
-
-  VulkanBuffer(
-      VkDevice device,
-      VkDeviceSize size,
-      VmaMemoryUsage memoryUsage
-  );
-  ~VulkanBuffer();
-  VulkanBuffer() = delete;
+  VulkanBuffer() = default;
+  ~VulkanBuffer() = default;
   VulkanBuffer(const VulkanBuffer&) = delete;
   VulkanBuffer& operator=(const VulkanBuffer&) = delete;
 };
@@ -78,6 +73,7 @@ namespace VkHelpers {
   VkInstance createVulkanInstance();
   std::vector<VulkanDeviceInfo> enumerateVulkanDevices(VkInstance instance,Logger* logger);
   VulkanDevice* createVulkanDevice(
+    VkInstance instance,
     VulkanDeviceInfo deviceInfo,
     std::vector<const char *> requiredExtensions,
     Logger* logger
@@ -131,6 +127,29 @@ namespace VkHelpers {
     layoutBinding.pImmutableSamplers = nullptr;
     return layoutBinding;
   }
+
+  VulkanBuffer* createDeviceBuffer(
+    const VulkanDevice* device,
+    size_t size,
+    VkResult *result
+  );
+
+  VulkanBuffer* createStagingBuffer(
+    const VulkanDevice* device,
+    size_t size,
+    VkResult *result
+  );
+
+  VulkanBuffer* createReadbackBuffer(
+    const VulkanDevice* device,
+    size_t size,
+    VkResult *result
+  );
+
+  void releaseVulkanBuffer(
+    const VulkanDevice* device,
+    VulkanBuffer* buffer
+  );
 };
 
 namespace VkDebug {
