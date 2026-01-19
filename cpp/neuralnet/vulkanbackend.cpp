@@ -275,11 +275,15 @@ struct ComputePipelines {
   Pipeline batchNormMaskMishFp32;
 
   // pooling pipelines
-  Pipeline globalAvgPoolFp32;
-  Pipeline valueHeadPoolChannelsFp32;
-
+  Pipeline globalPoolingChannelsFp32;
+  Pipeline valueHeadPoolingChannelsFp32;
+  
+  // Element wise operations
   Pipeline sumChannelsFp32;
-
+  Pipeline addChannelBiasNCHWFp32;
+  Pipeline addChannelBiasNCReluFp32;
+  Pipeline addChannelBiasNCMishFp32;
+  Pipeline extractChannel0NCHWFp32;
 
   ComputePipelines(
     VkDevice device_
@@ -305,15 +309,25 @@ struct ComputePipelines {
 
 private :
   void createPipelines() {
-    createConv2dFp32(device);
-    createConv2d3x3BnFp32(device);
-    createConv2d3x3BnReluFp32(device);
-    createConv2d5x5BnFp32(device);
-    createConv2d5x5BnReluFp32(device);
-    createConv2d5x5BnMishFp32(device);
-    createAddPointWiseFp32(device);
-    createMatmulFp32(device);
-    createMatmulTiled4x4x32Fp32(device);
+    createConv2dFp32();
+    createConv2d3x3BnFp32();
+    createConv2d3x3BnReluFp32();
+    createConv2d5x5BnFp32();
+    createConv2d5x5BnReluFp32();
+    createConv2d5x5BnMishFp32();
+    createAddPointWiseFp32();
+    createMatmulFp32();
+    createMatmulTiled4x4x32Fp32();
+    createBatchNormMaskFp32();
+    createBatchNormMaskReluFp32();
+    createBatchNormMaskMishFp32();
+    createGlobalPoolingChannelsFp32();
+    createValueHeadPoolingChannelsFp32();
+    createSumChannelsFp32();
+    createAddChannelBiasNCHWFp32();
+    createAddChannelBiasNCReluFp32();
+    createAddChannelBiasNCMishFp32();
+    createExtractChannel0NCHWFp32();
   }
 
   void destroyPipelines() {
@@ -326,6 +340,16 @@ private :
     destroyPipeline(addPointWiseFp32);
     destroyPipeline(matmulFp32);
     destroyPipeline(matmulTiledChw4x4x32Fp32);
+    destroyPipeline(batchNormMaskFp32);
+    destroyPipeline(batchNormMaskReluFp32);
+    destroyPipeline(batchNormMaskMishFp32);
+    destroyPipeline(globalPoolingChannelsFp32);
+    destroyPipeline(valueHeadPoolingChannelsFp32);
+    destroyPipeline(sumChannelsFp32);
+    destroyPipeline(addChannelBiasNCHWFp32);
+    destroyPipeline(addChannelBiasNCReluFp32);
+    destroyPipeline(addChannelBiasNCMishFp32);
+    destroyPipeline(extractChannel0NCHWFp32);
   }
 
   /**
@@ -348,515 +372,191 @@ private :
     }
   }
 
-  /**
-   * @brief Create a Conv2d Fp32 object
-  */
-  void createConv2dFp32(VkDevice& device) {
+  void createPipeline(
+    std::string pipelineName,
+    const unsigned char* spirvBytes,
+    size_t spirvSize,
+    size_t bindingSize,
+    uint32_t pushConstantSize,
+    Pipeline &outPipeline
+  ) {
     VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_conv2d_fp32_size;
     std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
     VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
       device,
       spirvVec,
       &res
     );
-    CHECK_VK_MSG("createConv2dFp32ShaderModule",res);
+    CHECK_VK_MSG(pipelineName + "ShaderModule",res);
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    for ( size_t i = 0 ; i < bindingSize ; i++ ) {
+      bindings.push_back(
+        VkHelpers::descriptorSetLayoutBinding(
+          static_cast<uint32_t>(i),
+          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+        )
+      );
+    }
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
+    outPipeline.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(device,bindings,&res);
+    CHECK_VK_MSG(pipelineName + "DescriptorSetLayout",res);
 
-    conv2dFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2dFp32DescriptorSetLayout",res);
-
+    std::vector<VkPushConstantRange> pushConstants;
     VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams); // e.g., could be used for kernel size, stride, padding, etc.
-    conv2dFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2dFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2dFp32PipelineLayout",res);
 
-    conv2dFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2dFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK(res);
+    if ( pushConstantSize > 0 ) {
+      pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+      pushConstant.offset = 0;
+      pushConstant.size = static_cast<uint32_t>(pushConstantSize);
+      pushConstants.push_back(pushConstant);
+    }
+    outPipeline.layout = VkHelpers::createPipelineLayout(device,{ outPipeline.descriptorSetLayout }, pushConstants, &res);
+    CHECK_VK_MSG(pipelineName + "PipelineLayout",res);
+    outPipeline.pipeline = VkHelpers::createComputePipeline(device, outPipeline.layout, cache, shaderModule, &res);
+    CHECK_VK_MSG(pipelineName + "ComputePipeline",res);
     vkDestroyShaderModule(device, shaderModule, nullptr);
   }
 
   /**
+   * @brief Create a Conv2d Fp32 object
+  */
+  void createConv2dFp32() {
+    createPipeline("Conv2dFp32",  VkSPIRVShaders::spirv_conv2d_fp32, VkSPIRVShaders::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
+  }
+
+  /**
    * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
-   * @param device 
    */
-  void createConv2d3x3BnFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3Fp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d3x3BnFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3Fp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams); // e.g., could be used for kernel size, stride, padding, etc.
-    conv2d3x3BnFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d3x3BnFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3Fp32PipelineLayout", res);
-
-    conv2d3x3BnFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d3x3BnFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK(res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createConv2d3x3BnFp32() {
+    createPipeline("Conv2d3x3BnFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
   }
 
   /**
    * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
    */
-  void createConv2d3x3BnReluFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32;
-    const size_t spirvSize = sizeof(VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32);
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3Fp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d3x3BnReluFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams);
-
-    // 3x3 Conv Pipeline 
-    conv2d3x3BnReluFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d3x3BnReluFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3Fp32PipelineLayout",res);
-
-    conv2d3x3BnReluFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d3x3BnReluFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createConv2d3x3BnReluFp32() {
+    createPipeline("Conv2d3x3BnReluFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
   }
-
   /**
    * @brief Create a Conv2d3x3 Bn Mish Fp32 object
    */
-  void createConv2d3x3BnMishFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3MishFp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d3x3BnMishFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3MishFp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams); // e.g., could be used for kernel size, stride, padding, etc.
-    conv2d3x3BnMishFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d3x3BnMishFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d3x3MishFp32PipelineLayout", res);
-
-    conv2d3x3BnMishFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d3x3BnMishFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK(res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createConv2d3x3BnMishFp32() {
+    createPipeline("Conv2d3x3BnMishFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32,VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
   }
 
   /**
    * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
    */
-  void createConv2d5x5BnFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5Fp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d5x5BnFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5Fp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams); // e.g., could be used for kernel size, stride, padding, etc.
-    conv2d5x5BnFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d5x5BnFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5Fp32PipelineLayout", res);
-
-    conv2d5x5BnFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d5x5BnFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK(res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createConv2d5x5BnFp32() {
+    createPipeline("Conv2d5x5BnFp32", VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
   }
 
   /**
    * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
    */
-  void createConv2d5x5BnReluFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32;
-    const size_t spirvSize = sizeof(VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32);
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5BnReluFp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d5x5BnReluFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5BnReluFp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams);
-
-    // 5x5 Conv Pipeline 
-    conv2d5x5BnReluFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d5x5BnReluFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5BnReluFp32PipelineLayout",res);
-    conv2d5x5BnReluFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d5x5BnReluFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createConv2d5x5BnReluFp32() {
+    createPipeline("Conv2d5x5BnReluFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
   }
 
-  void createConv2d5x5BnMishFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5MishFp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // filter buffers
-    };
-
-    conv2d5x5BnMishFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5MishFp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(Conv2DPushConstantParams); // e.g., could be used for kernel size, stride, padding, etc.
-    conv2d5x5BnMishFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { conv2d5x5BnMishFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5MishFp32PipelineLayout", res);
-
-    conv2d5x5BnMishFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      conv2d5x5BnMishFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK_MSG("createConv2d5x5MishFp32Pipeline", res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  /**
+   * @brief Create a Conv2d5x5 Bn Mish Fp32 object
+   */
+  void createConv2d5x5BnMishFp32() {
+    createPipeline("Conv2d5x5BnMishFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
   }
 
   /**
    * @brief Create a Add Point Wise Fp32 object
    */
-  void createAddPointWiseFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_add_pointwise_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_add_pointwise_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createAddPointWiseFp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer A
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer B
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-    };
-
-    addPointWiseFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createAddPointWiseFp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(NCHWPushConstantParams); // e.g., could be used for N, C, H, W
-    addPointWiseFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { addPointWiseFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createAddPointWiseFp32PipelineLayout", res);
-
-    addPointWiseFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      addPointWiseFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK(res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createAddPointWiseFp32() {
+    createPipeline("AddPointWiseFp32",VkSPIRVShaders::spirv_add_pointwise_fp32, VkSPIRVShaders::spirv_add_pointwise_fp32_size, 3, sizeof(NCHWPushConstantParams), addPointWiseFp32);
   }
 
   /**
-   * @brief create a Matmul Fp32 object
+   * @brief Create a Matmul Fp32 object
    */
-  void createMatmulFp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_matmul_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_matmul_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulFp32ShaderModule",res);
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer A
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer B
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-    };
-
-    matmulFp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulFp32DescriptorSetLayout", res);
-
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(MatmulPushConstantParams); // e.g., could be used for M, N, K
-    matmulFp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { matmulFp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createMatmulFp32PipelineLayout", res);
-
-    matmulFp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      matmulFp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulFp32Pipeline", res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  void createMatmulFp32() {
+    createPipeline("MatmulFp32", VkSPIRVShaders::spirv_matmul_fp32, VkSPIRVShaders::spirv_matmul_fp32_size, 3, sizeof(MatmulPushConstantParams), matmulFp32);
   }
 
   /**
-   * @brief create a Matmul Tiled 4x4x32 Fp32 object
+   * @brief Create a Matmul Tiled 4x4x32 Fp32 object
    */
-  void createMatmulTiled4x4x32Fp32(VkDevice& device) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    const unsigned char* spirvBytes = VkSPIRVShaders::spirv_matmul_tiled_chw_4x4x32_fp32;
-    const size_t spirvSize = VkSPIRVShaders::spirv_matmul_tiled_chw_4x4x32_fp32_size;
-    std::vector<unsigned char> spirvVec(spirvBytes, spirvBytes + spirvSize);
-    VkShaderModule shaderModule = VkHelpers::createShaderModuleFromSPIRVBytes(
-      device,
-      spirvVec,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulTiled4x4x32Fp32ShaderModule",res);
+  void createMatmulTiled4x4x32Fp32() {
+    createPipeline("MatmulTiled4x4x32Fp32", VkSPIRVShaders::spirv_matmul_tiled_chw_4x4x32_fp32, VkSPIRVShaders::spirv_matmul_tiled_chw_4x4x32_fp32_size, 3, sizeof(MatmulPushConstantParams), matmulTiledChw4x4x32Fp32);
+  }
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-      VkHelpers::descriptorSetLayoutBinding( 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer A
-      VkHelpers::descriptorSetLayoutBinding( 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Input buffer B
-      VkHelpers::descriptorSetLayoutBinding( 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ), // Ouptut buffer
-    };
+  /**
+   * @brief Create a BatchNorm Mask Fp32 object
+   */
+  void createBatchNormMaskFp32() {
+    createPipeline("BatchNormMaskFp32", VkSPIRVShaders::spirv_bn_mask_fp32, VkSPIRVShaders::spirv_bn_mask_fp32_size, 3, sizeof(NCHWPushConstantParams), batchNormMaskFp32);
+  }
 
-    matmulTiledChw4x4x32Fp32.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(
-      device,
-      bindings,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulTiled4x4x32Fp32DescriptorSetLayout", res);
+  /**
+   * @brief Create a BatchNorm Mask + ReLU Fp32 object
+   */
+  void createBatchNormMaskReluFp32() {
+    createPipeline("BatchNormMaskReluFp32", VkSPIRVShaders::spirv_bn_mask_relu_fp32, VkSPIRVShaders::spirv_bn_mask_relu_fp32_size, 3, sizeof(NCHWPushConstantParams), batchNormMaskReluFp32);
+  }
 
-    VkPushConstantRange pushConstant = {};
-    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstant.offset = 0;
-    pushConstant.size = sizeof(MatmulPushConstantParams); // e.g., could be used for M, N, K
-    matmulTiledChw4x4x32Fp32.layout = VkHelpers::createPipelineLayout(
-      device,
-      { matmulTiledChw4x4x32Fp32.descriptorSetLayout },
-      { pushConstant },
-      &res
-    );
-    CHECK_VK_MSG("createMatmulTiled4x4x32Fp32PipelineLayout", res);
+  /**
+   * @brief Create a BatchNorm Mask + Mish Fp32 object
+   */
+  void createBatchNormMaskMishFp32() {
+    createPipeline("BatchNormMaskMishFp32", VkSPIRVShaders::spirv_bn_mask_mish_fp32, VkSPIRVShaders::spirv_bn_mask_mish_fp32_size, 3, sizeof(NCHWPushConstantParams), batchNormMaskMishFp32);
+  }
 
-    matmulTiledChw4x4x32Fp32.pipeline = VkHelpers::createComputePipeline(
-      device,
-      matmulTiledChw4x4x32Fp32.layout,
-      cache,
-      shaderModule,
-      &res
-    );
-    CHECK_VK_MSG("createMatmulTiled4x4x32Fp32Pipeline", res);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
+  /**
+   * @brief Create a Global Average Pool Fp32 object
+   */
+  void createGlobalPoolingChannelsFp32() {
+    createPipeline("GlobalPoolingChannelsFp32", VkSPIRVShaders::spirv_global_pooling_channels_fp32, VkSPIRVShaders::spirv_global_pooling_channels_fp32_size, 2, sizeof(NCHWPushConstantParams), globalPoolingChannelsFp32);
+  }
+
+  /**
+   * @brief Create a Value Head Pool Channels Fp32 object
+   */
+  void createValueHeadPoolingChannelsFp32() {
+    createPipeline("ValueHeadPoolingChannelsFp32", VkSPIRVShaders::spirv_value_head_pool_channels_fp32, VkSPIRVShaders::spirv_value_head_pool_channels_fp32_size, 2, sizeof(NCHWPushConstantParams), valueHeadPoolingChannelsFp32);
+  }
+
+  /**
+   * @brief Create a Sum Channels Fp32 object
+   */
+  void createSumChannelsFp32() {
+    createPipeline("SumChannelsFp32", VkSPIRVShaders::spirv_sum_channels_fp32, VkSPIRVShaders::spirv_sum_channels_fp32_size, 2, sizeof(NCHWPushConstantParams), sumChannelsFp32);
+  }
+
+  /**
+   * @brief Create a Add Channel Bias NCHW Fp32 object
+   */
+  void createAddChannelBiasNCHWFp32() {
+    createPipeline("AddChannelBiasNCHWFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(NCHWPushConstantParams), addChannelBiasNCHWFp32);
+  }
+
+  /**
+   * @brief Create a Add Channel Bias NC + ReLU Fp32 object
+   */
+  void createAddChannelBiasNCReluFp32() {
+    createPipeline("AddChannelBiasNCReluFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(NCHWPushConstantParams), addChannelBiasNCReluFp32);
+  }
+
+  /**
+   * @brief Create a Add Channel Bias NC + Mish Fp32 object
+   */
+  void createAddChannelBiasNCMishFp32() {
+    createPipeline("AddChannelBiasNCMishFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(NCHWPushConstantParams), addChannelBiasNCMishFp32);
+  }
+  
+  /**
+   * @brief Create a Extract Channel 0 NCHW Fp32 object
+   */
+  void createExtractChannel0NCHWFp32() {
+    createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(NCHWPushConstantParams), extractChannel0NCHWFp32);
   }
 };
+
 
 
 

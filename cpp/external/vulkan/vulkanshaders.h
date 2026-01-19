@@ -10,6 +10,9 @@
  */
 namespace VkSPIRVShaders {
 
+  /**
+   * @brief Direct convolution layer Fp32
+   */
   const unsigned char spirv_conv2d_fp32[] = {0x00, 0x01, 0x02}; // Placeholder bytes
   size_t spirv_conv2d_fp32_size = sizeof(spirv_conv2d);
 
@@ -66,6 +69,66 @@ namespace VkSPIRVShaders {
    */
   const unsigned char spirv_matmul_tiled_chw_4x4x32_fp32[] = {0x0A, 0x0B, 0x0C}; // Placeholder bytes
   size_t spirv_matmul_tiled_chw_4x4x32_fp32_size = sizeof(spirv_matmul_tiled_chw_4x4x32_fp32);
+
+  /**
+   * @brief Prediction phase BN shader fp32
+   */
+  const unsigned char spirv_bn_mask_fp32[] = {0x0D, 0x0E, 0x0F}; // Placeholder bytes
+  size_t spirv_bn_mask_fp32_size = sizeof(spirv_bn_mask_fp32);
+
+  /**
+   * @brief Prediction phase BN + ReLU activation fused shader fp32
+   */
+  const unsigned char spirv_bn_mask_relu_fp32[] = {0x0D, 0x0E, 0x0F}; // Placeholder bytes
+  size_t spirv_bn_mask_relu_fp32_size = sizeof(spirv_bn_mask_relu_fp32);
+
+  /**
+   * @brief Prediction phase batch normalization, scale bias. Mish activation fused shader fp32
+   */
+  const unsigned char spirv_bn_mask_mish_fp32[] = {0x0D, 0x0E, 0x0F}; // Placeholder bytes
+  size_t spirv_bn_mask_mish_fp32_size = sizeof(spirv_bn_mask_mish_fp32);
+
+  /**
+   * @brief Sum of channels fp32
+   */
+  const unsigned char spirv_sum_channels_fp32[] = {0x10, 0x11, 0x12}; // Placeholder bytes
+  size_t spirv_sum_channels_fp32_size = sizeof(spirv_sum_channels_fp32);
+
+  /**
+   * @brief Global Pooling fp32
+   */
+  const unsigned char spirv_global_pooling_channels_fp32[] = {0x13, 0x14, 0x15}; // Placeholder bytes
+  size_t spirv_global_pooling_channels_fp32_size = sizeof(spirv_global_pooling_channels_fp32);
+
+  /**
+   * @brief Value head pool channels fp32
+   */
+  const unsigned char spirv_value_head_pool_channels_fp32[] = {0x16, 0x17, 0x18}; // Placeholder bytes
+  size_t spirv_value_head_pool_channels_fp32_size = sizeof(spirv_value_head_pool_channels_fp32);
+
+  /**
+   * @brief Add channel bias NCHW fp32
+   */
+   const unsigned char spirv_add_channel_bias_nchw_fp32[] = {0x19, 0x1A, 0x1B}; // Placeholder bytes
+   size_t spirv_add_channel_bias_nchw_fp32_size = sizeof(spirv_add_channel_bias_nchw_fp32);
+
+   /**
+    * @brief Add channel bias NC with Relu activation fp32
+    */
+    const unsigned char spirv_add_channel_bias_nc_relu_fp32[] = {0x1C, 0x1D, 0x1E}; // Placeholder bytes
+    size_t spirv_add_channel_bias_nc_relu_fp32_size = sizeof(spirv_add_channel_bias_nc_relu_fp32);
+
+    /**
+     * @brief Add channel bias NC with Mish activation fp32
+     */
+    const unsigned char spirv_add_channel_bias_nc_mish_fp32[] = {0x1F, 0x20, 0x21}; // Placeholder bytes
+    size_t spirv_add_channel_bias_nc_mish_fp32_size = sizeof(spirv_add_channel_bias_nc_mish_fp32);
+
+    /**
+     * @brief Extract channel 0 from NCHW fp32
+     */
+    const unsigned char spirv_extract_channel0_nchw_fp32[] = {0x22, 0x23, 0x24}; // Placeholder bytes
+    size_t spirv_extract_channel0_nchw_fp32_size = sizeof(spirv_extract_channel0_nchw_fp32);
 }
 
 #endif
