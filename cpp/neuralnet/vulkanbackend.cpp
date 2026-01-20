@@ -12,12 +12,24 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../external/vulkan/vulkanshaders.h"
 #include "../neuralnet/nninterface.h"
+#include "../neuralnet/desc.h"
 
 struct ComputePipelines;
 struct Buffers;
 struct ScratchBuffers;
 struct ComputeHandleInternal;
 struct VulkanTuneParams;
+struct Trunk;
+struct ValueHead;
+struct PolicyHead;
+struct ConvLayer;
+struct MatmulLayer;
+struct BatchNormLayer;
+struct MatBiasLayer;
+struct ResidualBlock;
+struct GlobalPoolingResidualBlock;
+struct NestedResidualBlock;
+struct BlockStack;
 
 struct ComputeContext {
   const std::vector<uint32_t>* gIdx;
@@ -134,14 +146,25 @@ ComputeContext* NeuralNet::createComputeContext(
   enabled_t useNHWCMode,
   const LoadedModel* loadedModel
 ) {
+  // VkDeviceSize requiredMemorySize = getRequiredMemorySize(loadedModel);
   return new ComputeContext(
     nnXLen,
     nnYLen,
     useFP16Mode,
     useNHWCMode,
+    // requiredMemorySize,
     std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
+    
     logger
   );
+}
+
+VkDeviceSize getRequiredMemorySize(
+  const LoadedModel* loadedModel
+) {
+  // For simplicity, return a fixed size for now.
+  // In future, we can calculate based on model parameters.
+  return static_cast<VkDeviceSize>(512) * 1024 * 1024; // 512 MB
 }
 
 void NeuralNet::freeComputeContext(ComputeContext* context) {
@@ -198,55 +221,329 @@ struct Buffers {
   VulkanBuffer convWorkspace2;
 };
 
-struct ScratchBuffers {
-  const size_t batchXYFloatBytes;
-  const size_t batchFloatBytes;
-  const size_t batchXYBytes;
-  const size_t batchBytes;
-
-  const ComputeHandleInternal *handle;
-  SimpleAllocator<VulkanBuffer*>* allocator;
-
-  ScratchBuffers() = delete;
-  ScratchBuffers(const ScratchBuffers&) = delete;
-  ScratchBuffers& operator=(const ScratchBuffers&) = delete;
-
-  ScratchBuffers(
-    ComputeHandleInternal* handle_,
-    int maxBatchSize,
-    int nnXLen,
-    int nnYLen
-  ): 
-    batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
-    batchFloatBytes(sizeof(float) * maxBatchSize),
-    batchXYBytes(sizeof(uint8_t) * maxBatchSize * nnXLen * nnYLen),
-    batchBytes(sizeof(uint8_t) * maxBatchSize),
-    handle(handle_)
-  {
-    std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
-      return VkHelpers::createDeviceBuffer(
-        handle->vulkanDevice,
-        size,
-        nullptr
-      );
-    };
-    std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
-      VkHelpers::releaseVulkanBuffer(
-        handle->vulkanDevice,
-        buffer
-      );
-    };
-
-    allocator = new SimpleAllocator<VulkanBuffer *>(
-      allocFunc,
-      freeFunc
-    );
+/**
+ * @brief Copy of OpenCL ConvWorkspaceEltsNeeded struct
+ */
+struct ConvWorkspaceEltsNeeded {
+  size_t size1;
+  size_t size2;
+  ConvWorkspaceEltsNeeded()
+    :size1(0),size2(0)
+  {}
+  ConvWorkspaceEltsNeeded(size_t s1, size_t s2)
+    :size1(s1),size2(s2)
+  {}
+  static ConvWorkspaceEltsNeeded getMax(ConvWorkspaceEltsNeeded a, ConvWorkspaceEltsNeeded b) {
+    return ConvWorkspaceEltsNeeded(std::max(a.size1,b.size1),std::max(a.size2,b.size2));
   }
 };
 
 
+/**
+ * @brief Matrix Multiplication Layer
+ */
+struct MatmulLayer {
+  const std::string name;
+  const ComputeHandleInternal *handle;
+  const int inChannels;
+  const int outChannels;
 
-struct Model;
+  VulkanBuffer* matBuf = nullptr;
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+  MatmulLayer(
+    ComputeHandleInternal *handle_,
+    const MatMulLayerDesc* desc
+  ): 
+    name(desc->name),
+    handle(handle_),
+    inChannels(desc->inChannels),
+    outChannels(desc->outChannels)
+  {
+    if ( inChannels > 0 && outChannels > 0 ) {
+      assert(desc->weights.size() == static_cast<size_t>(inChannels) * static_cast<size_t>(outChannels));
+      std::vector<float> weights(desc->weights.size());
+      for ( int oc = 0 ; oc < outChannels ; oc++ ) {
+        for ( int ic = 0 ; ic < inChannels ; ic++ ) {
+          weights[oc * inChannels + ic] = desc->weights[ic * outChannels + oc];
+        }
+      }
+      VkResult res;
+      matBuf = VkHelpers::createDeviceBufferWithData(
+        handle->vulkanDevice,
+        sizeof(float) * weights.size(),
+        weights.data(),
+        true,
+        &res
+      );
+      CHECK_VK_MSG("Create MatmulLayer: " + name + " buffer", res);
+    }
+  }
+
+  ~MatmulLayer() {
+    if ( matBuf != nullptr ) {
+      VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, matBuf);
+      delete matBuf;
+      matBuf = nullptr;
+    }
+  }
+
+  /**
+   * @brief create command buffer and record for matmul layer
+   * @param batchSize 
+   * @param input 
+   * @param output 
+   */
+  void record(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    if ( commandBuffer != VK_NULL_HANDLE ) {
+      return; // Already recorded
+    }
+
+    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    descriptorSet = VkHelpers::allocateDescriptorSet(
+      handle->vulkanDevice,
+      handle->context->pipelinesPerDev.at(gpuId)->matmulTiledChw4x4x32Fp32.descriptorSetLayout,
+      &res
+    );
+    CHECK_VK_MSG("Allocate descriptor set for MatmulLayer: " + name, res);
+
+    // update descriptor set
+    std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        0,
+        input
+      ),
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        1,
+        matBuf
+      ),
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        2,
+        output
+      )
+    };
+    VkHelpers::updateDescriptorSets(
+      handle->vulkanDevice,
+      writeDescriptorSets
+    );
+
+    vkCmdBindPipeline(
+      commandBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      handle->context->pipelinesPerDev.at(gpuId)->matmulTiledChw4x4x32Fp32.pipeline
+    );
+    vkCmdBindDescriptorSets(
+      commandBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      handle->context->pipelinesPerDev.at(gpuId)->matmulTiledChw4x4x32Fp32.layout,
+      0, 
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+
+    uint32_t groupCountX = (outChannels + 31) / 32;
+    uint32_t groupCountY = batchSize;
+    vkCmdDispatch(
+      commandBuffer,
+      groupCountX,
+      groupCountY,
+      1
+    );
+
+    res = VkHelpers::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
+  }
+
+  /**
+   * @brief 
+   * @param batchSize 
+   * @param input 
+   * @param output 
+   */
+  void apply(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+
+  }
+};
+
+
+/**
+ * @brief Convolution Layer in Vulkan Backend
+ * Currently not support winograd and dilation
+ * Simple tiled convolution only except 1x1 conv.
+ * 1x1 conv implemented with matmul approach. Maybe replaced by cooperative matrix extension later.
+ */
+struct ConvLayer {
+};
+
+
+
+struct BatchNormLayer {
+
+};
+
+struct MatBiasLayer {
+
+};
+
+struct NormActConv {
+};
+
+/**
+ * @brief Basic Residual Block, Consist of two conv layers with BN and Activation and one skip connection
+ */
+struct ResidualBlock {
+};
+
+struct GlobalPoolingResidualBlock {
+
+};
+
+struct NestedResidualBlock {
+};
+
+// constexpr int ORDINARY_BLOCK_KIND = 0;
+// constexpr int GLOBAL_POOLING_BLOCK_KIND = 1;
+// constexpr int NESTED_BLOCK_KIND = 2;
+
+struct BlockStack {
+};
+
+struct Trunk {
+};
+
+struct PolicyHead {
+};
+
+struct ValueHead {
+};
+
+
+struct LoadedModel {
+  ModelDesc modelDesc;
+
+  LoadedModel(const std::string& fileName, const std::string& expectedSha256) {
+    ModelDesc::loadFromFileMaybeGZipped(fileName,modelDesc,expectedSha256);
+    modelDesc.applyScale8ToReduceActivations();
+  }
+
+  LoadedModel() = delete;
+  LoadedModel(const LoadedModel&) = delete;
+  LoadedModel& operator=(const LoadedModel&) = delete;
+};
+
+struct Model {
+  std::string modelName;
+  int modelVersion;
+  int maxBatchSize;
+  int nnXLen;
+  int nnYLen;
+  int numInputChannels;
+  int numInputGlobalChannels;
+  int numInputMetaChannels;
+  int numPolicyChannels;
+  int numValueChannels;
+  int numScoreValueChannels;
+  int numOwnershipChannels;
+
+  std::unique_ptr<Trunk> trunk;
+  std::unique_ptr<PolicyHead> policyHead;
+  std::unique_ptr<ValueHead> valueHead;
+  std::vector<VkCommandBuffer> commandBuffers;
+
+  Model() = delete;
+  Model(const Model&) = delete;
+  Model& operator=(const Model&) = delete;
+
+  Model(
+    ComputeHandleInternal *handle,
+    const ModelDesc& desc,
+    int maxBatchSize_,
+    int nnXLen_,
+    int nnYLen_
+  ) {
+    modelName = desc.name;
+    modelVersion = desc.modelVersion;
+    maxBatchSize = maxBatchSize_;
+    nnXLen = nnXLen_;
+    nnYLen = nnYLen_;
+
+    if ( nnXLen > NNPos::MAX_BOARD_LEN ) {
+      throw StringError(
+        Global::strprintf("Neural net X length %d exceeds maximum supported %d", nnXLen, NNPos::MAX_BOARD_LEN)
+      );
+    }
+
+    if ( nnYLen > NNPos::MAX_BOARD_LEN ) {
+      throw StringError(
+        Global::strprintf("Neural net Y length %d exceeds maximum supported %d", nnYLen, NNPos::MAX_BOARD_LEN)
+      );
+    }
+
+    numInputChannels = desc.numInputChannels;
+    numInputGlobalChannels = desc.numInputGlobalChannels;
+    numInputMetaChannels = desc.numInputMetaChannels;
+    numPolicyChannels = desc.numPolicyChannels;
+    numValueChannels = desc.numValueChannels;
+    numScoreValueChannels = desc.numScoreValueChannels;
+    numOwnershipChannels = desc.numOwnershipChannels;
+
+    // TODO: Check required workspaces sizes
+
+
+    // TODO: Check partial models constructor parameters
+    trunk = std::make_unique<Trunk>(handle, desc.trunk, nnXLen, nnYLen);
+    policyHead = std::make_unique<PolicyHead>(handle, desc.policyHead, nnXLen, nnYLen);
+    valueHead = std::make_unique<ValueHead>(handle, desc.valueHead, nnXLen, nnYLen);
+  }
+
+  ~Model() {
+
+  }
+
+  ConvWorkspaceEltsNeeded getWorkspaceElts(ComputeHandleInternal *handle) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    // TODO: Implement workspace calculation
+    return maxElts;
+  }
+
+  void record() {
+  //   std::vector<VkCommandBuffer> trunkCommandBuffers = trunk->record();
+  //   std::vector<VkCommandBuffer> policyHeadCommandBuffers = policyHead->record();
+  //   std::vector<VkCommandBuffer> valueHeadCommandBuffers = valueHead->record();
+  //   commandBuffers.emplace_back(trunkCommandBuffers.begin(), trunkCommandBuffers.end());
+  //   commandBuffers.emplace_back(policyHeadCommandBuffers.begin(), policyHeadCommandBuffers.end());
+  //   commandBuffers.emplace_back(valueHeadCommandBuffers.begin(), valueHeadCommandBuffers.end());
+  }
+
+  /**
+   * @brief Execute inference on the model.
+   */
+  void apply( ComputeHandleInternal* handle ) const {
+    VkSubmitInfo si = {};;
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+    si.pCommandBuffers = commandBuffers.data();
+    vkQueueSubmit(handle->queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(handle->queue);
+  }
+};
 
 struct ComputeHandle {
   std::unique_ptr<ComputeHandleInternal> handle;
@@ -260,24 +557,22 @@ struct ComputeHandle {
 
   ComputeHandle(
     ComputeContext* context,
-    const LoadedModel** loadedModel,
+    const LoadedModel* loadedModel,
     int maxBatchSize,
     int gpuIdx,
     bool inputUseNHWC_
   ): 
+    handle( std::make_unique<ComputeHandleInternal>(
+      context,
+      gpuIdx,
+      inputUseNHWC_,
+      context->usingNHWCMode == enabled_t::True ? true : false
+    )),
     nnXLen(context->nnXLen),
     nnYLen(context->nnYLen),
     policySize(NNPos::getPolicySize(context->nnXLen,context->nnYLen)),
     inputUseNHWC(inputUseNHWC_)
   {
-    bool useNHWC = context->usingNHWCMode == enabled_t::True ? true : false;
-    ComputeHandleInternal* handlePtr = new ComputeHandleInternal(
-      context,
-      gpuIdx,
-      inputUseNHWC_,
-      useNHWC
-    );
-    this->handle = std::unique_ptr<ComputeHandleInternal>(handlePtr);
   }
 
   ~ComputeHandle() {}
@@ -696,6 +991,54 @@ private :
     createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(NCHWPushConstantParams), extractChannel0NCHWFp32);
   }
 };
+
+struct ScratchBuffers {
+  const size_t batchXYFloatBytes;
+  const size_t batchFloatBytes;
+  const size_t batchXYBytes;
+  const size_t batchBytes;
+
+  const ComputeHandleInternal *handle;
+  SimpleAllocator<VulkanBuffer*>* allocator;
+
+  ScratchBuffers() = delete;
+  ScratchBuffers(const ScratchBuffers&) = delete;
+  ScratchBuffers& operator=(const ScratchBuffers&) = delete;
+
+  ScratchBuffers(
+    ComputeHandleInternal* handle_,
+    int maxBatchSize,
+    int nnXLen,
+    int nnYLen
+  ): 
+    batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
+    batchFloatBytes(sizeof(float) * maxBatchSize),
+    batchXYBytes(sizeof(uint8_t) * maxBatchSize * nnXLen * nnYLen),
+    batchBytes(sizeof(uint8_t) * maxBatchSize),
+    handle(handle_)
+  {
+    std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
+      return VkHelpers::createDeviceBuffer(
+        handle->vulkanDevice,
+        size,
+        false,
+        nullptr
+      );
+    };
+    std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
+      VkHelpers::releaseVulkanBuffer(
+        handle->vulkanDevice,
+        buffer
+      );
+    };
+
+    allocator = new SimpleAllocator<VulkanBuffer *>(
+      allocFunc,
+      freeFunc
+    );
+  }
+};
+
 
 void NeuralNet::globalInitialize() {
   static_assert(sizeof(int) >= 4, "");

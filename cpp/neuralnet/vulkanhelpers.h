@@ -26,6 +26,8 @@ struct VulkanDevice {
   VulkanDeviceInfo info;
   VkDevice device;
   VkQueue queue;
+  VkDescriptorPool descriptorPool;
+  VkCommandPool commandPool;
   VmaAllocator allocator;
   ~VulkanDevice();
 };
@@ -128,9 +130,92 @@ namespace VkHelpers {
     return layoutBinding;
   }
 
+  inline VkWriteDescriptorSet writeDescriptorSetBuffer(
+    VkDescriptorSet dstSet,
+    uint32_t dstBinding,
+    const VulkanBuffer *buffer,
+    VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    uint32_t descriptorCount = 1
+  ) {
+    VkDescriptorBufferInfo bufferInfo = {};
+    bufferInfo.buffer = buffer->buffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range = buffer->allocation->GetSize();
+    VkWriteDescriptorSet writeSet = {};
+    writeSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeSet.dstSet = dstSet;
+    writeSet.dstBinding = dstBinding;
+    writeSet.dstArrayElement = 0;
+    writeSet.descriptorType = descriptorType;
+    writeSet.descriptorCount = descriptorCount;
+    writeSet.pBufferInfo = &bufferInfo;
+    writeSet.pImageInfo = nullptr;
+    writeSet.pTexelBufferView = nullptr;
+    return writeSet;
+  }
+
+  VkDescriptorPool createDescriptorPool(
+    const VulkanDevice *device,
+    const std::vector<VkDescriptorPoolSize>& poolSizes,
+    uint32_t maxSets,
+    VkResult *result
+  );
+
+  VkDescriptorSet allocateDescriptorSet(
+    const VulkanDevice *device,
+    VkDescriptorSetLayout descriptorSetLayout,
+    VkResult *result
+  );
+
+  VkResult updateDescriptorSets(
+    const VulkanDevice *device,
+    const std::vector<VkWriteDescriptorSet>& writeDescriptorSets
+  );
+
+  VkCommandPool createCommandPool(
+    const VulkanDevice *device,
+    VkResult *result
+  );
+
+  VkCommandBuffer allocateCommandBuffer(
+    const VulkanDevice *device
+  );
+
+  VkResult beginCommandBuffer(
+    VkCommandBuffer commandBuffer
+  );
+
+  VkResult endCommandBuffer(
+    VkCommandBuffer commandBuffer
+  );
+
+  VkResult submitCommandBuffers(
+    const VulkanDevice *device,
+    const std::vector<VkCommandBuffer>& commandBuffers,
+    VkFence fence = VK_NULL_HANDLE
+  );
+
+  VkCommandBuffer beginSingleTimeCommandBuffer(
+    const VulkanDevice *device
+  );
+
+  void submitSingleTimeCommandBufferAndWaitIdle(
+    const VulkanDevice *device,
+    VkCommandBuffer commandBuffer
+  );
+
   VulkanBuffer* createDeviceBuffer(
     const VulkanDevice* device,
     size_t size,
+    bool readOnly,
+    VkResult *result
+  );
+
+  VulkanBuffer* createDeviceBufferWithData(
+    const VulkanDevice* device,
+    size_t size,
+    const void* data,
+    bool readOnly,
     VkResult *result
   );
 

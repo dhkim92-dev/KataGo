@@ -17,6 +17,19 @@ VulkanDevice::~VulkanDevice() {
   if (this->device != VK_NULL_HANDLE) {
     vkQueueWaitIdle(this->queue);
     vkDeviceWaitIdle(this->device);
+    vmaDestroyAllocator(this->allocator);
+
+    if (this->descriptorPool != VK_NULL_HANDLE) {
+      vkResetDescriptorPool(this->device, this->descriptorPool, 0);
+      vkDestroyDescriptorPool(this->device, this->descriptorPool, nullptr);
+      this->descriptorPool = VK_NULL_HANDLE;
+    }
+
+    if (this->commandPool != VK_NULL_HANDLE) {
+      vkResetCommandPool(this->device, this->commandPool, 0);
+      vkDestroyCommandPool(this->device, this->commandPool, nullptr);
+      this->commandPool = VK_NULL_HANDLE;
+    }
     vkDestroyDevice(this->device, nullptr);
     this->device = VK_NULL_HANDLE;
   }
@@ -322,6 +335,23 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   res = vmaCreateAllocator(&allocatorCI, &allocator);
   CHECK_VK_MSG("VMA create for device : " + deviceInfo.deviceName, res);
   vulkanDevice->allocator = allocator;
+
+  vulkanDevice->commandPool = VkHelpers::createCommandPool(
+    vulkanDevice,
+    &res
+  );
+  CHECK_VK_MSG("CreateCommandPool for device : " + deviceInfo.deviceName, res);
+
+  vulkanDevice->descriptorPool = VkHelpers::createDescriptorPool(
+    vulkanDevice,
+    {
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vulkanDevice->info.properties.limits.maxDescriptorSetStorageBuffers},
+    },
+    vulkanDevice->info.properties.limits.maxBoundDescriptorSets,
+    &res
+  );
+  CHECK_VK_MSG("CreateDescriptorPool for device : " + deviceInfo.deviceName, res);
+
   return vulkanDevice;
 }
 
@@ -403,9 +433,162 @@ VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
   return descriptorSetLayout;
 }
 
+VkDescriptorPool VkHelpers::createDescriptorPool(
+  const VulkanDevice *device,
+  const std::vector<VkDescriptorPoolSize>& poolSizes,
+  uint32_t maxSets,
+  VkResult *result
+) {
+  VkDescriptorPoolCreateInfo poolCI = {};
+  poolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  poolCI.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+  poolCI.pPoolSizes = poolSizes.data();
+  poolCI.maxSets = maxSets;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+  *result = vkCreateDescriptorPool(
+    device->device,
+    &poolCI,
+    nullptr,
+    &descriptorPool
+  );
+  return descriptorPool;
+}
+
+VkDescriptorSet VkHelpers::allocateDescriptorSet(
+  const VulkanDevice *device,
+  VkDescriptorSetLayout descriptorSetLayout,
+  VkResult *result
+) {
+  VkDescriptorSetAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  allocInfo.descriptorPool = device->descriptorPool;
+  allocInfo.descriptorSetCount = 1;
+  allocInfo.pSetLayouts = &descriptorSetLayout;
+
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  *result = vkAllocateDescriptorSets(
+    device->device,
+    &allocInfo,
+    &descriptorSet
+  );
+  return descriptorSet;
+}
+
+VkResult VkHelpers::updateDescriptorSets(
+  const VulkanDevice *device,
+  const std::vector<VkWriteDescriptorSet>& writeDescriptorSets
+) {
+  vkUpdateDescriptorSets(
+    device->device,
+    static_cast<uint32_t>(writeDescriptorSets.size()),
+    writeDescriptorSets.data(),
+    0,
+    nullptr
+  );
+  return VK_SUCCESS;
+}
+
+VkCommandPool VkHelpers::createCommandPool(
+  const VulkanDevice *device,
+  VkResult *result
+) {
+  VkCommandPoolCreateInfo poolCI = {};
+  poolCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  poolCI.queueFamilyIndex = 0; // TODO: select proper queue family index, this code assumes index 0 supports compute
+  poolCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  VkCommandPool commandPool = VK_NULL_HANDLE;
+  *result = vkCreateCommandPool(
+    device->device,
+    &poolCI,
+    nullptr,
+    &commandPool
+  );
+  return commandPool;
+}
+
+VkCommandBuffer VkHelpers::allocateCommandBuffer(
+  const VulkanDevice *device
+) {
+  VkCommandBufferAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandPool = device->commandPool;
+  allocInfo.commandBufferCount = 1;
+
+  VkCommandBuffer commandBuffer;
+  vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+  return commandBuffer;
+}
+
+VkResult VkHelpers::beginCommandBuffer(
+  VkCommandBuffer commandBuffer
+) {
+  VkCommandBufferBeginInfo beginInfo = {};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = 0; // Optional
+  beginInfo.pInheritanceInfo = nullptr; // Not required.
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+
+  return vkBeginCommandBuffer(commandBuffer, &beginInfo);
+}
+
+VkResult VkHelpers::endCommandBuffer(
+  VkCommandBuffer commandBuffer
+) {
+  return vkEndCommandBuffer(commandBuffer);
+}
+
+VkResult VkHelpers::submitCommandBuffers(
+  const VulkanDevice *device,
+  const std::vector<VkCommandBuffer>& commandBuffers,
+  VkFence fence
+) {
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+  submitInfo.pCommandBuffers = commandBuffers.data();
+  return vkQueueSubmit(device->queue, 1, &submitInfo, fence);
+}
+
+VkCommandBuffer VkHelpers::beginSingleTimeCommandBuffer(
+  const VulkanDevice *device
+) {
+  VkCommandBufferAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandPool = device->commandPool;
+  allocInfo.commandBufferCount = 1;
+
+  VkCommandBuffer commandBuffer;
+  vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+
+  VkCommandBufferBeginInfo beginInfo = {};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+  vkBeginCommandBuffer(commandBuffer, &beginInfo);
+  return commandBuffer;
+}
+
+void VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+  const VulkanDevice *device,
+  VkCommandBuffer commandBuffer
+) {
+  vkEndCommandBuffer(commandBuffer);
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &commandBuffer;
+  vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE);
+  vkQueueWaitIdle(device->queue);
+  vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
+}
+
+
 VulkanBuffer* VkHelpers::createDeviceBuffer(
   const VulkanDevice *device,
   size_t size,
+  bool readOnly,
   VkResult *result
 ) {
   VulkanBuffer *buffer = new VulkanBuffer();
@@ -413,8 +596,12 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
   buffer->buffer = VK_NULL_HANDLE;
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = size;
-  bufferCI.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bufferCI.size = static_cast<VkDeviceSize>(size);
+  if ( readOnly) {
+    bufferCI.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  } else {
+    bufferCI.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  }
   bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VmaAllocationCreateInfo allocCI = {};
   allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
@@ -428,6 +615,62 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
   );
   *result = res;
   return buffer;
+}
+
+VulkanBuffer* VkHelpers::createDeviceBufferWithData(
+  const VulkanDevice *device,
+  size_t size,
+  const void* data,
+  bool readOnly,
+  VkResult *result
+) {
+  VulkanBuffer* deviceBuffer = createDeviceBuffer(
+    device,
+    size,
+    readOnly,
+    result
+  );
+
+  if(*result != VK_SUCCESS) {
+    return nullptr;
+  }
+
+  VulkanBuffer* stagingBuffer = createStagingBuffer(
+    device,
+    size,
+    result
+  );
+
+  if(*result != VK_SUCCESS) {
+    releaseVulkanBuffer(device, deviceBuffer);
+    return nullptr;
+  }
+
+  // Copy data to staging buffer
+  memcpy(stagingBuffer->allocationInfo.pMappedData, data, size);
+  // Copy staging buffer to device buffer
+  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkBufferCopy copyRegion = {};
+  copyRegion.srcOffset = 0;
+  copyRegion.dstOffset = 0;
+   copyRegion.size = size;
+  vkCmdCopyBuffer(
+    commandBuffer,
+    stagingBuffer->buffer,
+    deviceBuffer->buffer,
+    1,
+    &copyRegion
+  );
+  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+    device,
+    commandBuffer
+  );
+  // Release staging buffer
+  VkHelpers::releaseVulkanBuffer(
+    device,
+    stagingBuffer
+  );
+  return deviceBuffer;
 }
 
 VulkanBuffer* VkHelpers::createStagingBuffer(
