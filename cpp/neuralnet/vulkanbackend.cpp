@@ -407,14 +407,13 @@ private:
  * Currently not support winograd and dilation
  * Simple tiled convolution only except 1x1 conv.
  * 1x1 conv implemented with matmul approach. Maybe replaced by cooperative matrix extension later.
+ * TODO: Support bn and activation fused conv layers
  */
 struct ConvLayer {
   const ComputeHandleInternal* handle;
   const std::string name;
   const int convYSize;
   const int convXSize;
-  const int convYRadius;
-  const int convXRadius;
   const int inChannels;
   const int outChannels;
   const int dilationY;
@@ -438,8 +437,6 @@ struct ConvLayer {
     name(desc->name),
     convYSize(desc->convYSize),
     convXSize(desc->convXSize),
-    convYRadius(desc->convYSize / 2),
-    convXRadius(desc->convXSize / 2),
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
     dilationY(desc->dilationY),
@@ -477,46 +474,8 @@ struct ConvLayer {
     return (convXSize == 3 || convXSize == 5) && (convYSize == 3 || convYSize == 5);
   }
 
-  void do5x5ConvBnReluFp32(
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-    if ( commandBuffer != VK_NULL_HANDLE ) {
-      return; // Already recorded
-    }
-
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
-    VkResult res;
-    descriptorSet = VkHelpers::allocateDescriptorSet(
-      handle->vulkanDevice,
-      pipelines->conv2d5x5BnFp32.descriptorSetLayout,
-      &res
-    );
-    CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
-
-    // update descriptor set
-    std::vector<VkWriteDescriptorSet> writeDescriptorSets = {};
-  }
-
-  void do3x3ConvBnReluFp32(
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-
-  }
-
-  void do1x1ConvFp32(
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-  }
-
   /**
-   * @brief create command buffer and record for conv layer
+   * @brief create command buffer and record for conv layer, only tiled conv now.
    * @param batchSize 
    * @param input 
    * @param output 
@@ -526,39 +485,101 @@ struct ConvLayer {
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
+    if (  commandBuffer != VK_NULL_HANDLE ) {
+      return; // Already recorded
+    }
+
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
     CHECK_VK_MSG("Begin command buffer for ConvLayer: " + name, res);
-    if ( convXSize == 5 && convYSize == 5 ) {
-      do5x5ConvFp32(
-        batchSize,
-        input,
+    
+    descriptorSet = VkHelpers::allocateDescriptorSet(
+      handle->vulkanDevice,
+      pipelines->conv2dFp32.descriptorSetLayout,
+      &res
+    );
+
+    vkCmdBindPipeline(
+      commandBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipelines->conv2dFp32.pipeline
+    );
+
+    // update descriptor set
+    std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        0,
+        input
+      ),
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        1,
+        filterBuf
+      ),
+      VkHelpers::writeDescriptorSetBuffer(
+        descriptorSet,
+        2,
         output
-      );
-    } else if ( convXSize == 3 && convYSize == 3 ) {
-      do3x3ConvFp32(
-        batchSize,
-        input,
-        output
-      );
-    } else if ( convXSize == 1 && convYSize == 1 ) {
-      do1x1ConvFp32(
-        batchSize,
-        input,
-        output
-      );
-      // 1x1 conv implemented with matmul approach
-    } else {
-      // TODO: Support batch tiled conv for other sizes
-      throw StringError("Vulkan ConvLayer: " + name + " unsupported conv size");
-    }
+      )
+    };
+    VkHelpers::updateDescriptorSets(
+      handle->vulkanDevice,
+      writeDescriptorSets
+    );
+    auto pushConstants = KatagoVulkan::Conv2DPushConstantParams();
+    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
+    pushConstants.inChannels = static_cast<uint32_t>(inChannels);
+    pushConstants.outChannels = static_cast<uint32_t>(outChannels);
+    pushConstants.filterH = static_cast<uint32_t>(convYSize);
+    pushConstants.filterW = static_cast<uint32_t>(convXSize);
+    pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
+    pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
+    vkCmdPushConstants(
+      commandBuffer,
+      pipelines->conv2dFp32.layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(KatagoVulkan::Conv2DPushConstantParams),
+      &pushConstants
+    );
+    vkCmdBindDescriptorSets(
+      commandBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipelines->conv2dFp32.layout,
+      0, 
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+
+    // Compute dispatch dimensions matching HLSL numthreads(TILE_N,TILE_M,1)
+    const uint32_t TILE_N = 8u; // local X (numthreads x)
+    const uint32_t TILE_M = 8u; // local Y (numthreads y)
+    uint32_t dispatchX = (pushConstants.nnXLen + TILE_N - 1u) / TILE_N;
+    uint32_t dispatchY = pushConstants.nnYLen;
+    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + TILE_M - 1u) / TILE_M;
+    uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
+
+    vkCmdDispatch(
+      commandBuffer,
+      dispatchX,
+      dispatchY,
+      dispatchZ
+    );
+
+    res = VkHelpers::endCommandBuffer(commandBuffer);
   }
 
   /**
-   * @brief 
+   * @brief return command buffer for conv layer
    * @param batchSize 
    * @param input 
    * @param output 
+   * @return VkCommandBuffer 
    */
   VkCommandBuffer apply(
     int batchSize,

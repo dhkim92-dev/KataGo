@@ -33,13 +33,11 @@ namespace KatagoVulkan {
    * @brief Push constant parameters for Conv2D operation. it makes easier to pass small parameters to shader.
    */
   struct Conv2DPushConstantParams {
-    uint32_t N; // Batch size
-    uint32_t inC; // Input channels
-    uint32_t inH; // Input height
-    uint32_t inW; // Input width
-    uint32_t outC; // Output channels
-    uint32_t outH; // Output height
-    uint32_t outW; // Output width
+    uint32_t batchSize; // Batch size
+    uint32_t inChannels; // Input channels
+    uint32_t outChannels; // Output channels
+    uint32_t nnYLen;
+    uint32_t nnXLen;
     uint32_t filterH; // Filter height
     uint32_t filterW; // Filter width
   };
