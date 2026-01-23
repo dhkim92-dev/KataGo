@@ -8,7 +8,6 @@
 #include "../core/global.h"
 #include "../core/logger.h"
 
-
 struct VulkanDeviceInfo {
   uint32_t deviceId;
   VkPhysicalDevice physicalDevice;
@@ -70,10 +69,16 @@ struct VulkanBuffer {
  */
 namespace VkHelpers {
 
+  size_t powerOf2ify(size_t size);
+
   std::string vkErrorToString(VkResult res);
+
   std::string vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type);
+
   VkInstance createVulkanInstance();
+
   std::vector<VulkanDeviceInfo> enumerateVulkanDevices(VkInstance instance,Logger* logger);
+
   VulkanDevice* createVulkanDevice(
     VkInstance instance,
     VulkanDeviceInfo deviceInfo,

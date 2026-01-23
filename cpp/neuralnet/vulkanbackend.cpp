@@ -591,8 +591,170 @@ struct ConvLayer {
   }
 };
 
+/**
+ * @brief Batch Normalization Layer
+ */
 struct BatchNormLayer {
 
+  ComputeHandleInternal *handle;
+
+  const std::string name;
+  const int numChannels;
+  const float epsilon;
+  const int activation;
+
+  const int nnXLen;
+  const int nnYLen;
+  const int nnXYLen;
+
+  VulkanBuffer* mergedScaleBuf;
+  VulkanBuffer* mergedBiasBuf;
+
+  static constexpr int nKernelDims = 2;
+  size_t globalSizes[nKernelDims];
+
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+  ~BatchNormLayer() {
+    if ( mergedScaleBuf != nullptr ) {
+      VkHelpers::releaseVulkanBuffer(mergedScaleBuf->device, mergedScaleBuf);
+      delete mergedScaleBuf;
+      mergedScaleBuf = nullptr;
+    }
+    if ( mergedBiasBuf != nullptr ) {
+      VkHelpers::releaseVulkanBuffer(mergedBiasBuf->device, mergedBiasBuf);
+      delete mergedBiasBuf;
+      mergedBiasBuf = nullptr;
+    }
+  }
+
+  BatchNormLayer(
+    ComputeHandleInternal *handle_,
+    const BatchNormLayerDesc* desc,
+    const ActivationLayerDesc* actDesc,
+    int nnXLen_,
+    int nnYLen_
+  ): 
+    handle(handle_),
+    name(desc->name),
+    numChannels(desc->numChannels),
+    epsilon(desc->epsilon),
+    activation(actDesc->activation),
+    nnXLen(nnXLen_),
+    nnYLen(nnYLen_),
+    nnXYLen(nnXLen_ * nnYLen_)
+  {
+    assert(desc->scale.size() == static_cast<size_t>(numChannels));
+    assert(desc->bias.size() == static_cast<size_t>(numChannels));
+    assert(desc->mean.size() == static_cast<size_t>(numChannels));
+    assert(desc->variance.size() == static_cast<size_t>(numChannels));
+    assert(desc->mergedScale.size() == static_cast<size_t>(numChannels));
+    assert(desc->mergedBias.size() == static_cast<size_t>(numChannels));
+
+    // Precompute merged scale and bias
+    std::vector<float> mergedScale = desc->mergedScale;
+    std::vector<float> mergedBias = desc->mergedBias;
+
+    VkResult res;
+
+    mergedBiasBuf = VkHelpers::createDeviceBufferWithData(
+      handle->vulkanDevice,
+      sizeof(float) * mergedBias.size(),
+      mergedBias.data(),
+      true,
+      &res
+    );
+    CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged bias buffer", res);
+
+    mergedScaleBuf = VkHelpers::createDeviceBufferWithData(
+      handle->vulkanDevice,
+      sizeof(float) * mergedScale.size(),
+      mergedScale.data(),
+      true,
+      &res
+    );
+    CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
+
+    globalSizes[0] = VkHelpers::powerOf2ify(static_cast<size_t>(nnXYLen));
+    globalSizes[1] = VkHelpers::powerOf2ify(static_cast<size_t>(numChannels));
+  }
+
+  void record(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    if ( commandBuffer != VK_NULL_HANDLE ) {
+      return; // Already recorded
+    }
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    KatagoVulkan::Pipeline targetPipeline;
+
+    switch ( activation ) {
+      case ACTIVATION_IDENTITY:
+        targetPipeline = pipelines->batchNormMaskFp32;
+        break;
+      case ACTIVATION_RELU:
+        targetPipeline = pipelines->batchNormMaskReluFp32;
+        break;
+      case ACTIVATION_MISH:
+        targetPipeline = pipelines->batchNormMaskMishFp32;
+        break;
+      default:
+        Global::fatalError("Unsupported activation in BatchNormLayer: " + name);
+    }
+
+    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for BatchNormLayer: " + name, res);
+    res = VkHelpers::endCommandBuffer(commandBuffer);
+
+    descriptorSet = VkHelpers::allocateDescriptorSet(
+      handle->vulkanDevice,
+      targetPipeline.descriptorSetLayout,
+      &res
+    );
+    CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
+
+    // update descriptor set
+    std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, output),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, mergedScaleBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, mergedBiasBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 4, mask)
+    };
+    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    KatagoVulkan::BatchNormMaskFp32Params pushConstants = {};
+    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
+    pushConstants.numChannels = static_cast<uint32_t>(numChannels);
+    pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+    vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskFp32Params), &pushConstants);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdDispatch(
+      commandBuffer,
+      static_cast<uint32_t>(globalSizes[0]),
+      static_cast<uint32_t>(globalSizes[1]),
+      1
+    );
+
+    CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
+  }
+
+  VkCommandBuffer apply(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    assert(commandBuffer != VK_NULL_HANDLE);
+    return commandBuffer;
+  }
 };
 
 struct MatBiasLayer {
@@ -601,6 +763,7 @@ struct MatBiasLayer {
 
 struct NormActConv {
 };
+
 
 /**
  * @brief Basic Residual Block, Consist of two conv layers with BN and Activation and one skip connection

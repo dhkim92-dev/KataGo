@@ -114,6 +114,25 @@ std::vector<VkDevice> VulkanContext::findDeviceIdsToUseWithName(const std::strin
   return deviceIds;
 }
 
+size_t VkHelpers::powerOf2ify(size_t size) {
+  if(size <= 2)
+    return size;
+  if(size <= 4)
+    return 4;
+  size_t s = 1;
+  while(s * 4 < size)
+    s *= 2;
+
+  if(s >= size)
+    return s;
+  if(s * 2 >= size)
+    return s * 2;
+  if(s * 3 >= size)
+    return s * 3;
+  assert(s * 4 >= size);
+  return s * 4;
+}
+
 std::string VkHelpers::vkErrorToString(VkResult res) {
   switch(res) {
     case VK_SUCCESS: return "VK_SUCCESS";

@@ -48,14 +48,26 @@ namespace KatagoVulkan {
    * @param K: cols of A and rows of B, inChannels
    * @param N: cols of B and C, outChannels
    * @param numBatchElts: number of batches
+   * @param cTranspose: whether output C is transposed or not
    */
-
   struct MatmulFp32Params {
     uint32_t M;  
     uint32_t K;  
     uint32_t N;
     uint32_t numBatchElts;
     uint32_t cTranspose; // Output Transpose
+  };
+
+  /**
+   * @brief Batch Normalization Mask Fp32 Push Constant Parameters 
+   * @param batchSize
+   * @param numChannels
+   * @param nnYLen
+   */
+  struct BatchNormMaskFp32Params {
+    uint32_t batchSize;
+    uint32_t numChannels;
+    uint32_t nnXYLen;
   };
 
   struct NCHWPushConstantParams {
