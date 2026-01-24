@@ -1701,7 +1701,7 @@ struct SGFMetadataEncoder {
     matBias1 = new MatBiasLayer(
       handle,
       &desc->bias1,
-      &desc->act1
+      desc->act1.activation
     );
     matmul2 = new MatmulLayer(
       handle,
@@ -1710,7 +1710,7 @@ struct SGFMetadataEncoder {
     matBias2 = new MatBiasLayer(
       handle,
       &desc->bias2,
-      &desc->act2
+      desc->act2.activation
     );
     matmul3 = new MatmulLayer(
       handle,
@@ -1747,6 +1747,12 @@ struct SGFMetadataEncoder {
     matmul2->record(batchSize, internalBuf1.buf, internalBuf2.buf);
     matBias2->record(batchSize, internalBuf2.buf);
     matmul3->record(batchSize, internalBuf2.buf, output);
+
+    commandBuffers.push_back( matmul1->commandBuffer );
+    commandBuffers.push_back( matBias1->commandBuffer );
+    commandBuffers.push_back( matmul2->commandBuffer );
+    commandBuffers.push_back( matBias2->commandBuffer );
+    commandBuffers.push_back( matmul3->commandBuffer );
   }
 
   /**
@@ -1762,7 +1768,105 @@ struct SGFMetadataEncoder {
 };
 
 struct Trunk {
+  ComputeHandleInternal *handle;
+  const std::string name;
+  const int modelVersion;
+  const int trunkNumChannels;
+  const int midNumChannels;
+  const int regularNumChannels;
+  const int gpoolNumChannels;
 
+  const int nnXLen;
+  const int nnYLen;
+
+  std::unique_ptr<ConvLayer> initialConv;
+  std::unique_ptr<MatmulLayer> initialMatmul;
+  std::unique_ptr<SGFMetadataEncoder> sgfMetadataEncoder;
+  BlockStack blockStack;
+  std::unique_ptr<BatchNormLayer> trunkTipBN;
+  std::vector<VkCommandBuffer> commandBuffers;
+
+  Trunk() = delete;
+  Trunk(const Trunk&) = delete;
+  Trunk& operator=(const Trunk&) = delete;
+
+  Trunk(
+    ComputeHandleInternal *handle_,
+    const TrunkDesc* desc,
+    int maxBatchSize_,
+    int nnXLen_,
+    int nnYLen_
+  ): 
+    handle(handle_),
+    name(desc->name),
+    modelVersion(desc->modelVersion),
+    trunkNumChannels(desc->trunkNumChannels),
+    midNumChannels(desc->midNumChannels),
+    regularNumChannels(desc->regularNumChannels),
+    gpoolNumChannels(desc->gpoolNumChannels),
+    nnXLen(nnXLen_),
+    nnYLen(nnYLen_),
+    blockStack( handle, desc->blocks, desc->numBlocks, trunkNumChannels, nnXLen_, nnYLen_) {
+  }
+
+  ~Trunk() {
+
+  }
+
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* inputGlobal,
+    VulkanBuffer* inputMeta,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  ) { 
+    if ( !commandBuffers.empty() ) {
+      return;
+    }
+
+    SizedBuf<VulkanBuffer*> trunkScratch( scratch->allocator, scratch->getBufSizeXY(trunkNumChannels) );
+
+    initialConv->record(batchSize, input, trunk);
+    initialMatmul->record(batchSize, inputGlobal, trunkScratch.buf);
+    VkCommandBuffer addChannelBiasCB = performAddChannelBiases(handle, trunk, trunkScratch.buf, trunkNumChannels, nnXLen * nnYLen);
+    VkCommandBuffer addChannelBiasCB2 = VK_NULL_HANDLE;
+    if ( sgfMetadataEncoder != nullptr ) {
+      SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
+      sgfMetadataEncoder->record(batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
+      addChannelBiasCB2 = performAddChannelBiases(handle, trunk, sgfEncodedMeta.buf, trunkNumChannels, nnXLen * nnYLen);
+    }
+    blockStack.record(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum);
+    trunkTipBN->record(batchSize, trunk, trunk, mask);
+
+    commandBuffers.push_back( initialConv->commandBuffer );
+    commandBuffers.push_back( initialMatmul->commandBuffer );
+    commandBuffers.push_back( addChannelBiasCB );
+    if ( sgfMetadataEncoder != nullptr ) {
+      commandBuffers.insert(commandBuffers.end(), sgfMetadataEncoder->commandBuffers.begin(), sgfMetadataEncoder->commandBuffers.end());
+      commandBuffers.push_back( addChannelBiasCB2 );
+    }
+    commandBuffers.insert(commandBuffers.end(), blockStack.commandBuffers.begin(), blockStack.commandBuffers.end());
+    commandBuffers.push_back( trunkTipBN->commandBuffer );
+  }
+
+  /**
+   * @brief Execute inference on the trunk. Only for debug now
+   */
+  void apply(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* inputGlobal,
+    VulkanBuffer* inputMeta,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  ) {
+    // TODO: changethis method to launch command buffers
+  }
 };
 
 struct PolicyHead {
@@ -1841,7 +1945,6 @@ struct Model {
     numOwnershipChannels = desc.numOwnershipChannels;
 
     // TODO: Check required workspaces sizes
-
 
     // TODO: Check partial models constructor parameters
     trunk = std::make_unique<Trunk>(handle, desc.trunk, nnXLen, nnYLen);
