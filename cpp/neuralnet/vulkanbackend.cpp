@@ -1646,10 +1646,120 @@ struct NestedResidualBlock {
     VulkanBuffer* mask,
     VulkanBuffer* maskSum
   ) {
+    SizedBuf<VulkanBuffer*> mid1(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
+    SizedBuf<VulkanBuffer*> mid2(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
 
+    if ( !commandBuffers.empty() ) {
+      Global::fatalError("NestedResidualBlock: " + name + " record called multiple times");
+    }
+    normActConv->record(batchSize, trunk, trunkScratch, mid1.buf , mask);
+    blocks->record(batchSize, scratch, mid1.buf, mid2.buf, mask, maskSum);
+    normActConv2->record(batchSize, mid2.buf, mid2.buf, trunkScratch, mask);
+    VkCommandBuffer pointWiseCB = performAddPointWise(handle, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen));
+    commandBuffers.push_back( normActConv->commandBuffers[0] );
+    commandBuffers.insert(commandBuffers.end(), blocks->commandBuffers.begin(), blocks->commandBuffers.end());
+    commandBuffers.insert(commandBuffers.end(), normActConv2->commandBuffers.begin(), normActConv2->commandBuffers.end());
+    commandBuffers.push_back( pointWiseCB );
+  }
+
+  void apply(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  ) {
+    // TODO: changethis method to launch command buffers
+    //       only for debug
+    if ( commandBuffers.empty() ) {
+      Global::fatalError("NestedResidualBlock: " + name + " apply called before record");
+    }
   }
 };
 
+struct SGFMetadataEncoder {
+  const std::string name;
+  MatmulLayer *matmul1;
+  MatBiasLayer *matBias1;
+  MatmulLayer *matmul2;
+  MatBiasLayer *matBias2;
+  MatmulLayer *matmul3;
+
+  std::vector<VkCommandBuffer> commandBuffers;
+
+  SGFMetadataEncoder(
+    ComputeHandleInternal *handle,
+    const SGFMetadataEncoderDesc* desc
+  ): 
+    name(desc->name)
+  {
+    matmul1 = new MatmulLayer(
+      handle,
+      &desc->mul1
+    );
+    matBias1 = new MatBiasLayer(
+      handle,
+      &desc->bias1,
+      &desc->act1
+    );
+    matmul2 = new MatmulLayer(
+      handle,
+      &desc->mul2
+    );
+    matBias2 = new MatBiasLayer(
+      handle,
+      &desc->bias2,
+      &desc->act2
+    );
+    matmul3 = new MatmulLayer(
+      handle,
+      &desc->mul3
+    );
+  }
+
+  ~SGFMetadataEncoder() {
+    delete matmul1;
+    delete matBias1;
+    delete matmul2;
+    delete matBias2;
+    delete matmul3;
+  }
+
+  SGFMetadataEncoder() = delete;
+  SGFMetadataEncoder(const SGFMetadataEncoder&) = delete;
+  SGFMetadataEncoder& operator=(const SGFMetadataEncoder&) = delete;
+
+  /**
+   * @brief record SGFMetadataEncoder
+   */
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    SizedBuf<VulkanBuffer*> internalBuf1(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
+    SizedBuf<VulkanBuffer*> internalBuf2(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
+
+    matmul1->record(batchSize, input, internalBuf1.buf);
+    matBias1->record(batchSize, internalBuf1.buf);
+    matmul2->record(batchSize, internalBuf1.buf, internalBuf2.buf);
+    matBias2->record(batchSize, internalBuf2.buf);
+    matmul3->record(batchSize, internalBuf2.buf, output);
+  }
+
+  /**
+   * @brief execute SGFMetadataEncoder, only for debug now
+   */
+  void apply(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+  }
+};
 
 struct Trunk {
 
