@@ -114,6 +114,10 @@ std::vector<VkDevice> VulkanContext::findDeviceIdsToUseWithName(const std::strin
   return deviceIds;
 }
 
+size_t VkHelpers::roundUpToMultiple(size_t size, size_t ofThis) {
+  return (size + ofThis - 1) / ofThis * ofThis;
+}
+
 size_t VkHelpers::powerOf2ify(size_t size) {
   if(size <= 2)
     return size;

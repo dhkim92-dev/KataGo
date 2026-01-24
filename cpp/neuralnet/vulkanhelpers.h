@@ -69,6 +69,8 @@ struct VulkanBuffer {
  */
 namespace VkHelpers {
 
+  size_t roundUpToMultiple(size_t size, size_t ofThis);
+
   size_t powerOf2ify(size_t size);
 
   std::string vkErrorToString(VkResult res);

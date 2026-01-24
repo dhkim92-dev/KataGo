@@ -11,8 +11,76 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
-#include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
+
+struct ComputeHandleInternal {
+  const ComputeContext* context;
+  const VulkanDevice* vulkanDevice;
+  VkDevice device;
+  VkQueue queue;
+
+  ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
+};
+
+/**
+ * @brief NN Block Stack structure
+ * @param handle: Compute handle
+ * @param blocks: vector of blocks
+ * @param commandBuffers: command buffers for all blocks
+ * @param numBlocks: number of blocks
+ * @param trunkNumChannels: number of channels in trunk
+ * @param nnXLen: neural net X length
+ * @param nnYLen: neural net Y length
+ */
+struct BlockStack {
+  ComputeHandleInternal *handle;
+  std::vector<std::pair<int, unique_ptr_void>> blocks;
+  std::vector<VkCommandBuffer> commandBuffers;
+  const int numBlocks;
+  const int trunkNumChannels;
+  const int nnXLen;
+  const int nnYLen;
+
+  /**
+   * @brief Constructor for BlockStack
+   * @param handle_: Compute handle
+   * @param descBlocks: vector of block descriptions
+   * @param numBlocks_: number of blocks
+   * @param trunkNumChannels_: number of channels in trunk
+   * @param nnXLen_: neural net X length
+   * @param nnYLen_: neural net Y length
+   */
+  BlockStack(
+    ComputeHandleInternal *handle,
+    const std::vector<std::pair<int, unique_ptr_void>>& descBlocks,
+    int numBlocks_,
+    int trunkNumChannels_,
+    int nnXLen_,
+    int nnYLen_
+  );
+  BlockStack() = delete;
+  BlockStack(const BlockStack&) = delete;
+  BlockStack& operator=(const BlockStack&) = delete;
+  ~BlockStack();
+
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  );
+
+  void apply(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  );
+};
 
 /**
  * @brief Vulkan Compute  Pipeline structure
@@ -23,7 +91,8 @@ namespace KatagoVulkan {
 
   /**
    * @brief Will be used to tune various parameters for different devices
-   *        Not implemented yet. support in future. 
+   *        Not implemented yet. support in future. Maybe profiled tuning will be adopted.
+   *        Becuase vulkan can not decide optimal parameters at runtime like OpenCL.
    */
   struct VulkanTuneParams {
 
@@ -68,6 +137,38 @@ namespace KatagoVulkan {
     uint32_t batchSize;
     uint32_t numChannels;
     uint32_t nnXYLen;
+  };
+
+  /**
+   * @brief MatBias Push Constant Parameters
+   */
+  struct MatBiasFp32Params {
+    uint32_t batchSize;
+    uint32_t numChannels;
+  };
+
+   /**
+    * @brief Global Pooling Channels Push Constant Parameters
+    */
+   struct GlobalPoolingChannelsParams {
+    uint32_t batchSize;
+    uint32_t gpoolChannels;
+    uint32_t nnXYLen;
+   };
+
+   /**
+    *  @brief Add Point Wise Push Constant Parameters
+    **/
+  struct AddPointWiseParams {
+    uint32_t totalSize;
+  };
+
+  /**
+   * @brief Add Channel Bias NCHW Push Constant Parameters
+   */
+  struct AddChannelBiasNCHWParams {
+    uint32_t nnXYLen;
+    uint32_t ncSize;
   };
 
   struct NCHWPushConstantParams {
@@ -126,8 +227,8 @@ namespace KatagoVulkan {
     // Element wise operations
     Pipeline sumChannelsFp32;
     Pipeline addChannelBiasNCHWFp32;
-    Pipeline addChannelBiasNCReluFp32;
-    Pipeline addChannelBiasNCMishFp32;
+    Pipeline addChannelBiasNCHWReluFp32;
+    Pipeline addChannelBiasNCHWMishFp32;
     Pipeline extractChannel0NCHWFp32;
 
     ComputePipelines(VkDevice device_);
@@ -241,12 +342,12 @@ namespace KatagoVulkan {
     /**
      * @brief Create a Add Channel Bias NC + ReLU Fp32 object
      */
-    void createAddChannelBiasNCReluFp32();
+    void createAddChannelBiasNCHWReluFp32();
 
     /**
      * @brief Create a Add Channel Bias NC + Mish Fp32 object
      */
-    void createAddChannelBiasNCMishFp32();
+    void createAddChannelBiasNCHWMishFp32();
     
     /**
      * @brief Create a Extract Channel 0 NCHW Fp32 object
