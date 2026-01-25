@@ -140,6 +140,15 @@ namespace KatagoVulkan {
   };
 
   /**
+   * @brief Sum Channels Fp32 Push Constant Parameters
+   */
+  struct SumChannelsParams {
+    uint32_t batchSize;
+    uint32_t numChannels;
+    uint32_t nnXYLen;
+  };
+
+  /**
    * @brief MatBias Push Constant Parameters
    */
   struct MatBiasFp32Params {
@@ -169,6 +178,12 @@ namespace KatagoVulkan {
   struct AddChannelBiasNCHWParams {
     uint32_t nnXYLen;
     uint32_t ncSize;
+  };
+
+  struct ExtractChannel0NCHWParams {
+    uint32_t batchSize;
+    uint32_t numInputChannels;
+    uint32_t nnXYLen;
   };
 
   struct NCHWPushConstantParams {

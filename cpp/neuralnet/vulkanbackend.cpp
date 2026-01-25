@@ -10,6 +10,8 @@
 #include "../core/global.h"
 #include "../core/simpleallocator.h"
 #include "../neuralnet/nninterface.h"
+#include "../neuralnet/modelversion.h"
+#include "../neuralnet/sgfmetadata.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/vulkanbackend.h"
 #include "../neuralnet/vulkanhelpers.h"
@@ -1045,6 +1047,65 @@ struct NormActConv {
   NormActConv(const NormActConv&) = delete;
   NormActConv& operator=(const NormActConv&) = delete;
 };
+
+VkCommandBuffer performExtractChannel0NCHW(
+  ComputeHandleInternal *handle,
+  VulkanBuffer* input,
+  VulkanBuffer* output,
+  int batchSIze,
+  int numInputChannels,
+  int nnXYLen
+) {
+  static constexpr int nKernelDims = 2;
+  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  KatagoVulkan::Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
+  VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+  CHECK_VK_MSG("Begin command buffer for ExtractChannel0NCHW", res);
+  VkDescriptorSet descriptorSet = VkHelpers::allocateDescriptorSet(
+    handle->vulkanDevice,
+    targetPipeline.descriptorSetLayout,
+    &res
+  );
+  CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0NCHW", res);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
+  vkCmdBindDescriptorSets(
+    commandBuffer,
+    VK_PIPELINE_BIND_POINT_COMPUTE,
+    targetPipeline.layout,
+    0, 
+    1,
+    &descriptorSet,
+    0,
+    nullptr
+  );
+  // update descriptor set
+  std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, output)
+  };
+  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  KatagoVulkan::ExtractChannel0NCHWParams pushConstants = {};
+  pushConstants.numInputChannels = static_cast<uint32_t>(numInputChannels);
+  pushConstants.batchSize = static_cast<uint32_t>(batchSIze);
+  pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+  vkCmdPushConstants(
+    commandBuffer,
+    targetPipeline.layout,
+    VK_SHADER_STAGE_COMPUTE_BIT,
+    0,
+    sizeof(KatagoVulkan::ExtractChannel0NCHWParams),
+    &pushConstants
+  );
+  uint32_t globalSizes[nKernelDims] = {
+    static_cast<uint32_t>( VkHelpers::powerOf2ify(static_cast<size_t>(nnXYLen)) ),
+    static_cast<uint32_t>( VkHelpers::powerOf2ify(static_cast<size_t>(batchSIze)) )
+  };
+  vkCmdDispatch(commandBuffer, globalSizes[0], globalSizes[1], 1);
+  VkHelpers::endCommandBuffer(commandBuffer);
+  return commandBuffer;
+}
 
 VkCommandBuffer performAddChannelBiases(
   ComputeHandleInternal *handle,
@@ -2113,19 +2174,73 @@ struct LoadedModel {
   LoadedModel& operator=(const LoadedModel&) = delete;
 };
 
+/**
+ * @brief Record command buffer to compute mask sums
+ * @param handle Compute handle
+ * @param batchSize Batch size
+ * @param nnXLen Neural net X length
+ * @param nnYLen Neural net Y length
+ * @param mask Input mask buffer
+ * @param maskSum Output mask sum buffer
+ */
+VkCommandBuffer computeMaskSums(
+  ComputeHandleInternal *handle,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  VulkanBuffer* mask,
+  VulkanBuffer* maskSum
+) {
+  static constexpr int nKernelDims = 3;
+  uint32_t localSizes[nKernelDims] = {1,1,1}; // TODO: tune local sizes
+  uint32_t globalSize[nKernelDims] = {1, 1, VkHelpers::roundUpToMultiple(batchSize, localSizes[2])};
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+
+  int numChannels = 1;
+  int nnXYLen = nnXLen * nnYLen;
+  // Determine GPU and select appropriate compute pipeline
+  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  KatagoVulkan::Pipeline targetPipeline = pipelines->sumChannelsFp32;
+  commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+  VkHelpers::beginCommandBuffer(commandBuffer);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
+  VkResult res = VK_SUCCESS;
+  VkDescriptorSet descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+  CHECK_VK_MSG("Allocate compute mask sum descriptor set", res);
+  std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
+    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, mask),
+    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, maskSum),
+  };
+  vkUpdateDescriptorSets(handle->vulkanDevice->device, static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
+  vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+  KatagoVulkan::SumChannelsParams pushConstants;
+  pushConstants.batchSize = batchSize;
+  pushConstants.numChannels = numChannels;
+  pushConstants.nnXYLen = nnXYLen;
+  vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::SumChannelsParams), &pushConstants);
+  vkCmdDispatch(commandBuffer, globalSize[0], globalSize[1], globalSize[2]);
+  VkHelpers::endCommandBuffer(commandBuffer);
+  return commandBuffer;
+}
+
+/**
+ * @brief Model structure containing trunk and heads
+ */
 struct Model {
   std::string modelName;
-  int modelVersion;
-  int maxBatchSize;
-  int nnXLen;
-  int nnYLen;
-  int numInputChannels;
-  int numInputGlobalChannels;
-  int numInputMetaChannels;
-  int numPolicyChannels;
-  int numValueChannels;
-  int numScoreValueChannels;
-  int numOwnershipChannels;
+  ComputeHandleInternal *handle;
+  const int modelVersion;
+  const int maxBatchSize;
+  const int nnXLen;
+  const int nnYLen;
+  const int numInputChannels;
+  const int numInputGlobalChannels;
+  const int numInputMetaChannels;
+  const int numPolicyChannels;
+  const int numValueChannels;
+  const int numScoreValueChannels;
+  const int numOwnershipChannels;
 
   std::unique_ptr<Trunk> trunk;
   std::unique_ptr<PolicyHead> policyHead;
@@ -2142,12 +2257,20 @@ struct Model {
     int maxBatchSize_,
     int nnXLen_,
     int nnYLen_
-  ) {
-    modelName = desc.name;
-    modelVersion = desc.modelVersion;
-    maxBatchSize = maxBatchSize_;
-    nnXLen = nnXLen_;
-    nnYLen = nnYLen_;
+  ): 
+    modelName(desc.name),
+    modelVersion(desc.modelVersion),
+    maxBatchSize(maxBatchSize_),
+    numInputChannels(desc.numInputChannels),
+    numInputGlobalChannels(desc.numInputGlobalChannels),
+    numInputMetaChannels(desc.numInputMetaChannels),
+    numPolicyChannels(desc.numPolicyChannels),
+    numValueChannels(desc.numValueChannels),
+    numScoreValueChannels(desc.numScoreValueChannels),
+    numOwnershipChannels(desc.numOwnershipChannels),
+    nnXLen(nnXLen_),
+    nnYLen(nnYLen_)
+  {
 
     if ( nnXLen > NNPos::MAX_BOARD_LEN ) {
       throw StringError(
@@ -2161,16 +2284,28 @@ struct Model {
       );
     }
 
-    numInputChannels = desc.numInputChannels;
-    numInputGlobalChannels = desc.numInputGlobalChannels;
-    numInputMetaChannels = desc.numInputMetaChannels;
-    numPolicyChannels = desc.numPolicyChannels;
-    numValueChannels = desc.numValueChannels;
-    numScoreValueChannels = desc.numScoreValueChannels;
-    numOwnershipChannels = desc.numOwnershipChannels;
+    int numFeatures = NNModelVersion::getNumSpatialFeatures(modelVersion);
+
+    if ( numFeatures != numInputChannels ) {
+      throw StringError(
+        Global::strprintf("Model version %d expects %d input channels but model provides %d", modelVersion, numFeatures, numInputChannels)
+      );
+    }
+
+    int numGlobalFeatures = NNModelVersion::getNumGlobalFeatures(modelVersion);
+    if ( numGlobalFeatures != numInputGlobalChannels ) {
+      throw StringError(
+        Global::strprintf("Model version %d expects %d global input channels but model provides %d", modelVersion, numGlobalFeatures, numInputGlobalChannels)
+      );
+    }
+
+    if ( numInputMetaChannels > 0 && numInputMetaChannels != SGFMetadata::METADATA_INPUT_NUM_CHANNELS ) {
+      throw StringError(
+        Global::strprintf("Model version %d expects %d metadata input channels but model provides %d", modelVersion, SGFMetadata::METADATA_INPUT_NUM_CHANNELS, numInputMetaChannels)
+      );
+    }
 
     // TODO: Check required workspaces sizes
-
     // TODO: Check partial models constructor parameters
     trunk = std::make_unique<Trunk>(handle, desc.trunk, nnXLen, nnYLen);
     policyHead = std::make_unique<PolicyHead>(handle, desc.policyHead, nnXLen, nnYLen);
@@ -2181,31 +2316,42 @@ struct Model {
 
   }
 
-  ConvWorkspaceEltsNeeded getWorkspaceElts(ComputeHandleInternal *handle) const {
-    ConvWorkspaceEltsNeeded maxElts;
-    // TODO: Implement workspace calculation
-    return maxElts;
-  }
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* inputGlobal,
+    VulkanBuffer* inputMeta,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* trunkBuf,
+    VulkanBuffer* policyPass,
+    VulkanBuffer* policy,
+    VulkanBuffer* value,
+    VulkanBuffer* scoreValue,
+    VulkanBuffer* ownership
+  ) {
+    if ( !commandBuffers.empty() ) {
+      return;
+    }
 
-  void record() {
-  //   std::vector<VkCommandBuffer> trunkCommandBuffers = trunk->record();
-  //   std::vector<VkCommandBuffer> policyHeadCommandBuffers = policyHead->record();
-  //   std::vector<VkCommandBuffer> valueHeadCommandBuffers = valueHead->record();
-  //   commandBuffers.emplace_back(trunkCommandBuffers.begin(), trunkCommandBuffers.end());
-  //   commandBuffers.emplace_back(policyHeadCommandBuffers.begin(), policyHeadCommandBuffers.end());
-  //   commandBuffers.emplace_back(valueHeadCommandBuffers.begin(), valueHeadCommandBuffers.end());
+    VkCommandBuffer extractChannel0CB = performExtractChannel0NCHW(handle, input, mask, batchSize, numInputChannels, nnXLen * nnYLen);
+    VkCommandBuffer computeMaskSumCB = computeMaskSums(handle, batchSize, nnXLen, nnYLen, mask, maskSum);
+    trunk->record(batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum);
+    policyHead->record(batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy);
+    valueHead->record(batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership); 
+    commandBuffers.push_back( extractChannel0CB );
+    commandBuffers.push_back( computeMaskSumCB );
+    commandBuffers.insert(commandBuffers.end(), trunk->commandBuffers.begin(), trunk->commandBuffers.end());
+    commandBuffers.insert(commandBuffers.end(), policyHead->commandBuffers.begin(), policyHead->commandBuffers.end());
+    commandBuffers.insert(commandBuffers.end(), valueHead->commandBuffers.begin(), valueHead ->commandBuffers.end()); 
   }
 
   /**
-   * @brief Execute inference on the model.
+   * run all command buffers to perform inference.
    */
-  void apply( ComputeHandleInternal* handle ) const {
-    VkSubmitInfo si = {};;
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
-    si.pCommandBuffers = commandBuffers.data();
-    vkQueueSubmit(handle->queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(handle->queue);
+  void apply() {
+
   }
 };
 
