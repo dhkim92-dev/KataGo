@@ -1865,14 +1865,239 @@ struct Trunk {
     VulkanBuffer* mask,
     VulkanBuffer* maskSum
   ) {
-    // TODO: changethis method to launch command buffers
   }
 };
 
 struct PolicyHead {
+  ComputeHandleInternal *handle;
+  const std::string name;
+  const int modelVersion;
+  const int nnXLen;
+  const int nnYLen;
+  const int p1Channels;
+  const int g1Channels;
+  const int p2Channels;
+
+  std::unique_ptr<ConvLayer> p1Conv;
+  std::unique_ptr<ConvLayer> g1Conv;
+  std::unique_ptr<BatchNormLayer> g1BN;
+  std::unique_ptr<MatmulLayer> gpoolToBiasMul;
+  std::unique_ptr<BatchNormLayer> p1BN;
+  std::unique_ptr<ConvLayer> p2Conv;
+  std::unique_ptr<MatmulLayer> gpoolToPassMul;
+  std::unique_ptr<MatBiasLayer> gpoolToPassBias;
+  std::unique_ptr<MatmulLayer> gpoolToPassMul2;
+
+  std::vector<VkCommandBuffer> commandBuffers;
+
+  PolicyHead() = delete;
+  PolicyHead(const PolicyHead&) = delete;
+  PolicyHead& operator=(const PolicyHead&) = delete;
+
+  PolicyHead(
+    ComputeHandleInternal *handle,
+    const PolicyHeadDesc* desc,
+    int nnXLen_,
+    int nnYLen_
+  ): 
+    handle(handle),
+    name(desc->name),
+    modelVersion(desc->modelVersion),
+    nnXLen(nnXLen_),
+    nnYLen(nnYLen_),
+    p1Channels(desc->p1Conv.outChannels),
+    g1Channels(desc->g1Conv.outChannels),
+    p2Channels(desc->p2Conv.outChannels)
+  {
+    p1Conv = std::make_unique<ConvLayer>(handle, &desc->p1Conv, nnXLen, nnYLen);
+    g1Conv = std::make_unique<ConvLayer>(handle, &desc->g1Conv, nnXLen, nnYLen);
+    g1BN = std::make_unique<BatchNormLayer>(handle, &desc->g1BN, &desc->g1Activation, nnXLen, nnYLen);
+    gpoolToBiasMul = std::make_unique<MatmulLayer>(handle, &desc->gpoolToBiasMul);
+    p1BN = std::make_unique<BatchNormLayer>(handle, &desc->p1BN, &desc->p1Activation, nnXLen, nnYLen);
+    p2Conv = std::make_unique<ConvLayer>(handle, &desc->p2Conv, nnXLen, nnYLen);
+    gpoolToPassMul = std::make_unique<MatmulLayer>(handle, &desc->gpoolToPassMul);
+    gpoolToPassBias = std::make_unique<MatBiasLayer>(handle, &desc->gpoolToPassBias, desc->passActivation.activation);
+    gpoolToPassMul2 = std::make_unique<MatmulLayer>(handle, &desc->gpoolToPassMul2);
+  }
+
+  ~PolicyHead() {
+
+  }
+
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* policyPass,
+    VulkanBuffer* policy
+  ) {
+    if (  !commandBuffers.empty() ) {
+      return;
+    }
+
+    SizedBuf<VulkanBuffer*> p1ConvOut(scratch->allocator, scratch->getBufSizeXY(p1Channels));
+    SizedBuf<VulkanBuffer*> gpoolOut(scratch->allocator, scratch->getBufSizeXY(g1Channels));
+    SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(g1Channels * 3));
+    SizedBuf<VulkanBuffer*> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+    SizedBuf<VulkanBuffer*> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+
+    p1Conv->record(batchSize, trunk, p1ConvOut.buf);
+    g1Conv->record(batchSize, trunk, gpoolOut.buf);
+    g1BN->record(batchSize, gpoolOut.buf, gpoolOut.buf, mask);
+    VkResult res;;
+    VkCommandBuffer gpoolCB = performGpoolMask(handle,gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res);
+    CHECK_VK_MSG("Record PolicyHead gpool mask", res);
+    gpoolToBiasMul->record(batchSize, gpoolConcat.buf, gpoolBias.buf);
+    VkCommandBuffer adChannelBiasCB = performAddChannelBiases(handle, p1ConvOut.buf, gpoolBias.buf, p1Channels * batchSize, nnXLen * nnYLen);
+    p1BN->record(batchSize, p1ConvOut.buf, p1ConvOut.buf, mask);
+    p2Conv->record(batchSize, p1ConvOut.buf, p1ConvOut.buf);
+
+    if ( modelVersion >= 15 ) {
+      gpoolToPassMul->apply(batchSize, gpoolConcat.buf, p1Pass.buf);
+      gpoolToPassBias->apply(batchSize, p1Pass.buf);
+      gpoolToPassMul2->apply(batchSize, p1Pass.buf, policyPass);
+    } else {
+      gpoolToPassMul->record(batchSize, gpoolConcat.buf, policyPass);
+    }
+
+    commandBuffers.push_back( p1Conv->commandBuffer );
+    commandBuffers.push_back( g1Conv->commandBuffer );
+    commandBuffers.push_back( g1BN->commandBuffer );
+    commandBuffers.push_back( gpoolCB );
+    commandBuffers.push_back( gpoolToBiasMul->commandBuffer );
+    commandBuffers.push_back( adChannelBiasCB );
+    commandBuffers.push_back( p1BN->commandBuffer );
+    commandBuffers.push_back( p2Conv->commandBuffer );
+    if ( modelVersion >= 15 ) {
+      commandBuffers.push_back( gpoolToPassMul->commandBuffer );
+      commandBuffers.push_back( gpoolToPassBias->commandBuffer );
+      commandBuffers.push_back( gpoolToPassMul2->commandBuffer );
+    } else {
+      commandBuffers.push_back( gpoolToPassMul->commandBuffer );
+    }
+  }
+
+  /*
+  * @brief Execute inference on the policy head. Only for debug now
+  */
+  void apply() {
+
+  }
 };
 
 struct ValueHead {
+  ComputeHandleInternal *handle;
+  const std::string name;
+  const int modelVersion;
+  const int nnXLen;
+  const int nnYLen;
+  const int v1Channels;
+  const int v2Channels;
+  const int valueChannels;
+  const int scoreValueChannels;
+  const int ownershipChannels;
+
+  std::unique_ptr<ConvLayer> v1Conv;
+  std::unique_ptr<BatchNormLayer> v1BN;
+  std::unique_ptr<MatmulLayer> v2Mul;
+  std::unique_ptr<MatBiasLayer> v2Bias;
+  std::unique_ptr<MatmulLayer> v3Mul;
+  std::unique_ptr<MatBiasLayer> v3Bias;
+  std::unique_ptr<MatmulLayer> sv3Mul;
+  std::unique_ptr<MatBiasLayer> sv3Bias;
+  std::unique_ptr<ConvLayer> vOwnershipConv;
+
+  std::vector<VkCommandBuffer> commandBuffers;
+
+  ValueHead() = delete;
+  ValueHead(const ValueHead&) = delete;
+  ValueHead& operator=(const ValueHead&) = delete;
+
+  ValueHead(
+    ComputeHandleInternal *handle_,
+    const ValueHeadDesc* desc,
+    int nnXLen_,
+    int nnYLen_
+  ): 
+    handle(handle_),
+    name(desc->name),
+    modelVersion(desc->modelVersion),
+    nnXLen(nnXLen_),
+    nnYLen(nnYLen_),
+    v1Channels(desc->v1Conv.outChannels),
+    v2Channels(desc->v2Mul.outChannels),
+    valueChannels(desc->v3Mul.outChannels),
+    scoreValueChannels(desc->sv3Mul.outChannels),
+    ownershipChannels(desc->vOwnershipConv.outChannels)
+  {
+    v1Conv = std::make_unique<ConvLayer>(handle, &desc->v1Conv, nnXLen, nnYLen);
+    v1BN = std::make_unique<BatchNormLayer>(handle, &desc->v1BN, &desc->v1Activation, nnXLen, nnYLen);
+    v2Mul = std::make_unique<MatmulLayer>(handle, &desc->v2Mul);
+    v2Bias = std::make_unique<MatBiasLayer>(handle, &desc->v2Bias, desc->v2Activation.activation);
+    v3Mul = std::make_unique<MatmulLayer>(handle, &desc->v3Mul);
+    v3Bias = std::make_unique<MatBiasLayer>(handle, &desc->v3Bias, ACTIVATION_IDENTITY);
+    sv3Mul = std::make_unique<MatmulLayer>(handle, &desc->sv3Mul);
+    sv3Bias = std::make_unique<MatBiasLayer>(handle, &desc->sv3Bias, ACTIVATION_IDENTITY);
+    vOwnershipConv = std::make_unique<ConvLayer>(handle, &desc->vOwnershipConv, nnXLen, nnYLen);
+  }
+
+  ~ValueHead() {
+
+  }
+
+  void record(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* value,
+    VulkanBuffer* scoreValue,
+    VulkanBuffer* ownership
+  ) {
+    SizedBuf<VulkanBuffer*> v1Out(scratch->allocator, scratch->getBufSizeXY(v1Channels));
+    SizedBuf<VulkanBuffer*> v1Mean(scratch->allocator, scratch->getBufSizeFloat(v1Channels*3));
+    SizedBuf<VulkanBuffer*> v2Out(scratch->allocator, scratch->getBufSizeFloat(valueChannels));
+
+    v1Conv->record(batchSize, trunk, v1Out.buf);
+    v1BN->record(batchSize, v1Out.buf, v1Out.buf, mask);
+    VkResult res;;
+    VkCommandBuffer gpoolCB = performValueHeadPool(handle, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, nnXLen * nnYLen);
+
+    v2Mul->record(batchSize, v1Mean.buf, v2Out.buf);
+    v2Bias->record(batchSize, v2Out.buf);
+    v3Mul->record(batchSize, v2Out.buf, value);
+    v3Bias->record(batchSize, scoreValue);
+    sv3Mul->record(batchSize, v2Out.buf, scoreValue);
+    sv3Bias->record(batchSize, scoreValue);
+    vOwnershipConv->record(batchSize, v1Out.buf, ownership);
+
+    commandBuffers.push_back( v1Conv->commandBuffer );
+    commandBuffers.push_back( v1BN->commandBuffer );
+    commandBuffers.push_back( gpoolCB );
+    commandBuffers.push_back( v2Mul->commandBuffer );
+    commandBuffers.push_back( v2Bias->commandBuffer );
+    commandBuffers.push_back( v3Mul->commandBuffer );
+    commandBuffers.push_back( v3Bias->commandBuffer );
+    commandBuffers.push_back( sv3Mul->commandBuffer );
+    commandBuffers.push_back( sv3Bias->commandBuffer );
+    commandBuffers.push_back( vOwnershipConv->commandBuffer );
+  }
+
+  void apply(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* value,
+    VulkanBuffer* scoreValue,
+    VulkanBuffer* ownership
+  ) {
+
+  }
 };
 
 struct LoadedModel {
