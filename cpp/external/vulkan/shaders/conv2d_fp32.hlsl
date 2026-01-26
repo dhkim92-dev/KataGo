@@ -4,7 +4,10 @@
 // Push constants must follow Conv2dPushConstantParams in vulkanbackend.h:
 //   uint batchSize, inChannels, outChannels, nnYLen, nnXLen, filterH, filterW
 
-cbuffer Push : register(b0)
+#include "common.h"
+#include "functions.h"
+
+cbuffer Covn2DParams : register(b0)
 {
     uint batchSize;
     uint inChannels;
@@ -28,14 +31,10 @@ RWStructuredBuffer<float> outputBuf : register(u0);
 // TILE_N: number of output pixels computed per workgroup in X-direction
 // TILE_M: number of output channels computed per workgroup
 // TILE_K: block size along K (ic * filterH * filterW)
-#define TILE_N 8
-#define TILE_M 8
-#define TILE_K 16
-
 // Workgroup layout: threads (localX, localY)
 // localX in [0,TILE_N) -> pixel offset inside tile
 // localY in [0,TILE_M) -> output-channel offset inside oc-block
-[numthreads(TILE_N, TILE_M, 1)]
+[numthreads(CONV_2D_DISPATCH_X, CONV_2D_DISPATCH_Y, 1)]
 void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3 GId : SV_GroupID)
 {
     // Group mapping assumptions made by host dispatcher:
@@ -48,20 +47,20 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
     uint outY = GId.y;   // exact output Y coordinate
     uint groupZ = GId.z; // encodes batch and oc-block
 
-    uint ocGroupsPerBatch = (outChannels + TILE_M - 1u) / TILE_M;
+    uint ocGroupsPerBatch = (outChannels + CONV_2D_TILE_M - 1u) / CONV_2D_TILE_M;
     uint batch = groupZ / ocGroupsPerBatch;
     uint ocGroup = groupZ % ocGroupsPerBatch;
 
     uint localX = GTid.x; // 0..TILE_N-1
     uint localY = GTid.y; // 0..TILE_M-1
 
-    uint outX = groupX * TILE_N + localX;
+    uint outX = groupX * CONV_2D_TILE_N + localX;
     if(outX >= nnXLen || outY >= nnYLen || batch >= batchSize) {
         // out of bounds; threads can early exit
         return;
     }
 
-    uint oc = ocGroup * TILE_M + localY; // output channel for this thread
+    uint oc = ocGroup * CONV_2D_TILE_M + localY; // output channel for this thread
     if(oc >= outChannels) {
         // this thread corresponds to out-of-range output channel
         return;
@@ -74,10 +73,10 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
     float acc = 0.0f;
 
     // Blocked over K
-    uint numKBlocks = (K + TILE_K - 1u) / TILE_K;
+    uint numKBlocks = (K + CONV_2D_TILE_K - 1u) / CONV_2D_TILE_K;
     for(uint kb = 0u; kb < numKBlocks; ++kb) {
-        uint kBase = kb * TILE_K;
-        uint kMax = min(TILE_K, K - kBase);
+        uint kBase = kb * CONV_2D_TILE_K;
+        uint kMax = min(CONV_2D_TILE_K, K - kBase);
 
         // For this small-block, iterate directly (no shared memory for simplicity)
         for(uint kOff = 0u; kOff < kMax; ++kOff) {

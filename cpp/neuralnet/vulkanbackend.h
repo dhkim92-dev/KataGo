@@ -1,5 +1,5 @@
 /**
- * @file vulkanbackend.cpp
+ * @file vulkanbackend.h
  * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92-dev@gmail.com, https://www.dohoon-kim.kr)
  * @brief Vulkan backend for Neural Net evaluation
  */
@@ -133,7 +133,7 @@ namespace KatagoVulkan {
    * @param numChannels
    * @param nnYLen
    */
-  struct BatchNormMaskFp32Params {
+  struct BatchNormMaskParams {
     uint32_t batchSize;
     uint32_t numChannels;
     uint32_t nnXYLen;
@@ -160,6 +160,15 @@ namespace KatagoVulkan {
     * @brief Global Pooling Channels Push Constant Parameters
     */
    struct GlobalPoolingChannelsParams {
+    uint32_t batchSize;
+    uint32_t gpoolChannels;
+    uint32_t nnXYLen;
+   };
+
+   /**
+    * @brief Value Head Pooling Channels Push Constant Parameters
+    */
+   struct ValueHeadPoolingChannelsParams {
     uint32_t batchSize;
     uint32_t gpoolChannels;
     uint32_t nnXYLen;
@@ -215,12 +224,12 @@ namespace KatagoVulkan {
 
     // Conv2D pipelines
     Pipeline conv2dFp32; 
-    Pipeline conv2d3x3BnFp32;
-    Pipeline conv2d3x3BnReluFp32;
-    Pipeline conv2d3x3BnMishFp32;
-    Pipeline conv2d5x5BnFp32;
-    Pipeline conv2d5x5BnReluFp32;
-    Pipeline conv2d5x5BnMishFp32;
+    // Pipeline conv2d3x3BnFp32;
+    // Pipeline conv2d3x3BnReluFp32;
+    // Pipeline conv2d3x3BnMishFp32;
+    // Pipeline conv2d5x5BnFp32;
+    // Pipeline conv2d5x5BnReluFp32;
+    // Pipeline conv2d5x5BnMishFp32;
     Pipeline addPointWiseFp32;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
@@ -273,36 +282,36 @@ namespace KatagoVulkan {
     /**
      * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
      */
-    void createConv2d3x3BnFp32();
+    // void createConv2d3x3BnFp32();
 
     /**
      * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
      */
-    void createConv2d3x3BnReluFp32();
+    // void createConv2d3x3BnReluFp32();
     /**
      * @brief Create a Conv2d3x3 Bn Mish Fp32 object
      */
-    void createConv2d3x3BnMishFp32();
+    // void createConv2d3x3BnMishFp32();
 
     /**
      * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
      */
-    void createConv2d5x5BnFp32();
+    // void createConv2d5x5BnFp32();
 
     /**
      * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
      */
-    void createConv2d5x5BnReluFp32();
+    // void createConv2d5x5BnReluFp32();
 
     /**
      * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
      */
-    void createConv2d5x5BnReluFp32();
+    // void createConv2d5x5BnReluFp32();
 
     /**
      * @brief Create a Conv2d5x5 Bn Mish Fp32 object
      */
-    void createConv2d5x5BnMishFp32();
+    // void createConv2d5x5BnMishFp32();
 
     /**
      * @brief Create a Add Point Wise Fp32 object
@@ -317,7 +326,7 @@ namespace KatagoVulkan {
     /**
      * @brief Create a Matmul Tiled 4x4x32 Fp32 object
      */
-    void createMatmulTiled4x4x32Fp32();
+    // void createMatmulTiled4x4x32Fp32();
 
     /**
      * @brief Create a BatchNorm Mask Fp32 object

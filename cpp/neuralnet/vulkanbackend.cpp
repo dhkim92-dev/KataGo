@@ -7,6 +7,7 @@
 
 #include <unordered_map>
 #include <memory>
+#include "../external/vulkan/shaders/common.h"
 #include "../core/global.h"
 #include "../core/simpleallocator.h"
 #include "../neuralnet/nninterface.h"
@@ -372,18 +373,21 @@ struct MatmulLayer {
   }
 
   /**
-   * @brief 
+   * @brief Launch the recorded command buffer, only for debug now.
    * @param batchSize 
    * @param input 
    * @param output 
    */
-  VkCommandBuffer apply(
+  void apply(
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
     assert(commandBuffer != VK_NULL_HANDLE);
-    return commandBuffer;
+    VkHelpers::submitCommandBuffers(
+      handle->vulkanDevice,
+      {commandBuffer}
+    );
   }
 
 private:
@@ -635,19 +639,22 @@ struct ConvLayer {
   }
 
   /**
-   * @brief return command buffer for conv layer
+   * @brief Launch the recorded command buffer, only for debug now.
    * @param batchSize 
    * @param input 
    * @param output 
    * @return VkCommandBuffer 
    */
-  VkCommandBuffer apply(
+  void apply(
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
     assert(commandBuffer != VK_NULL_HANDLE);
-    return commandBuffer;
+    VkHelpers::submitCommandBuffers(
+      handle->vulkanDevice,
+      {commandBuffer}
+    );
   }
 
 
@@ -791,11 +798,11 @@ struct BatchNormLayer {
     };
     VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    KatagoVulkan::BatchNormMaskFp32Params pushConstants = {};
+    KatagoVulkan::BatchNormMaskParams pushConstants = {};
     pushConstants.batchSize = static_cast<uint32_t>(batchSize);
     pushConstants.numChannels = static_cast<uint32_t>(numChannels);
     pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
-    vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskFp32Params), &pushConstants);
+    vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskParams), &pushConstants);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdDispatch(
@@ -808,14 +815,24 @@ struct BatchNormLayer {
     CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
   }
 
-  VkCommandBuffer apply(
+  /**
+   * @brief Launch the recorded command buffer, only for debug now.
+   * @param batchSize 
+   * @param input 
+   * @param output 
+   * @param mask
+   */
+  void apply(
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output,
     VulkanBuffer* mask
   ) {
     assert(commandBuffer != VK_NULL_HANDLE);
-    return commandBuffer;
+    VkHelpers::submitCommandBuffers(
+      handle->vulkanDevice,
+      {commandBuffer}
+    );
   }
 };
 
@@ -949,9 +966,17 @@ struct MatBiasLayer {
     CHECK_VK_MSG("End command buffer for MatBiasLayer: " + name, res);
   }
 
-  VkCommandBuffer apply(int batchSize, VulkanBuffer* input) {
+  /**
+   * @brief Launch the recorded command buffer, only for debug now.
+   * @param batchSize
+   * @param input
+   */
+  void apply(int batchSize, VulkanBuffer* input) {
     assert(commandBuffer != VK_NULL_HANDLE);
-    return commandBuffer;
+    VkHelpers::submitCommandBuffers(
+      handle->vulkanDevice,
+      {commandBuffer}
+    );
   }
 
   MatBiasLayer() = delete;
@@ -976,7 +1001,6 @@ struct NormActConv {
   BatchNormLayer bn;
   const int inChannels;
   const int outChannels;
-
   std::vector<VkCommandBuffer> commandBuffers;
 
   NormActConv(
@@ -1019,16 +1043,18 @@ struct NormActConv {
     // commandBuffers.push_back( bn.apply(batchSize, output, output, mask) );
     bn.record(batchSize, input, inputScratchOrInput, mask);
     conv.record(batchSize, inputScratchOrInput, output);
+    commandBuffers.push_back( bn.commandBuffer );
+    commandBuffers.push_back( conv.commandBuffer );
   }
 
   /**
-   * @brief return command buffers for conv and bn layers
+   * @brief Launch the recorded command buffers, only for debug now.
    * @param batchSize
    * @param input
    * @param inputScratchOrInput
    * @param output
    */
-  std::vector<VkCommandBuffer> apply(
+  void apply(
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* inputScratchOrInput,
@@ -1037,10 +1063,11 @@ struct NormActConv {
     // VulkanBuffer* convWorkspace,
     // VulkanBuffer* convWorkspace2
   ) {
-    std::vector<VkCommandBuffer> cmds;
-    cmds.push_back( conv.apply(batchSize, input, output) );
-    cmds.push_back( bn.apply(batchSize, output, output, mask) );
-    return cmds;
+    assert(commandBuffers.size() == 2);
+    VkHelpers::submitCommandBuffers(
+      handle->vulkanDevice,
+      commandBuffers
+    );
   }
 
   NormActConv() = delete;
@@ -1332,7 +1359,7 @@ VkCommandBuffer performValueHeadPool(
     VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
   };
   VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-  KatagoVulkan::GlobalPoolingChannelsParams pushConstants = {};
+  KatagoVulkan::ValueHeadPoolingChannelsParams pushConstants = {};
   pushConstants.batchSize = static_cast<uint32_t>(batchSize);
   pushConstants.gpoolChannels = static_cast<uint32_t>(valueHeadChannels);
   pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
@@ -1341,7 +1368,7 @@ VkCommandBuffer performValueHeadPool(
     pipelines->valueHeadPoolingChannelsFp32.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::GlobalPoolingChannelsParams),
+    sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams),
     &pushConstants
   );
   // Assume local sizes = 1,1,1. Compute group counts accordingly.
@@ -2247,6 +2274,8 @@ struct Model {
   std::unique_ptr<ValueHead> valueHead;
   std::vector<VkCommandBuffer> commandBuffers;
 
+  VkFence fence = VK_NULL_HANDLE;
+
   Model() = delete;
   Model(const Model&) = delete;
   Model& operator=(const Model&) = delete;
@@ -2310,10 +2339,17 @@ struct Model {
     trunk = std::make_unique<Trunk>(handle, desc.trunk, nnXLen, nnYLen);
     policyHead = std::make_unique<PolicyHead>(handle, desc.policyHead, nnXLen, nnYLen);
     valueHead = std::make_unique<ValueHead>(handle, desc.valueHead, nnXLen, nnYLen);
+
+    VkResult res = VK_SUCCESS;
+    fence = VkHelpers::createFence(handle->vulkanDevice, &res);
+    CHECK_VK_MSG("Create model fence", res);
   }
 
   ~Model() {
-
+    if( fence != VK_NULL_HANDLE ) {
+      VkHelpers::destroyFence(handle->vulkanDevice, fence);
+      fence = VK_NULL_HANDLE; 
+    }
   }
 
   void record(
@@ -2351,7 +2387,9 @@ struct Model {
    * run all command buffers to perform inference.
    */
   void apply() {
-
+    VkHelpers::submitCommandBuffers(handle->vulkanDevice, commandBuffers, fence);
+    vkWaitForFences(handle->device, 1, &fence, VK_TRUE, UINT32_MAX);
+    VkHelpers::resetFence(handle->vulkanDevice, fence);
   }
 };
 
@@ -2453,11 +2491,11 @@ namespace KatagoVulkan {
 
   void ComputePipelines::createPipelines() {
     createConv2dFp32();
-    createConv2d3x3BnFp32();
-    createConv2d3x3BnReluFp32();
-    createConv2d5x5BnFp32();
-    createConv2d5x5BnReluFp32();
-    createConv2d5x5BnMishFp32();
+    // createConv2d3x3BnFp32();
+    // createConv2d3x3BnReluFp32();
+    // createConv2d5x5BnFp32();
+    // createConv2d5x5BnReluFp32();
+    // createConv2d5x5BnMishFp32();
     createAddPointWiseFp32();
     createMatmulFp32();
     // createMatmulTiled4x4x32Fp32();
@@ -2475,11 +2513,11 @@ namespace KatagoVulkan {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
-    destroyPipeline(conv2d3x3BnFp32);
-    destroyPipeline(conv2d3x3BnReluFp32);
-    destroyPipeline(conv2d5x5BnFp32);
-    destroyPipeline(conv2d5x5BnReluFp32);
-    destroyPipeline(conv2d5x5BnMishFp32);
+    // destroyPipeline(conv2d3x3BnFp32);
+    // destroyPipeline(conv2d3x3BnReluFp32);
+    // destroyPipeline(conv2d5x5BnFp32);
+    // destroyPipeline(conv2d5x5BnReluFp32);
+    // destroyPipeline(conv2d5x5BnMishFp32);
     destroyPipeline(addPointWiseFp32);
     destroyPipeline(matmulFp32);
     // destroyPipeline(matmulTiledChw4x4x32Fp32);
@@ -2570,49 +2608,49 @@ namespace KatagoVulkan {
   /**
    * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
    */
-  void ComputePipelines::createConv2d3x3BnFp32() {
-    createPipeline("Conv2d3x3BnFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
-  }
+  // void ComputePipelines::createConv2d3x3BnFp32() {
+  //   createPipeline("Conv2d3x3BnFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
+  // }
 
   /**
    * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
    */
-  void ComputePipelines::createConv2d3x3BnReluFp32() {
-    createPipeline("Conv2d3x3BnReluFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
-  }
+  // void ComputePipelines::createConv2d3x3BnReluFp32() {
+  //   createPipeline("Conv2d3x3BnReluFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
+  // }
   /**
    * @brief Create a Conv2d3x3 Bn Mish Fp32 object
    */
-  void ComputePipelines::createConv2d3x3BnMishFp32() {
-    createPipeline("Conv2d3x3BnMishFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32,VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
-  }
+  // void ComputePipelines::createConv2d3x3BnMishFp32() {
+  //   createPipeline("Conv2d3x3BnMishFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32,VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
+  // }
 
   /**
    * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
    */
-  void ComputePipelines::createConv2d5x5BnFp32() {
-    createPipeline("Conv2d5x5BnFp32", VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
-  }
+  // void ComputePipelines::createConv2d5x5BnFp32() {
+  //   createPipeline("Conv2d5x5BnFp32", VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
+  // }
 
   /**
    * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
    */
-  void ComputePipelines::createConv2d5x5BnReluFp32() {
-    createPipeline("Conv2d5x5BnReluFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
-  }
+  // void ComputePipelines::createConv2d5x5BnReluFp32() {
+  //   createPipeline("Conv2d5x5BnReluFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
+  // }
 
   /**
    * @brief Create a Conv2d5x5 Bn Mish Fp32 object
    */
-  void ComputePipelines::createConv2d5x5BnMishFp32() {
-    createPipeline("Conv2d5x5BnMishFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
-  }
+  // void ComputePipelines::createConv2d5x5BnMishFp32() {
+  //   createPipeline("Conv2d5x5BnMishFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
+  // }
 
   /**
    * @brief Create a Add Point Wise Fp32 object
    */
   void ComputePipelines::createAddPointWiseFp32() {
-    createPipeline("AddPointWiseFp32",VkSPIRVShaders::spirv_add_pointwise_fp32, VkSPIRVShaders::spirv_add_pointwise_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), addPointWiseFp32);
+    createPipeline("AddPointWiseFp32",VkSPIRVShaders::spirv_add_pointwise_fp32, VkSPIRVShaders::spirv_add_pointwise_fp32_size, 3, sizeof(KatagoVulkan::AddPointWiseParams), addPointWiseFp32);
   }
 
   /**
@@ -2633,70 +2671,70 @@ namespace KatagoVulkan {
    * @brief Create a BatchNorm Mask Fp32 object
    */
   void ComputePipelines::createBatchNormMaskFp32() {
-    createPipeline("BatchNormMaskFp32", VkSPIRVShaders::spirv_bn_mask_fp32, VkSPIRVShaders::spirv_bn_mask_fp32_size, 3, sizeof(KatagoVulkan::NCHWPushConstantParams), batchNormMaskFp32);
+    createPipeline("BatchNormMaskFp32", VkSPIRVShaders::spirv_bn_mask_fp32, VkSPIRVShaders::spirv_bn_mask_fp32_size, 3, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskFp32);
   }
 
   /**
    * @brief Create a BatchNorm Mask + ReLU Fp32 object
    */
   void ComputePipelines::createBatchNormMaskReluFp32() {
-    createPipeline("BatchNormMaskReluFp32", VkSPIRVShaders::spirv_bn_mask_relu_fp32, VkSPIRVShaders::spirv_bn_mask_relu_fp32_size, 3, sizeof(KatagoVulkan::NCHWPushConstantParams), batchNormMaskReluFp32);
+    createPipeline("BatchNormMaskReluFp32", VkSPIRVShaders::spirv_bn_mask_relu_fp32, VkSPIRVShaders::spirv_bn_mask_relu_fp32_size, 3, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskReluFp32);
   }
 
   /**
    * @brief Create a BatchNorm Mask + Mish Fp32 object
    */
   void ComputePipelines::createBatchNormMaskMishFp32() {
-    createPipeline("BatchNormMaskMishFp32", VkSPIRVShaders::spirv_bn_mask_mish_fp32, VkSPIRVShaders::spirv_bn_mask_mish_fp32_size, 3, sizeof(KatagoVulkan::NCHWPushConstantParams), batchNormMaskMishFp32);
+    createPipeline("BatchNormMaskMishFp32", VkSPIRVShaders::spirv_bn_mask_mish_fp32, VkSPIRVShaders::spirv_bn_mask_mish_fp32_size, 3, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishFp32);
   }
 
   /**
    * @brief Create a Global Average Pool Fp32 object
    */
   void ComputePipelines::createGlobalPoolingChannelsFp32() {
-    createPipeline("GlobalPoolingChannelsFp32", VkSPIRVShaders::spirv_global_pooling_channels_fp32, VkSPIRVShaders::spirv_global_pooling_channels_fp32_size, 2, sizeof(KatagoVulkan::NCHWPushConstantParams), globalPoolingChannelsFp32);
+    createPipeline("GlobalPoolingChannelsFp32", VkSPIRVShaders::spirv_global_pooling_channels_fp32, VkSPIRVShaders::spirv_global_pooling_channels_fp32_size, 2, sizeof(KatagoVulkan::GlobalPoolingChannelsParams), globalPoolingChannelsFp32);
   }
 
   /**
    * @brief Create a Value Head Pool Channels Fp32 object
    */
   void ComputePipelines::createValueHeadPoolingChannelsFp32() {
-    createPipeline("ValueHeadPoolingChannelsFp32", VkSPIRVShaders::spirv_value_head_pool_channels_fp32, VkSPIRVShaders::spirv_value_head_pool_channels_fp32_size, 2, sizeof(KatagoVulkan::NCHWPushConstantParams), valueHeadPoolingChannelsFp32);
+    createPipeline("ValueHeadPoolingChannelsFp32", VkSPIRVShaders::spirv_value_head_pool_channels_fp32, VkSPIRVShaders::spirv_value_head_pool_channels_fp32_size, 2, sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32);
   }
 
   /**
    * @brief Create a Sum Channels Fp32 object
    */
   void ComputePipelines::createSumChannelsFp32() {
-    createPipeline("SumChannelsFp32", VkSPIRVShaders::spirv_sum_channels_fp32, VkSPIRVShaders::spirv_sum_channels_fp32_size, 2, sizeof(KatagoVulkan::NCHWPushConstantParams), sumChannelsFp32);
+    createPipeline("SumChannelsFp32", VkSPIRVShaders::spirv_sum_channels_fp32, VkSPIRVShaders::spirv_sum_channels_fp32_size, 2, sizeof(KatagoVulkan::SumChannelsParams), sumChannelsFp32);
   }
 
   /**
    * @brief Create a Add Channel Bias NCHW Fp32 object
    */
   void ComputePipelines::createAddChannelBiasNCHWFp32() {
-    createPipeline("AddChannelBiasNCHWFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(KatagoVulkan::MatBiasFp32Params), addChannelBiasNCHWFp32);
+    createPipeline("AddChannelBiasNCHWFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWFp32);
   }
 
   /**
    * @brief Create a Add Channel Bias NC + ReLU Fp32 object
    */
   void ComputePipelines::createAddChannelBiasNCHWReluFp32() {
-    createPipeline("AddChannelBiasNCHWReluFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(KatagoVulkan::MatBiasFp32Params), addChannelBiasNCHWReluFp32);
+    createPipeline("AddChannelBiasNCHWReluFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_relu_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_relu_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWReluFp32);
   }
 
   /**
    * @brief Create a Add Channel Bias NC + Mish Fp32 object
    */
   void ComputePipelines::createAddChannelBiasNCHWMishFp32() {
-    createPipeline("AddChannelBiasNCHWMishFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(KatagoVulkan::MatBiasFp32Params), addChannelBiasNCHWMishFp32);
+    createPipeline("AddChannelBiasNCHWMishFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_mish_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_mish_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWMishFp32);
   }
   
   /**
    * @brief Create a Extract Channel 0 NCHW Fp32 object
    */
   void ComputePipelines::createExtractChannel0NCHWFp32() {
-    createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(KatagoVulkan::NCHWPushConstantParams), extractChannel0NCHWFp32);
+    createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(KatagoVulkan::ExtractChannel0NCHWParams), extractChannel0NCHWFp32);
   }
 
   // ########################### End of Compute Pipelines #########################

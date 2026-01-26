@@ -4,7 +4,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vector>
-#include <vma/vk_mem_alloc.h>
+#include "../external/vulkan/vk_mem_alloc.h"
 #include "../core/global.h"
 #include "../core/logger.h"
 
@@ -242,6 +242,12 @@ namespace VkHelpers {
     const VulkanDevice* device,
     VulkanBuffer* buffer
   );
+
+  VkFence createFence(const VulkanDevice* device, VkResult* result);
+
+  VkResult resetFence(const VulkanDevice* device, VkFence fence);
+
+  void destroyFence(const VulkanDevice* device, VkFence fence);
 };
 
 namespace VkDebug {

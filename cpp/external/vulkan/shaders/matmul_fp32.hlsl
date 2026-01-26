@@ -5,28 +5,22 @@
 // Globals: input tensor (A), weight tensor (B), output tensor (C)
 // Push constants match KatagoVulkan::MatmulFp32: M,K,N,numBatchElts,cTranspose
 
-#ifndef TILE_M
-#define TILE_M 16
-#endif
-#ifndef TILE_N
-#define TILE_N 16
-#endif
-#ifndef TILE_K
-#define TILE_K 8
-#endif
+#include "common.h"
+#include "functions.h"
 
 // Threadgroup size should match TILE_M x TILE_N for this simple implementation
-[numthreads(TILE_M, TILE_N, 1)]
 
 // Push constants - mapped by host as push constants
-cbuffer MatmulPushConstants : register(b0)
-{
+struct MatmulPushConstants  {
     uint M;            // rows of A and C
     uint K;            // cols of A and rows of B
     uint N;            // cols of B and C
     uint numBatchElts; // z-dimension: number of independent GEMMs
     uint cTranspose;   // if 1, write C transposed (col-major by M)
 };
+
+[[vk::push_constant]]
+MatmulPushConstants params;
 
 // Descriptor bindings: weights(B) read-only, input(A) read-write, output(C) read-write
 // t0: weights (read-only), u0: input (read-write), u1: output (read-write)
@@ -35,10 +29,10 @@ RWStructuredBuffer<float> gInput   : register(u0);
 StructuredBuffer<float>  gWeights : register(t0);
 RWStructuredBuffer<float> gOutput  : register(u1);
 
-groupshared float Asub[TILE_M * TILE_K];
-groupshared float Bsub[TILE_K * TILE_N];
+groupshared float Asub[MATMUL_TILE_M * MATMUL_TILE_K];
+groupshared float Bsub[MATMUL_TILE_K * MATMUL_TILE_N];
 
-// System values
+[numthreads(MATMUL_DISPATCH_X, MATMUL_DISPATCH_Y, 1)]
 void main(uint3 DTid : SV_DispatchThreadID,
           uint3 GTid : SV_GroupThreadID,
           uint3 GId  : SV_GroupID)
@@ -49,21 +43,21 @@ void main(uint3 DTid : SV_DispatchThreadID,
     uint groupZ = GId.z; // instance index (0..numBatchElts-1)
 
     // Local thread coordinates inside group
-    uint localRow = GTid.x; // 0..TILE_M-1
-    uint localCol = GTid.y; // 0..TILE_N-1
+    uint localRow = GTid.x; // 0..MATMUL_TILE_M-1
+    uint localCol = GTid.y; // 0..MATMUL_TILE_N-1
 
     // Global row/col base for this tile
-    uint rowBase = groupM * TILE_M;
-    uint colBase = groupN * TILE_N;
+    uint rowBase = groupM * MATMUL_TILE_M;
+    uint colBase = groupN * MATMUL_TILE_N;
 
     // Row and col this thread will compute within C
     uint row = rowBase + localRow;
     uint col = colBase + localCol;
 
     // Per-instance offsets assuming contiguous per-instance layout
-    uint aInstanceStride = M * K; // elements per A instance
-    uint bInstanceStride = K * N; // elements per B instance
-    uint cInstanceStride = M * N; // elements per C instance
+    uint aInstanceStride = params.M * params.K; // elements per A instance
+    uint bInstanceStride = params.K * params.N; // elements per B instance
+    uint cInstanceStride = params.M * params.N; // elements per C instance
 
     uint aBase = groupZ * aInstanceStride;
     uint bBase = groupZ * bInstanceStride;
@@ -74,44 +68,44 @@ void main(uint3 DTid : SV_DispatchThreadID,
 
     // Loop over K in blocks
     [loop]
-    for (uint kk = 0; kk < K; kk += TILE_K) {
+    for (uint kk = 0; kk < params.K; kk += MATMUL_TILE_K) {
         // Load A sub-tile into shared memory
         // Each thread loads multiple elements covering A_tile of size TILE_M x TILE_K
         [unroll]
-        for (uint kInner = 0; kInner < TILE_K; ++kInner) {
+        for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
             uint aRow = rowBase + localRow;
             uint aCol = kk + kInner;
             float aVal = 0.0f;
-            if (aRow < M && aCol < K) {
-                uint aIndex = aBase + aRow * K + aCol; // A[row, k]
+            if (aRow < params.M && aCol < params.K) {
+                uint aIndex = aBase + aRow * params.K + aCol; // A[row, k]
                 aVal = gInput[aIndex];
             }
             // store at Asub[localRow * TILE_K + kInner]
-            Asub[localRow * TILE_K + kInner] = aVal;
+            Asub[localRow * MATMUL_TILE_K + kInner] = aVal;
         }
 
         // Load B sub-tile into shared memory
         [unroll]
-        for (uint kInner = 0; kInner < TILE_K; ++kInner) {
+        for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
             uint bRow = kk + kInner; // k
             uint bCol = colBase + localCol;
             float bVal = 0.0f;
-            if (bRow < K && bCol < N) {
+            if (bRow < params.K && bCol < params.N) {
                 // gWeights is N x K (n,k) row-major; compute index = bBase + n*K + k
-                uint bIndex = bBase + bCol * K + bRow; // B[n, k]
+                uint bIndex = bBase + bCol * params.K + bRow; // B[n, k]
                 bVal = gWeights[bIndex];
             }
-            // store at Bsub[kInner * TILE_N + localCol]
-            Bsub[kInner * TILE_N + localCol] = bVal;
+            // store at Bsub[kInner * MATMUL_TILE_N + localCol]
+            Bsub[kInner * MATMUL_TILE_N + localCol] = bVal;
         }
 
         GroupMemoryBarrierWithGroupSync();
 
         // Compute partial product for this tile
         [unroll]
-        for (uint kInner = 0; kInner < TILE_K; ++kInner) {
-            float aVal = Asub[localRow * TILE_K + kInner];
-            float bVal = Bsub[kInner * TILE_N + localCol];
+        for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
+            float aVal = Asub[localRow * MATMUL_TILE_K + kInner];
+            float bVal = Bsub[kInner * MATMUL_TILE_N + localCol];
             acc += aVal * bVal;
         }
 
@@ -119,14 +113,14 @@ void main(uint3 DTid : SV_DispatchThreadID,
     }
 
     // Write result
-    if (row < M && col < N) {
+    if (row < params.M && col < params.N) {
         uint cIndex;
-        if (cTranspose == 1) {
+        if (params.cTranspose == 1) {
             // Write transposed: index = cBase + col * M + row
-            cIndex = cBase + col * M + row;
+            cIndex = cBase + col * params.M + row;
         } else {
             // Normal row-major: index = cBase + row * N + col
-            cIndex = cBase + row * N + col;
+            cIndex = cBase + row * params.N + col;
         }
         gOutput[cIndex] = acc;
     }

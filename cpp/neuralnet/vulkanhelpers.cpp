@@ -7,7 +7,7 @@
 
 #ifndef VMA_IMPLEMENTATION
 #define VMA_IMPLEMENTATION
-#include <vma/vk_mem_alloc.h>
+#include "../external/vulkan/vk_mem_alloc.h"
 #endif
 #include "../core/global.h"
 #include "../core/logger.h"
@@ -761,6 +761,41 @@ void VkHelpers::releaseVulkanBuffer(
     delete buffer;
     buffer = nullptr;
   }
+}
+
+VkFence VkHelpers::createFence(
+  const VulkanDevice *device,
+  VkResult *result
+) {
+  VkFenceCreateInfo fenceCI = {};
+  fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+  VkFence fence = VK_NULL_HANDLE;
+  *result = vkCreateFence(
+    device->device,
+    &fenceCI,
+    nullptr,
+    &fence
+  );
+  return fence;
+}
+
+void VkHelpers::destroyFence(
+  const VulkanDevice *device,
+  VkFence fence
+) {
+  vkDestroyFence(
+    device->device,
+    fence,
+    nullptr
+  );
+}
+
+VkResult VkHelpers::resetFence(
+  const VulkanDevice *device,
+  VkFence fence
+) {
+  return vkResetFences(device->device, 1 , &fence);
 }
 
 #endif
