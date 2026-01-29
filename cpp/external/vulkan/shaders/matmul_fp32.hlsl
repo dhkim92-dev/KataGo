@@ -23,11 +23,14 @@ struct MatmulPushConstants  {
 MatmulPushConstants params;
 
 // Descriptor bindings: weights(B) read-only, input(A) read-write, output(C) read-write
-// t0: weights (read-only), u0: input (read-write), u1: output (read-write)
+// weights (read-only),input (read-write), output (read-write)
 // NOTE: Host packs weights as N x K (outChannels x inChannels) row-major: index = n*K + k
-RWStructuredBuffer<float> gInput   : register(u0);
-StructuredBuffer<float>  gWeights : register(t0);
-RWStructuredBuffer<float> gOutput  : register(u1);
+[[vk::binding(0, 0)]]
+StructuredBuffer<float> gInput;
+[[vk::binding(1, 0)]]
+StructuredBuffer<float>  gWeights;
+[[vk::binding(2, 0)]]
+RWStructuredBuffer<float> gOutput;
 
 groupshared float Asub[MATMUL_TILE_M * MATMUL_TILE_K];
 groupshared float Bsub[MATMUL_TILE_K * MATMUL_TILE_N];

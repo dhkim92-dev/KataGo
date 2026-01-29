@@ -12,8 +12,10 @@ struct AddPointWiseParams {
 
 [[vk::push_constant]]
 AddPointWiseParams params;
-RWStructuredBuffer<float> g_accum : register(u0);
-StructuredBuffer<float> g_value  : register(t0);
+[[vk::binding(0, 0)]]
+RWStructuredBuffer<float> g_accum;
+[[vk::binding(1, 0)]]
+StructuredBuffer<float> g_value;
 
 [numthreads(ADD_POINTWISE_DISPATCH_X,ADD_POINTWISE_DISPATCH_Y,ADD_POINTWISE_DISPATCH_Z)]
 void main(uint3 DTid : SV_DispatchThreadID)

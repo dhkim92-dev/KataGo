@@ -17,8 +17,10 @@ struct AddChannelBiasNCHWParams {
 [[vk::push_constant]]
 AddChannelBiasNCHWParams params;
 
-RWStructuredBuffer<float> g_accum : register(u0);
-StructuredBuffer<float>   g_bias  : register(t0);
+[[vk::binding(0, 0)]]
+RWStructuredBuffer<float> g_accum;
+[[vk::binding(1, 0)]]
+StructuredBuffer<float>   g_bias;
 
 [numthreads(ADD_CHANNELS_DISPATCH_X, ADD_CHANNELS_DISPATCH_Y, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)

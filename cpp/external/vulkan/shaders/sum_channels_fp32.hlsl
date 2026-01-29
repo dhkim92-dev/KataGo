@@ -21,8 +21,10 @@ struct SumChannelsParams {
 [[vk::push_constant]]
 SumChannelsParams params;
 
-StructuredBuffer<float> g_input   : register(t0);  // N, C, HW
-RWStructuredBuffer<float> g_output : register(u0); // N, C
+[[vk::binding(0, 0)]]
+StructuredBuffer<float> g_input;   // N, C, HW
+[[vk::binding(1, 0)]]
+RWStructuredBuffer<float> g_output; // N, C
 
 // Shared memory for parallel reduction
 groupshared float partialSums[SUM_CHANNELS_XYSTRIDE];

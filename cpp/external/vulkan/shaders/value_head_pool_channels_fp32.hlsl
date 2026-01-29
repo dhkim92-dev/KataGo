@@ -31,9 +31,12 @@ struct ValueHeadPoolingChannelsParams {
 [[vk::push_constant]]
 ValueHeadPoolingChannelsParams params;
 
-StructuredBuffer<float>   g_input   : register(t0);
-RWStructuredBuffer<float> g_output  : register(u0);
-StructuredBuffer<float>   g_maskSum : register(t1);
+[[vk::binding(0, 0)]]
+StructuredBuffer<float>   g_input;
+[[vk::binding(1, 0)]]
+RWStructuredBuffer<float> g_output;
+[[vk::binding(2, 0)]]
+StructuredBuffer<float>   g_maskSum;
 
 groupshared float s_partialSums[POOLING_XYSTRIDE];
 

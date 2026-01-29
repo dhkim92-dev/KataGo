@@ -11,7 +11,13 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
+
+template<typename T>
+static size_t byteSizeofVectorContents(const typename std::vector<T>& vec) {
+  return sizeof(T) * vec.size();
+}
 
 struct ComputeHandleInternal {
   const ComputeContext* context;
@@ -21,6 +27,88 @@ struct ComputeHandleInternal {
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
 };
+
+struct ScratchBuffers {
+  const size_t batchXYFloatBytes;
+  const size_t batchFloatBytes;
+  const size_t batchXYBytes;
+  const size_t batchBytes;
+
+  const ComputeHandleInternal *handle;
+  SimpleAllocator<VulkanBuffer *> *allocator;
+
+  ScratchBuffers() = delete;
+  ScratchBuffers(const ScratchBuffers&) = delete;
+  ScratchBuffers& operator=(const ScratchBuffers&) = delete;
+
+  ScratchBuffers(
+    ComputeHandleInternal* handle_,
+    int maxBatchSize,
+    int nnXLen,
+    int nnYLen
+  ): 
+    batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
+    batchFloatBytes(sizeof(float) * maxBatchSize),
+    batchXYBytes(sizeof(uint8_t) * maxBatchSize * nnXLen * nnYLen),
+    batchBytes(sizeof(uint8_t) * maxBatchSize),
+    handle(handle_)
+  {
+    std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
+      return VkHelpers::createDeviceBuffer(
+        handle->vulkanDevice,
+        size,
+        false,
+        nullptr
+      );
+    };
+    std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
+      VkHelpers::releaseVulkanBuffer(
+        handle->vulkanDevice,
+        buffer
+      );
+    };
+
+    allocator = new SimpleAllocator<VulkanBuffer *>(
+      allocFunc,
+      freeFunc
+    );
+  }
+
+  size_t getBufSizeXY(int channels) const {
+    return static_cast<size_t>(channels) * batchXYBytes;
+  }
+
+  size_t getBufSizeXYFloat(int channels) const {
+    return static_cast<size_t>(channels) * batchXYFloatBytes;
+  }
+
+  size_t getBufSizeFloat(int channels) const {
+    return static_cast<size_t>(channels) * batchFloatBytes;
+  }
+
+  size_t getBufSize(int channels) const {
+    return static_cast<size_t>(channels) * batchBytes;
+  }
+};
+
+/**
+ * @brief Copy of OpenCL ConvWorkspaceEltsNeeded struct
+ */
+struct ConvWorkspaceEltsNeeded {
+  size_t size1;
+  size_t size2;
+  ConvWorkspaceEltsNeeded()
+    :size1(0),size2(0)
+  {}
+  ConvWorkspaceEltsNeeded(size_t s1, size_t s2)
+    :size1(s1),size2(s2)
+  {}
+  static ConvWorkspaceEltsNeeded getMax(ConvWorkspaceEltsNeeded a, ConvWorkspaceEltsNeeded b) {
+    return ConvWorkspaceEltsNeeded(std::max(a.size1,b.size1),std::max(a.size2,b.size2));
+  }
+};
+
+
 
 /**
  * @brief NN Block Stack structure

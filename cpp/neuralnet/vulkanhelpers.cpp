@@ -14,23 +14,28 @@
 #include "../neuralnet/vulkanhelpers.h"
 
 VulkanDevice::~VulkanDevice() {
+    // std::cout << "[VulkanDevice::~VulkanDevice] Destroying Vulkan device " << this->info.deviceName << std::endl;
   if (this->device != VK_NULL_HANDLE) {
     vkQueueWaitIdle(this->queue);
     vkDeviceWaitIdle(this->device);
     vmaDestroyAllocator(this->allocator);
+    // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed allocator for device " << this->info.deviceName << std::endl;
 
     if (this->descriptorPool != VK_NULL_HANDLE) {
       vkResetDescriptorPool(this->device, this->descriptorPool, 0);
       vkDestroyDescriptorPool(this->device, this->descriptorPool, nullptr);
+      // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed descriptor pool for device " << this->info.deviceName << std::endl;
       this->descriptorPool = VK_NULL_HANDLE;
     }
 
     if (this->commandPool != VK_NULL_HANDLE) {
       vkResetCommandPool(this->device, this->commandPool, 0);
       vkDestroyCommandPool(this->device, this->commandPool, nullptr);
+      // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed command pool for device " << this->info.deviceName << std::endl;
       this->commandPool = VK_NULL_HANDLE;
     }
     vkDestroyDevice(this->device, nullptr);
+    // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed device " << this->info.deviceName << std::endl;
     this->device = VK_NULL_HANDLE;
   }
 }
@@ -61,16 +66,21 @@ VulkanContext::VulkanContext(
     VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
     VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
     VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-  debugCreateInfo.pfnUserCallback = nullptr; // You can set a callback function here if needed
+  debugCreateInfo.pfnUserCallback = VkDebug::debugCallback;
   debugCreateInfo.pUserData = nullptr; // Optional user data
   auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
   if (func != nullptr) {
     VkResult res = func(instance, &debugCreateInfo, nullptr, &this->debugMessenger);
     CHECK_VK_MSG("CreateDebugUtilsMessengerEXT", res);
   } else {
-    logger->write("Warning: Could not set up Vulkan debug messenger.");
+    if ( logger ) {
+      logger->write("Warning: Could not set up Vulkan debug messenger.");
+    }
   }
   #endif
+  if ( logger ) {
+    logger->write("VulkanContext created with " + std::to_string(devicesToUse.size()) + " devices.");
+  }
 }
 
 VulkanContext::~VulkanContext() {
@@ -79,6 +89,17 @@ VulkanContext::~VulkanContext() {
     device = nullptr;
   }
   this->devicesToUse.clear();
+
+  #ifdef VULKAN_API_DEBUG
+    if ( this->debugMessenger != VK_NULL_HANDLE ) {
+      auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(this->instance, "vkDestroyDebugUtilsMessengerEXT");
+      if (func != nullptr) {
+        func(this->instance, this->debugMessenger, nullptr);
+        this->debugMessenger = VK_NULL_HANDLE;
+      }
+    }
+  #endif
+
   if (this->instance != VK_NULL_HANDLE) {
     vkDestroyInstance(this->instance, nullptr);
     this->instance = VK_NULL_HANDLE;
@@ -86,6 +107,10 @@ VulkanContext::~VulkanContext() {
 }
 
 const VulkanDevice* VulkanContext::findGpuExn(int gpuIdx) const {
+  if ( gpuIdx < 0 ) {
+    gpuIdx = 0;
+  }
+
   for ( const VulkanDevice* device : this->devicesToUse ) {
     if ( device->info.deviceId == static_cast<uint32_t>(gpuIdx) ) {
       return device;
@@ -185,10 +210,10 @@ VkInstance VkHelpers::createVulkanInstance() {
 #ifdef VULKAN_API_DEBUG
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 #endif
-#ifdef __MACOS__
+#ifdef __APPLE__
     "VK_KHR_portability_enumeration",
-    "VK_KHR_get_physical_device_properties2",
 #endif
+    "VK_KHR_get_physical_device_properties2",
   };
 
   VkApplicationInfo appInfo = {};
@@ -206,7 +231,7 @@ VkInstance VkHelpers::createVulkanInstance() {
   instanceCI.ppEnabledLayerNames = requiredLayers.data();
   instanceCI.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
   instanceCI.ppEnabledExtensionNames = requiredExtensions.data();
-#ifdef __MACOS__
+#ifdef __APPLE__
   instanceCI.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #else
   instanceCI.flags = 0;
@@ -229,7 +254,9 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
 
   std::vector<VulkanDeviceInfo> deviceInfos;
   for(uint32_t i = 0; i < numDevices; i++) {
-    logger->write("Found Vulkan Physical Device[" + Global::uint32ToString(i) + "]");
+    if ( logger != nullptr ) {
+      logger->write("Found Vulkan Physical Device[" + Global::uint32ToString(i) + "]");
+    }
     VkPhysicalDevice physicalDevice = physicalDevices[i];
     VulkanDeviceInfo deviceInfo;
     deviceInfo.deviceId = i;
@@ -244,35 +271,46 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
 
     // Get device name
     deviceInfo.deviceName = std::string(deviceInfo.properties.deviceName);
-    logger->write("  Name: " + deviceInfo.deviceName);
-    logger->write("  Type: " + VkHelpers::vkPhysicalDeviceTypeToString(deviceInfo.deviceType));
-    logger->write("  API Version: " +
-      std::to_string(VK_VERSION_MAJOR(deviceInfo.properties.apiVersion)) + "." +
-      std::to_string(VK_VERSION_MINOR(deviceInfo.properties.apiVersion)) + "." +
-      std::to_string(VK_VERSION_PATCH(deviceInfo.properties.apiVersion))
-    );
+    if ( logger != nullptr ) {
+      logger->write("  Name: " + deviceInfo.deviceName);
+      logger->write("  Type: " + VkHelpers::vkPhysicalDeviceTypeToString(deviceInfo.deviceType));
+      logger->write("  API Version: " +
+        std::to_string(VK_VERSION_MAJOR(deviceInfo.properties.apiVersion)) + "." +
+        std::to_string(VK_VERSION_MINOR(deviceInfo.properties.apiVersion)) + "." +
+        std::to_string(VK_VERSION_PATCH(deviceInfo.properties.apiVersion))
+      );
+    }
     // Get device features
     VkPhysicalDeviceFeatures2 features2 = {};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     // Get shader float16/int8 features
     VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features = {};
     shaderFloat16Int8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
     features2.pNext = &shaderFloat16Int8Features;
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
-    logger->write("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No")); 
+    if ( logger != nullptr ) {
+      logger->write("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No"));
+    } 
+
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+    cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    features2.pNext = &cooperativeMatrixFeatures;
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+    deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
+    if ( logger != nullptr ) {
+      logger->write("  Cooperative Matrix Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE ? "Yes" : "No"));
+    }
+
 
     // Get memory properties2
     VkPhysicalDeviceMemoryProperties2 memoryProperties2 = {};
     memoryProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
     // Cooperative Matrix features
-    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
-    cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
-    memoryProperties2.pNext = &cooperativeMatrixFeatures;
+    memoryProperties2.pNext = nullptr;
     vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &memoryProperties2);
     deviceInfo.memoryProperties = memoryProperties2.memoryProperties;
-    deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
-    logger->write("  Cooperative Matrix Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE ? "Yes" : "No"));
-
+    
     deviceInfos.push_back(deviceInfo);
   }
 
@@ -285,9 +323,14 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   std::vector<const char *> requiredExtensions,
   Logger* logger
 ) {
+  if ( logger ) {
+    logger->write("Creating Vulkan Logical Device for " + deviceInfo.deviceName);
+  }
   VkPhysicalDevice physicalDevice = deviceInfo.physicalDevice;
-
   // Create logical device
+#ifdef __APPLE__
+  requiredExtensions.push_back("VK_KHR_portability_subset");
+#endif
   
   std::vector<VkExtensionProperties> availableExtensions;
   uint32_t extensionCount = 0;
@@ -296,7 +339,9 @@ VulkanDevice* VkHelpers::createVulkanDevice(
     availableExtensions.resize(extensionCount);
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, availableExtensions.data());
   } else {
-    logger->write("No device extensions available");
+    if ( logger ) {
+      logger->write("No device extensions available");
+    }
   }
 
   for (const char* requiredExt : requiredExtensions) {
@@ -329,8 +374,10 @@ VulkanDevice* VkHelpers::createVulkanDevice(
 
   VkDevice device;
   VkResult res = vkCreateDevice(physicalDevice, &deviceCI, nullptr, &device);
-  CHECK_VK(res);
-  logger->write("Created Vulkan Logical Device for " + deviceInfo.deviceName);
+  CHECK_VK_MSG("Create Vulkan Logical Device for " + deviceInfo.deviceName, res);
+  if ( logger ) {
+    logger->write("Created Vulkan Logical Device for " + deviceInfo.deviceName);
+  }
 
   // Get compute queue
   VkQueue queue;
@@ -499,12 +546,18 @@ VkDescriptorSet VkHelpers::allocateDescriptorSet(
 
 VkResult VkHelpers::updateDescriptorSets(
   const VulkanDevice *device,
-  const std::vector<VkWriteDescriptorSet>& writeDescriptorSets
+  const std::vector<WriteDescriptorSet>& writeDescriptorSets
 ) {
+  std::vector<VkWriteDescriptorSet> vkWriteDescriptorSets;
+  vkWriteDescriptorSets.reserve(writeDescriptorSets.size());
+  for ( const WriteDescriptorSet& writeSet : writeDescriptorSets ) {
+    vkWriteDescriptorSets.push_back(writeSet.vkWriteDescriptorSet);
+  }
+
   vkUpdateDescriptorSets(
     device->device,
-    static_cast<uint32_t>(writeDescriptorSets.size()),
-    writeDescriptorSets.data(),
+    static_cast<uint32_t>(vkWriteDescriptorSets.size()),
+    vkWriteDescriptorSets.data(),
     0,
     nullptr
   );
@@ -669,14 +722,19 @@ VulkanBuffer* VkHelpers::createDeviceBufferWithData(
     return nullptr;
   }
 
-  // Copy data to staging buffer
   memcpy(stagingBuffer->allocationInfo.pMappedData, data, size);
   // Copy staging buffer to device buffer
+  vmaFlushAllocation(
+    device->allocator,
+    stagingBuffer->allocation,
+    0,
+    size
+  );
   VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
-   copyRegion.size = size;
+  copyRegion.size = size;
   vkCmdCopyBuffer(
     commandBuffer,
     stagingBuffer->buffer,
@@ -710,6 +768,7 @@ VulkanBuffer* VkHelpers::createStagingBuffer(
   bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VmaAllocationCreateInfo allocCI = {};
   allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+  allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
   VkResult res = vmaCreateBuffer(
     device->allocator,
     &bufferCI,
@@ -746,6 +805,132 @@ VulkanBuffer* VkHelpers::createReadbackBuffer(
   );
   *result = res;
   return buffer;
+}
+
+void VkHelpers::copyDeviceBufferToHost(
+  const VulkanDevice* device,
+  VulkanBuffer* deviceBuffer,
+  VkDeviceSize copySize,
+  void* hostPtr,
+  bool waitForIdle,
+  VkResult *result
+) {
+  // Create readback buffer
+  VulkanBuffer* readbackBuffer = VkHelpers::createReadbackBuffer(
+    device,
+    static_cast<size_t>(copySize),
+    result
+  );
+
+  if(*result != VK_SUCCESS) {
+    return;
+  }
+
+  // Copy device buffer to readback buffer
+  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkBufferCopy copyRegion = {};
+  copyRegion.srcOffset = 0;
+  copyRegion.dstOffset = 0;
+  copyRegion.size = copySize;
+  vkCmdCopyBuffer(
+    commandBuffer,
+    deviceBuffer->buffer,
+    readbackBuffer->buffer,
+    1,
+    &copyRegion
+  );
+  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+    device,
+    commandBuffer
+  );
+
+  // Map readback buffer and copy data to hostPtr
+  void* mappedData = nullptr;
+  *result = vmaMapMemory(
+    device->allocator,
+    readbackBuffer->allocation,
+    &mappedData
+  );
+
+  if ( *result != VK_SUCCESS ) {
+    VkHelpers::releaseVulkanBuffer(
+      device,
+      readbackBuffer
+    );
+    return;
+  }
+  memcpy(hostPtr, mappedData, static_cast<size_t>(copySize));
+  vmaUnmapMemory(
+    device->allocator,
+    readbackBuffer->allocation
+  );
+
+  // Release readback buffer
+  VkHelpers::releaseVulkanBuffer(
+    device,
+    readbackBuffer
+  );
+}
+
+void VkHelpers::copyHostToDeviceBuffer(
+  const VulkanDevice* device,
+  const void* hostPtr,
+  VulkanBuffer* deviceBuffer,
+  VkDeviceSize copySize,
+  bool waitForIdle,
+  VkResult *result
+) {
+  // Create staging buffer
+  VulkanBuffer* stagingBuffer = VkHelpers::createStagingBuffer(
+    device,
+    static_cast<size_t>(copySize),
+    result
+  );
+
+  if(*result != VK_SUCCESS) {
+    return;
+  }
+
+  // Copy data from hostPtr to staging buffer
+  memcpy(
+    stagingBuffer->allocationInfo.pMappedData,
+    hostPtr,
+    static_cast<size_t>(copySize)
+  );
+  vmaFlushAllocation(
+    device->allocator,
+    stagingBuffer->allocation,
+    0,
+    copySize
+  );
+
+  // Copy staging buffer to device buffer
+  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkBufferCopy copyRegion = {};
+  copyRegion.srcOffset = 0;
+  copyRegion.dstOffset = 0;
+  copyRegion.size = copySize;
+  vkCmdCopyBuffer(
+    commandBuffer,
+    stagingBuffer->buffer,
+    deviceBuffer->buffer,
+    1,
+    &copyRegion
+  );
+  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+    device,
+    commandBuffer
+  );
+
+  // Release staging buffer
+  VkHelpers::releaseVulkanBuffer(
+    device,
+    stagingBuffer
+  );
+  
+  if(waitForIdle) {
+    vkDeviceWaitIdle(device->device);
+  }
 }
 
 void VkHelpers::releaseVulkanBuffer(
@@ -799,3 +984,43 @@ VkResult VkHelpers::resetFence(
 }
 
 #endif
+
+
+namespace VkDebug {
+
+VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* pUserData
+) {
+    const char* severity = "INFO";
+    if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT)
+        severity = "VERBOSE";
+    else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)
+        severity = "INFO";
+    else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+        severity = "WARNING";
+    else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+        severity = "ERROR";
+
+    const char* type = "UNKNOWN";
+    if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT)
+        type = "GENERAL";
+    else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT)
+        type = "VALIDATION";
+    else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
+        type = "PERFORMANCE";
+
+    std::fprintf(
+        stderr,
+        "[Vulkan][%s][%s] %s\n",
+        severity,
+        type,
+        pCallbackData->pMessage
+    );
+
+    return VK_FALSE;
+}
+
+} // namespace VkDebug

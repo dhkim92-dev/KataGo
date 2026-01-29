@@ -32,10 +32,14 @@ struct GlobalPoolingChannelsParams {
 [[vk::push_constant]]
 GlobalPoolingChannelsParams params;
 
-StructuredBuffer<float>   g_input   : register(t0);
-RWStructuredBuffer<float> g_output  : register(u0);
-StructuredBuffer<float>   g_mask    : register(t1);
-StructuredBuffer<float>   g_maskSum : register(t2);
+[[vk::binding(0, 0)]]
+StructuredBuffer<float>   g_input;
+[[vk::binding(1, 0)]]
+RWStructuredBuffer<float> g_output;
+[[vk::binding(2, 0)]]
+StructuredBuffer<float>   g_mask;
+[[vk::binding(3, 0)]]
+StructuredBuffer<float>   g_maskSum;
 
 groupshared float s_partialSums[POOLING_XYSTRIDE];
 groupshared float s_partialMaxes[POOLING_XYSTRIDE];

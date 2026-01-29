@@ -7,7 +7,7 @@
 #include "common.h"
 #include "functions.h"
 
-cbuffer Covn2DParams : register(b0)
+struct Covn2DParams 
 {
     uint batchSize;
     uint inChannels;
@@ -18,14 +18,20 @@ cbuffer Covn2DParams : register(b0)
     uint filterW;
 };
 
+[[vk::push_constant]]
+Covn2DParams params;
+
 // Buffers: bindings chosen generically. Host should bind accordingly.
 // filters: layout (oc, ic, fh, fw) flattened
 // input: layout NCHW flattened
 // output: layout NCHW flattened
 
-StructuredBuffer<float> filters : register(t0);
-StructuredBuffer<float> inputBuf : register(t1);
-RWStructuredBuffer<float> outputBuf : register(u0);
+[[vk::binding(0, 0)]]
+StructuredBuffer<float> inputBuf;
+[[vk::binding(1, 0)]]
+StructuredBuffer<float> filters;
+[[vk::binding(2, 0)]]
+RWStructuredBuffer<float> outputBuf;
 
 // Tile configuration (tunable)
 // TILE_N: number of output pixels computed per workgroup in X-direction
@@ -47,7 +53,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
     uint outY = GId.y;   // exact output Y coordinate
     uint groupZ = GId.z; // encodes batch and oc-block
 
-    uint ocGroupsPerBatch = (outChannels + CONV_2D_TILE_M - 1u) / CONV_2D_TILE_M;
+    uint ocGroupsPerBatch = (params.outChannels + CONV_2D_TILE_M - 1u) / CONV_2D_TILE_M;
     uint batch = groupZ / ocGroupsPerBatch;
     uint ocGroup = groupZ % ocGroupsPerBatch;
 
@@ -55,20 +61,20 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
     uint localY = GTid.y; // 0..TILE_M-1
 
     uint outX = groupX * CONV_2D_TILE_N + localX;
-    if(outX >= nnXLen || outY >= nnYLen || batch >= batchSize) {
+    if(outX >= params.nnXLen || outY >= params.nnYLen || batch >= params.batchSize) {
         // out of bounds; threads can early exit
         return;
     }
 
     uint oc = ocGroup * CONV_2D_TILE_M + localY; // output channel for this thread
-    if(oc >= outChannels) {
+    if(oc >= params.outChannels) {
         // this thread corresponds to out-of-range output channel
         return;
     }
 
     // We'll compute output value for (batch, oc, outY, outX)
     // Accumulate over K = inChannels * filterH * filterW
-    uint K = inChannels * filterH * filterW;
+    uint K = params.inChannels * params.filterH * params.filterW;
 
     float acc = 0.0f;
 
@@ -82,25 +88,25 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
         for(uint kOff = 0u; kOff < kMax; ++kOff) {
             uint k = kBase + kOff; // linear index in K
             // decode k -> ic, fh, fw
-            uint fhfw = filterH * filterW;
+            uint fhfw = params.filterH * params.filterW;
             uint ic = k / fhfw;
             uint rem = k % fhfw;
-            uint fh = rem / filterW;
-            uint fw = rem % filterW;
+            uint fh = rem / params.filterW;
+            uint fw = rem % params.filterW;
 
             // compute input coords corresponding to filter (centered)
-            int inX = int(outX) + int(fw) - int(filterW/2u);
-            int inY = int(outY) + int(fh) - int(filterH/2u);
+            int inX = int(outX) + int(fw) - int(params.filterW/2u);
+            int inY = int(outY) + int(fh) - int(params.filterH/2u);
 
             float inVal = 0.0f;
-            if(inX >= 0 && inX < int(nnXLen) && inY >= 0 && inY < int(nnYLen)) {
+            if(inX >= 0 && inX < int(params.nnXLen) && inY >= 0 && inY < int(params.nnYLen)) {
                 // input index for NCHW: ((n*inChannels + ic) * nnY + inY) * nnX + inX
-                uint inIndex = ((batch * inChannels + ic) * nnYLen + uint(inY)) * nnXLen + uint(inX);
+                uint inIndex = ((batch * params.inChannels + ic) * params.nnYLen + uint(inY)) * params.nnXLen + uint(inX);
                 inVal = inputBuf[inIndex];
             }
 
             // filter index: (((oc * inChannels + ic) * filterH + fh) * filterW + fw)
-            uint filtIndex = (((oc * inChannels + ic) * filterH + fh) * filterW) + fw;
+            uint filtIndex = (((oc * params.inChannels + ic) * params.filterH + fh) * params.filterW) + fw;
             float w = filters[filtIndex];
 
             acc += w * inVal;
@@ -108,6 +114,6 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3
     }
 
     // write output
-    uint outIndex = ((batch * outChannels + oc) * nnYLen + outY) * nnXLen + outX;
+    uint outIndex = ((batch * params.outChannels + oc) * params.nnYLen + outY) * params.nnXLen + outX;
     outputBuf[outIndex] = acc;
 }

@@ -1,5 +1,5 @@
 #ifdef USE_VULKAN_BACKEND
-#pragma once;
+#pragma once
 
 #include <string>
 #include <vulkan/vulkan.h>
@@ -62,6 +62,11 @@ struct VulkanBuffer {
   ~VulkanBuffer() = default;
   VulkanBuffer(const VulkanBuffer&) = delete;
   VulkanBuffer& operator=(const VulkanBuffer&) = delete;
+};
+
+struct WriteDescriptorSet {
+  VkDescriptorBufferInfo bufferInfo;
+  VkWriteDescriptorSet vkWriteDescriptorSet;
 };
 
 /**
@@ -137,28 +142,28 @@ namespace VkHelpers {
     return layoutBinding;
   }
 
-  inline VkWriteDescriptorSet writeDescriptorSetBuffer(
+  inline WriteDescriptorSet writeDescriptorSetBuffer(
     VkDescriptorSet dstSet,
     uint32_t dstBinding,
     const VulkanBuffer *buffer,
     VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     uint32_t descriptorCount = 1
   ) {
-    VkDescriptorBufferInfo bufferInfo = {};
-    bufferInfo.buffer = buffer->buffer;
-    bufferInfo.offset = 0;
-    bufferInfo.range = buffer->allocation->GetSize();
-    VkWriteDescriptorSet writeSet = {};
-    writeSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writeSet.dstSet = dstSet;
-    writeSet.dstBinding = dstBinding;
-    writeSet.dstArrayElement = 0;
-    writeSet.descriptorType = descriptorType;
-    writeSet.descriptorCount = descriptorCount;
-    writeSet.pBufferInfo = &bufferInfo;
-    writeSet.pImageInfo = nullptr;
-    writeSet.pTexelBufferView = nullptr;
-    return writeSet;
+    WriteDescriptorSet result;
+    result.bufferInfo.buffer = buffer->buffer;
+    result.bufferInfo.offset = 0;
+    result.bufferInfo.range = buffer->allocationInfo.size;
+    result.vkWriteDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    result.vkWriteDescriptorSet.dstSet = dstSet;
+    result.vkWriteDescriptorSet.dstBinding = dstBinding;
+    result.vkWriteDescriptorSet.dstArrayElement = 0;
+    result.vkWriteDescriptorSet.descriptorType = descriptorType;
+    result.vkWriteDescriptorSet.descriptorCount = descriptorCount;
+    result.vkWriteDescriptorSet.pBufferInfo = &result.bufferInfo;
+    result.vkWriteDescriptorSet.pImageInfo = nullptr;
+    result.vkWriteDescriptorSet.pTexelBufferView = nullptr;
+    result.vkWriteDescriptorSet.pNext = nullptr;
+    return result;
   }
 
   VkDescriptorPool createDescriptorPool(
@@ -176,7 +181,7 @@ namespace VkHelpers {
 
   VkResult updateDescriptorSets(
     const VulkanDevice *device,
-    const std::vector<VkWriteDescriptorSet>& writeDescriptorSets
+    const std::vector<WriteDescriptorSet>& writeDescriptorSets
   );
 
   VkCommandPool createCommandPool(
@@ -235,6 +240,24 @@ namespace VkHelpers {
   VulkanBuffer* createReadbackBuffer(
     const VulkanDevice* device,
     size_t size,
+    VkResult *result
+  );
+
+  void copyDeviceBufferToHost(
+    const VulkanDevice* device,
+    VulkanBuffer* deviceBuffer,
+    VkDeviceSize copySize,
+    void* hostPtr,
+    bool waitForIdle,
+    VkResult *result
+  );
+
+  void copyHostToDeviceBuffer(
+    const VulkanDevice* device,
+    const void* hostPtr,
+    VulkanBuffer* deviceBuffer,
+    VkDeviceSize copySize,
+    bool waitForIdle,
     VkResult *result
   );
 

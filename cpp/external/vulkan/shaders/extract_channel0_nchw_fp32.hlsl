@@ -24,8 +24,10 @@ ExtractChannel0NCHWParams params;
 // Descriptor Set bindings
 // binding 0: input buffer (N, C, H*W) - read only
 // binding 1: output buffer (N, H*W) - read/write
-StructuredBuffer<float> g_input   : register(t0);  // N, C, H*W
-RWStructuredBuffer<float> g_output : register(u0); // N, H*W
+[[vk::binding(0, 0)]]
+StructuredBuffer<float> g_input;   // N, C, H*W
+[[vk::binding(1, 0)]]
+RWStructuredBuffer<float> g_output; // N, H*W
 
 [numthreads(EXTRACT_CHANNEL0_XYSTRIDE, EXTRACT_CHANNEL0_NSTRIDE, 1)]
 void main(

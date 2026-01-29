@@ -14,11 +14,17 @@ struct BatchNormMaskFp32Params {
 };
 [[vk::push_constant]]
 BatchNormMaskFp32Params params;
-StructuredBuffer<float> g_input   : register(t0);
-StructuredBuffer<float> g_mask    : register(t1);
-StructuredBuffer<float> g_scale   : register(t2);
-StructuredBuffer<float> g_bias    : register(t3);
-RWStructuredBuffer<float> g_output : register(u0);
+[[vk::binding(0, 0)]]
+StructuredBuffer<float> g_input;
+[[vk::binding(1, 0)]]
+StructuredBuffer<float> g_mask;
+[[vk::binding(2, 0)]]
+StructuredBuffer<float> g_scale;
+[[vk::binding(3, 0)]]
+StructuredBuffer<float> g_bias;
+[[vk::binding(4, 0)]]
+RWStructuredBuffer<float> g_output;
+
 
 [numthreads(BN_DISPATCH_X,BN_DISPATCH_Y,BN_DISPATCH_Z)]
 void main(uint3 DTid : SV_DispatchThreadID)
