@@ -14,6 +14,11 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
+static void checkBufferSize(int batchSize, int nnXLen, int nnYLen, int channels) {
+  if((int64_t)batchSize * nnXLen * nnYLen * channels >= (int64_t)1 << 31)
+    throw StringError("Batch size too large, resulting GPU buffers might exceed 2^31 entries which is not currently supported");
+}
+
 template<typename T>
 static size_t byteSizeofVectorContents(const typename std::vector<T>& vec) {
   return sizeof(T) * vec.size();
@@ -24,6 +29,10 @@ struct ComputeHandleInternal {
   const VulkanDevice* vulkanDevice;
   VkDevice device;
   VkQueue queue;
+  bool usingFP16Storage = false;
+  bool usingFp16Compute = false;
+  bool usingFP16TensorCores = false;
+  bool usingFP16TensorCoresFor1x1 = false;
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
 };
@@ -54,12 +63,14 @@ struct ScratchBuffers {
     handle(handle_)
   {
     std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
+      VkResult res = VK_SUCCESS;
       return VkHelpers::createDeviceBuffer(
         handle->vulkanDevice,
         size,
         false,
-        nullptr
+        &res
       );
+      CHECK_VK_MSG("Allocate Scratch Buffer of size " + std::to_string(size), res);
     };
     std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
       VkHelpers::releaseVulkanBuffer(
@@ -247,11 +258,11 @@ namespace KatagoVulkan {
    /**
     * @brief Global Pooling Channels Push Constant Parameters
     */
-   struct GlobalPoolingChannelsParams {
+  struct GlobalPoolingChannelsParams {
     uint32_t batchSize;
     uint32_t gpoolChannels;
     uint32_t nnXYLen;
-   };
+  };
 
    /**
     * @brief Value Head Pooling Channels Push Constant Parameters
@@ -331,6 +342,7 @@ namespace KatagoVulkan {
     Pipeline batchNormMaskFp32;
     Pipeline batchNormMaskReluFp32;
     Pipeline batchNormMaskMishFp32;
+    Pipeline batchNormMaskMishScale8Fp32;
 
     // Pooling pipelines
     Pipeline globalPoolingChannelsFp32;
@@ -341,6 +353,7 @@ namespace KatagoVulkan {
     Pipeline addChannelBiasNCHWFp32;
     Pipeline addChannelBiasNCHWReluFp32;
     Pipeline addChannelBiasNCHWMishFp32;
+    Pipeline addChannelBiasNCHWMishScale8Fp32;
     Pipeline extractChannel0NCHWFp32;
 
     ComputePipelines(VkDevice device_);
@@ -432,6 +445,11 @@ namespace KatagoVulkan {
     void createBatchNormMaskMishFp32();
 
     /**
+     * @brief Create a BatchNorm Mask + Mish + Scale8 Fp32 object
+     */
+    void createBatchNormMaskMishScale8Fp32();
+
+    /**
      * @brief Create a Global Average Pool Fp32 object
      */
     void createGlobalPoolingChannelsFp32();
@@ -460,6 +478,11 @@ namespace KatagoVulkan {
      * @brief Create a Add Channel Bias NC + Mish Fp32 object
      */
     void createAddChannelBiasNCHWMishFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NC + Mish + Scale8 Fp32 object
+     */
+    void createAddChannelBiasNCHWMishScale8Fp32();
     
     /**
      * @brief Create a Extract Channel 0 NCHW Fp32 object

@@ -26,6 +26,10 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_bn_mask_mish_fp32 = _binary_bn_mask_mish_fp32_start;
   size_t spirv_bn_mask_mish_fp32_size = _binary_bn_mask_mish_fp32_size;
 
+  // bn_mask_mish_scale8_fp32
+  const unsigned char* spirv_bn_mask_mish_scale8_fp32 = _binary_bn_mask_mish_scale8_fp32_start;
+  size_t spirv_bn_mask_mish_scale8_fp32_size = _binary_bn_mask_mish_scale8_fp32_size;
+
   // sum_channels_fp32
   const unsigned char* spirv_sum_channels_fp32 = _binary_sum_channels_fp32_start;
   size_t spirv_sum_channels_fp32_size = _binary_sum_channels_fp32_size;
@@ -49,6 +53,10 @@ namespace VkSPIRVShaders {
   // add_channel_bias_nchw_mish_fp32
   const unsigned char* spirv_add_channel_bias_nchw_mish_fp32 = _binary_add_channel_bias_nchw_mish_fp32_start;
   size_t spirv_add_channel_bias_nchw_mish_fp32_size = _binary_add_channel_bias_nchw_mish_fp32_size;
+
+  // add_channel_bias_nchw_mish_scale8_fp32
+  const unsigned char* spirv_add_channel_bias_nchw_mish_scale8_fp32 = _binary_add_channel_bias_nchw_mish_scale8_fp32_start;
+  size_t spirv_add_channel_bias_nchw_mish_scale8_fp32_size = _binary_add_channel_bias_nchw_mish_scale8_fp32_size;
 
   // extract_channel0_nchw_fp32
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;

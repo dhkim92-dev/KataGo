@@ -40,6 +40,11 @@ extern "C" {
   extern const unsigned char* _binary_bn_mask_mish_fp32_end;
   extern const size_t _binary_bn_mask_mish_fp32_size;
 
+  // bn_mask_mish_scale8_fp32.hlsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_fp32_end;
+  extern const size_t _binary_bn_mask_mish_scale8_fp32_size;
+
   // global_pooling_channels_fp32.hlsl
   extern const unsigned char _binary_global_pooling_channels_fp32_start[];
   extern const unsigned char* _binary_global_pooling_channels_fp32_end;
@@ -69,6 +74,10 @@ extern "C" {
   extern const unsigned char _binary_add_channel_bias_nchw_mish_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nchw_mish_fp32_end;
   extern const size_t _binary_add_channel_bias_nchw_mish_fp32_size;
+
+  extern const unsigned char _binary_add_channel_bias_nchw_mish_scale8_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nchw_mish_scale8_fp32_end;
+  extern const size_t _binary_add_channel_bias_nchw_mish_scale8_fp32_size;
 
   // extract channel0_nchw_fp32.hlsl
   extern const unsigned char _binary_extract_channel0_nchw_fp32_start[];
@@ -135,6 +144,10 @@ namespace VkSPIRVShaders {
   extern const unsigned char* spirv_bn_mask_mish_fp32;
   extern size_t spirv_bn_mask_mish_fp32_size;
 
+  // bn_mask_mish_scale8_fp32 - Batch normalization with mask + Mish + Scale8
+  extern const unsigned char* spirv_bn_mask_mish_scale8_fp32;
+  extern size_t spirv_bn_mask_mish_scale8_fp32_size;
+
   // sum_channels_fp32 - Sum over channels
   extern const unsigned char* spirv_sum_channels_fp32;
   extern size_t spirv_sum_channels_fp32_size;
@@ -158,6 +171,9 @@ namespace VkSPIRVShaders {
   // add_channel_bias_nchw_mish_fp32 - Add channel bias + Mish
   extern const unsigned char* spirv_add_channel_bias_nchw_mish_fp32;
   extern size_t spirv_add_channel_bias_nchw_mish_fp32_size;
+
+  extern const unsigned char* spirv_add_channel_bias_nchw_mish_scale8_fp32;
+  extern size_t spirv_add_channel_bias_nchw_mish_scale8_fp32_size;
 
   // Extract channel 0 from NCHW fp32
   extern const unsigned char* spirv_extract_channel0_nchw_fp32;

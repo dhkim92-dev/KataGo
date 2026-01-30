@@ -415,9 +415,9 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   vulkanDevice->descriptorPool = VkHelpers::createDescriptorPool(
     vulkanDevice,
     {
-      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vulkanDevice->info.properties.limits.maxDescriptorSetStorageBuffers},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
     },
-    vulkanDevice->info.properties.limits.maxBoundDescriptorSets,
+    1024,      
     &res
   );
   CHECK_VK_MSG("CreateDescriptorPool for device : " + deviceInfo.deviceName, res);
@@ -550,8 +550,11 @@ VkResult VkHelpers::updateDescriptorSets(
 ) {
   std::vector<VkWriteDescriptorSet> vkWriteDescriptorSets;
   vkWriteDescriptorSets.reserve(writeDescriptorSets.size());
-  for ( const WriteDescriptorSet& writeSet : writeDescriptorSets ) {
-    vkWriteDescriptorSets.push_back(writeSet.vkWriteDescriptorSet);
+  for ( size_t i = 0; i < writeDescriptorSets.size(); i++ ) {
+    VkWriteDescriptorSet writeSet = writeDescriptorSets[i].vkWriteDescriptorSet;
+    // Fix dangling pointer: pBufferInfo must point to the bufferInfo in the vector, not a stale address
+    writeSet.pBufferInfo = &writeDescriptorSets[i].bufferInfo;
+    vkWriteDescriptorSets.push_back(writeSet);
   }
 
   vkUpdateDescriptorSets(
@@ -667,6 +670,9 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
   bool readOnly,
   VkResult *result
 ) {
+  if ( !result ) {
+    throw StringError("VkHelpers::createDeviceBuffer: result pointer is null");
+  }
   VulkanBuffer *buffer = new VulkanBuffer();
   buffer->device = device;
   buffer->buffer = VK_NULL_HANDLE;
