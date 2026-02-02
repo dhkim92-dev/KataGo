@@ -271,6 +271,14 @@ namespace VkHelpers {
   VkResult resetFence(const VulkanDevice* device, VkFence fence);
 
   void destroyFence(const VulkanDevice* device, VkFence fence);
+
+  void barrierCommandBuffer(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+    VkAccessFlags srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+    VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+  );
 };
 
 namespace VkDebug {

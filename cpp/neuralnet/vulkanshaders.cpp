@@ -46,17 +46,21 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_add_channel_bias_nchw_fp32 = _binary_add_channel_bias_nchw_fp32_start;
   size_t spirv_add_channel_bias_nchw_fp32_size = _binary_add_channel_bias_nchw_fp32_size;
 
-  // add_channel_bias_nchw_relu_fp32
-  const unsigned char* spirv_add_channel_bias_nchw_relu_fp32 = _binary_add_channel_bias_nchw_relu_fp32_start;
-  size_t spirv_add_channel_bias_nchw_relu_fp32_size = _binary_add_channel_bias_nchw_relu_fp32_size;
+  // add_channel_bias_nc_fp32
+  const unsigned char* spirv_add_channel_bias_nc_identity_fp32 = _binary_add_channel_bias_nc_identity_fp32_start;
+  size_t spirv_add_channel_bias_nc_identity_fp32_size = _binary_add_channel_bias_nc_identity_fp32_size;
 
-  // add_channel_bias_nchw_mish_fp32
-  const unsigned char* spirv_add_channel_bias_nchw_mish_fp32 = _binary_add_channel_bias_nchw_mish_fp32_start;
-  size_t spirv_add_channel_bias_nchw_mish_fp32_size = _binary_add_channel_bias_nchw_mish_fp32_size;
+  // add_channel_bias_nc_relu_fp32
+  const unsigned char* spirv_add_channel_bias_nc_relu_fp32 = _binary_add_channel_bias_nc_relu_fp32_start;
+  size_t spirv_add_channel_bias_nc_relu_fp32_size = _binary_add_channel_bias_nc_relu_fp32_size;
 
-  // add_channel_bias_nchw_mish_scale8_fp32
-  const unsigned char* spirv_add_channel_bias_nchw_mish_scale8_fp32 = _binary_add_channel_bias_nchw_mish_scale8_fp32_start;
-  size_t spirv_add_channel_bias_nchw_mish_scale8_fp32_size = _binary_add_channel_bias_nchw_mish_scale8_fp32_size;
+  // add_channel_bias_nc_mish_fp32
+  const unsigned char* spirv_add_channel_bias_nc_mish_fp32 = _binary_add_channel_bias_nc_mish_fp32_start;
+  size_t spirv_add_channel_bias_nc_mish_fp32_size = _binary_add_channel_bias_nc_mish_fp32_size;
+
+  // add_channel_bias_nc_mish_scale8_fp32
+  const unsigned char* spirv_add_channel_bias_nc_mish_scale8_fp32 = _binary_add_channel_bias_nc_mish_scale8_fp32_start;
+  size_t spirv_add_channel_bias_nc_mish_scale8_fp32_size = _binary_add_channel_bias_nc_mish_scale8_fp32_size;
 
   // extract_channel0_nchw_fp32
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;

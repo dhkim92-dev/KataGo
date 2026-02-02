@@ -69,37 +69,40 @@ void main(uint3 DTid : SV_DispatchThreadID,
     // Accumulator
     float acc = 0.0f;
 
+    // Linear thread ID for efficient shared memory loading
+    uint tid = localRow * MATMUL_TILE_N + localCol; // 0..255
+
     // Loop over K in blocks
     [loop]
     for (uint kk = 0; kk < params.K; kk += MATMUL_TILE_K) {
-        // Load A sub-tile into shared memory
-        // Each thread loads multiple elements covering A_tile of size TILE_M x TILE_K
-        [unroll]
-        for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
-            uint aRow = rowBase + localRow;
-            uint aCol = kk + kInner;
+        // Load A sub-tile into shared memory (TILE_M x TILE_K = 128 elements)
+        // Each thread loads at most 1 element
+        if (tid < MATMUL_TILE_M * MATMUL_TILE_K) {
+            uint aLocalRow = tid / MATMUL_TILE_K;
+            uint aLocalCol = tid % MATMUL_TILE_K;
+            uint aRow = rowBase + aLocalRow;
+            uint aCol = kk + aLocalCol;
             float aVal = 0.0f;
             if (aRow < params.M && aCol < params.K) {
-                uint aIndex = aBase + aRow * params.K + aCol; // A[row, k]
+                uint aIndex = aBase + aRow * params.K + aCol;
                 aVal = gInput[aIndex];
             }
-            // store at Asub[localRow * TILE_K + kInner]
-            Asub[localRow * MATMUL_TILE_K + kInner] = aVal;
+            Asub[tid] = aVal;
         }
 
-        // Load B sub-tile into shared memory
-        [unroll]
-        for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
-            uint bRow = kk + kInner; // k
-            uint bCol = colBase + localCol;
+        // Load B sub-tile into shared memory (TILE_K x TILE_N = 128 elements)
+        // Each thread loads at most 1 element
+        if (tid < MATMUL_TILE_K * MATMUL_TILE_N) {
+            uint bLocalRow = tid / MATMUL_TILE_N; // k offset
+            uint bLocalCol = tid % MATMUL_TILE_N; // n offset
+            uint bRow = kk + bLocalRow;
+            uint bCol = colBase + bLocalCol;
             float bVal = 0.0f;
             if (bRow < params.K && bCol < params.N) {
-                // gWeights is N x K (n,k) row-major; compute index = bBase + n*K + k
-                uint bIndex = bBase + bCol * params.K + bRow; // B[n, k]
+                uint bIndex = bBase + bCol * params.K + bRow;
                 bVal = gWeights[bIndex];
             }
-            // store at Bsub[kInner * MATMUL_TILE_N + localCol]
-            Bsub[kInner * MATMUL_TILE_N + localCol] = bVal;
+            Bsub[tid] = bVal;
         }
 
         GroupMemoryBarrierWithGroupSync();
@@ -119,12 +122,17 @@ void main(uint3 DTid : SV_DispatchThreadID,
     if (row < params.M && col < params.N) {
         uint cIndex;
         if (params.cTranspose == 1) {
-            // Write transposed: index = cBase + col * M + row
-            cIndex = cBase + col * params.M + row;
+            cIndex = cBase + row * params.N + col;  // [M][N] row-major
         } else {
-            // Normal row-major: index = cBase + row * N + col
-            cIndex = cBase + row * params.N + col;
+            cIndex = cBase + col * params.M + row;  // [N][M] column-major
         }
+        // if (params.cTranspose == 1) {
+        //     // Write transposed: index = cBase + col * M + row
+        //     cIndex = cBase + col * params.M + row;
+        // } else {
+        //     // Normal row-major: index = cBase + row * N + col
+        //     cIndex = cBase + row * params.N + col;
+        // }
         gOutput[cIndex] = acc;
     }
 }

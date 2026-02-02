@@ -14,6 +14,9 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
+
+#define FLOAT16_SIZE_IN_BYTES 2
+
 static void checkBufferSize(int batchSize, int nnXLen, int nnYLen, int channels) {
   if((int64_t)batchSize * nnXLen * nnYLen * channels >= (int64_t)1 << 31)
     throw StringError("Batch size too large, resulting GPU buffers might exceed 2^31 entries which is not currently supported");
@@ -37,13 +40,13 @@ struct ComputeHandleInternal {
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
 };
 
+
 struct ScratchBuffers {
   const size_t batchXYFloatBytes;
   const size_t batchFloatBytes;
   const size_t batchXYBytes;
   const size_t batchBytes;
-
-  const ComputeHandleInternal *handle;
+  ComputeHandleInternal *handle;
   SimpleAllocator<VulkanBuffer *> *allocator;
 
   ScratchBuffers() = delete;
@@ -60,11 +63,11 @@ struct ScratchBuffers {
     int nnXLen,
     int nnYLen
   ): 
+    handle(handle_),
     batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
     batchFloatBytes(sizeof(float) * maxBatchSize),
-    batchXYBytes(sizeof(uint8_t) * maxBatchSize * nnXLen * nnYLen),
-    batchBytes(sizeof(uint8_t) * maxBatchSize),
-    handle(handle_)
+    batchXYBytes( (handle_->usingFP16Storage ? FLOAT16_SIZE_IN_BYTES : sizeof(float)) * maxBatchSize * nnXLen * nnYLen),
+    batchBytes((handle_->usingFP16Storage ? FLOAT16_SIZE_IN_BYTES : sizeof(float))  * maxBatchSize)
   {
     // std::cout << "Allocating ScratchBuffers for max batch size " << maxBatchSize << ", nnXLen " << nnXLen << ", nnYLen " << nnYLen << std::endl;
     std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
@@ -133,11 +136,12 @@ struct ConvWorkspaceEltsNeeded {
 struct BlockStack {
   ComputeHandleInternal *handle;
   std::vector<std::pair<int, unique_ptr_void>> blocks;
-  std::vector<VkCommandBuffer> commandBuffers;
   const int numBlocks;
   const int trunkNumChannels;
   const int nnXLen;
   const int nnYLen;
+
+  std::vector<VkCommandBuffer> commandBuffers;
 
   /**
    * @brief Constructor for BlockStack
@@ -162,6 +166,7 @@ struct BlockStack {
   ~BlockStack();
 
   void record(
+    // VkCommandBuffer commandBuffer,
     int batchSize,
     ScratchBuffers *scratch,
     VulkanBuffer* trunk,
@@ -283,8 +288,16 @@ namespace KatagoVulkan {
    * @brief Add Channel Bias NCHW Push Constant Parameters
    */
   struct AddChannelBiasNCHWParams {
-    uint32_t nnXYLen;
     uint32_t ncSize;
+    uint32_t xySize;
+  };
+
+  /**
+   * @brief Add Channel Bias NC Push Constant Parameters
+   */
+  struct AddChannelBiasNCParams {
+    uint32_t nSize;
+    uint32_t cSize;
   };
 
   struct ExtractChannel0NCHWParams {
@@ -349,10 +362,12 @@ namespace KatagoVulkan {
     
     // Element wise operations
     Pipeline sumChannelsFp32;
+
     Pipeline addChannelBiasNCHWFp32;
-    Pipeline addChannelBiasNCHWReluFp32;
-    Pipeline addChannelBiasNCHWMishFp32;
-    Pipeline addChannelBiasNCHWMishScale8Fp32;
+    Pipeline addChannelBiasNCIdentityFp32;
+    Pipeline addChannelBiasNCReluFp32;
+    Pipeline addChannelBiasNCMishFp32;
+    Pipeline addChannelBiasNCMishScale8Fp32;
     Pipeline extractChannel0NCHWFp32;
 
     ComputePipelines(VkDevice device_);
@@ -469,19 +484,24 @@ namespace KatagoVulkan {
     void createAddChannelBiasNCHWFp32();
 
     /**
+     * @brief Create a Add Channel Bias NC Fp32 object
+     */
+    void createAddChannelBiasNCIdentityFp32();
+
+    /**
      * @brief Create a Add Channel Bias NC + ReLU Fp32 object
      */
-    void createAddChannelBiasNCHWReluFp32();
+    void createAddChannelBiasNCReluFp32();
 
     /**
      * @brief Create a Add Channel Bias NC + Mish Fp32 object
      */
-    void createAddChannelBiasNCHWMishFp32();
+    void createAddChannelBiasNCMishFp32();
 
     /**
      * @brief Create a Add Channel Bias NC + Mish + Scale8 Fp32 object
      */
-    void createAddChannelBiasNCHWMishScale8Fp32();
+    void createAddChannelBiasNCMishScale8Fp32();
     
     /**
      * @brief Create a Extract Channel 0 NCHW Fp32 object

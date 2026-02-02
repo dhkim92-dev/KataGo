@@ -813,6 +813,15 @@ VulkanBuffer* VkHelpers::createReadbackBuffer(
   return buffer;
 }
 
+/**
+ * Copies data from a device-local Vulkan buffer to a host pointer.
+ * @param device The Vulkan device.
+ * @param deviceBuffer The source Vulkan buffer located on the device.
+ * @param copySize The size of data to copy in bytes.
+ * @param hostPtr The destination host pointer where data will be copied.
+ * @param waitForIdle If true, waits for the device to be idle after the copy operation.
+ * @param result Pointer to a VkResult variable to capture the result of the operation.
+ */
 void VkHelpers::copyDeviceBufferToHost(
   const VulkanDevice* device,
   VulkanBuffer* deviceBuffer,
@@ -987,6 +996,20 @@ VkResult VkHelpers::resetFence(
   VkFence fence
 ) {
   return vkResetFences(device->device, 1 , &fence);
+}
+
+void VkHelpers::barrierCommandBuffer(
+  VkCommandBuffer commandBuffer,
+  VkPipelineStageFlags srcStageMask,
+  VkAccessFlags srcAccessMask,
+  VkPipelineStageFlags dstStageMask,
+  VkAccessFlags dstAccessMask
+) {
+  VkMemoryBarrier memoryBarrier = {};
+  memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  memoryBarrier.srcAccessMask = srcAccessMask;
+  memoryBarrier.dstAccessMask = dstAccessMask;
+  vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }
 
 #endif

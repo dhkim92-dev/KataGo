@@ -1,17 +1,18 @@
 /**
 * @author dhkim92.dev@gmail.com
 * @brief Add Channel Bias NCHW FP32 compute shader (Identity activation)
-* Adds bias to each channel: accum[nc,xy] += bias[nc % C]
+* Adds bias to each channel: accum[nc, xy] += bias[nc]
+* Matches OpenCL addChannelBiasesNCHW kernel behavior
 *
-* Binding 0: accum (RW) - input/output tensor [N*C, H*W]
-* Binding 1: bias       - bias vector [C]
+* Binding 0: accum (RW) - input/output tensor [NC, HW]
+* Binding 1: bias       - bias vector [NC]
 */
 #include "common.h"
 #include "functions.h"
 
 struct AddChannelBiasNCHWParams {
-    uint nnXYLen;
     uint ncSize;
+    uint xySize;
 };
 
 [[vk::push_constant]]
@@ -27,8 +28,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
 {
     uint xy = DTid.x;
     uint nc = DTid.y;
-    if (nc >= params.ncSize || xy >= params.nnXYLen) return;
-    uint idx = nc * params.nnXYLen + xy;
-    float val = g_accum[idx] + g_bias[nc];
-    g_accum[idx] = val;
+    if (nc < params.ncSize && xy < params.xySize) {
+        uint idx = nc * params.xySize + xy;
+        g_accum[idx] = g_accum[idx] + g_bias[nc];
+    }
 }
