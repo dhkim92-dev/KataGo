@@ -35,7 +35,7 @@ RWStructuredBuffer<float> gOutput;
 groupshared float Asub[MATMUL_TILE_M * MATMUL_TILE_K];
 groupshared float Bsub[MATMUL_TILE_K * MATMUL_TILE_N];
 
-[numthreads(MATMUL_DISPATCH_X, MATMUL_DISPATCH_Y, 1)]
+[numthreads(MATMUL_TILE_M, MATMUL_TILE_N, 1)]
 void main(uint3 DTid : SV_DispatchThreadID,
           uint3 GTid : SV_GroupThreadID,
           uint3 GId  : SV_GroupID)
@@ -126,13 +126,6 @@ void main(uint3 DTid : SV_DispatchThreadID,
         } else {
             cIndex = cBase + col * params.M + row;  // [N][M] column-major
         }
-        // if (params.cTranspose == 1) {
-        //     // Write transposed: index = cBase + col * M + row
-        //     cIndex = cBase + col * params.M + row;
-        // } else {
-        //     // Normal row-major: index = cBase + row * N + col
-        //     cIndex = cBase + row * params.N + col;
-        // }
         gOutput[cIndex] = acc;
     }
 }

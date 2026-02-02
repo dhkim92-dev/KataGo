@@ -461,13 +461,33 @@ struct ConvLayer {
     }
 
     VkResult res;
-    filterBuf = VkHelpers::createDeviceBufferWithData(
-      handle->vulkanDevice,
-      sizeof(float) * desc->weights.size(),
-      desc->weights.data(),
-      true,
-      &res
-    );
+    
+    // For 1x1 conv, transpose weights from [OC][IC] to [IC][OC] for KM_KN_NM matmul convention
+    // This matches OpenCL's transWeights layout for 1x1 convolutions
+    if (convXSize == 1 && convYSize == 1) {
+      std::vector<float> transWeights(inChannels * outChannels);
+      for (int oc = 0; oc < outChannels; oc++) {
+        for (int ic = 0; ic < inChannels; ic++) {
+          transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
+        }
+      }
+      filterBuf = VkHelpers::createDeviceBufferWithData(
+        handle->vulkanDevice,
+        sizeof(float) * transWeights.size(),
+        transWeights.data(),
+        true,
+        &res
+      );
+    } else {
+      // For larger convolutions, use weights as-is
+      filterBuf = VkHelpers::createDeviceBufferWithData(
+        handle->vulkanDevice,
+        sizeof(float) * desc->weights.size(),
+        desc->weights.data(),
+        true,
+        &res
+      );
+    }
     CHECK_VK_MSG("Create ConvLayer: " + name + " filter buffer", res);
   }
 
@@ -493,25 +513,14 @@ struct ConvLayer {
     return ConvWorkspaceEltsNeeded(0, 0);
   }
 
-  /**
-   * @brief create command buffer and record for conv layer, only tiled conv now.
-   * @param batchSize 
-   * @param input 
-   * @param output 
-   */
-  void record(
+  void doConv2DTiledFp32(
+    VkCommandBuffer commandBuffer,
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
-    if (  commandBuffer != VK_NULL_HANDLE ) {
-      return; // Already recorded
-    }
-
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-    CHECK_VK_MSG("Begin command buffer for ConvLayer: " + name, res);
-    VkHelpers::barrierCommandBuffer(commandBuffer);
+    // Implement convolution logic here if needed
+    VkResult res;
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
     KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
     
@@ -566,6 +575,92 @@ struct ConvLayer {
     uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
 
     vkCmdDispatch(commandBuffer, dispatchX, dispatchY, dispatchZ);
+  }
+
+  void doConv1x1AsMatmulFp32(
+    VkCommandBuffer commandBuffer,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    // Implement convolution logic here if needed
+    VkResult res;
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    auto pipeline = this->handle->context->pipelinesPerDev.at(gpuId)->stridedBatchedMatmulFp32;
+    
+    descriptorSet = VkHelpers::allocateDescriptorSet(
+      handle->vulkanDevice,
+      pipeline.descriptorSetLayout,
+      &res
+    );
+    CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
+    // update descriptor set
+    std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, output)
+    };
+    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(
+      commandBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipeline.layout,
+      0, 
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+    auto params = KatagoVulkan::StridedBatchedMatmulFp32Params();
+    params.M = static_cast<uint32_t>(nnXLen * nnYLen);
+    params.N = static_cast<uint32_t>(outChannels);
+    params.K = static_cast<uint32_t>(inChannels);
+    params.inputStride = static_cast<uint32_t>(params.M * params.K);
+    params.outputStride = static_cast<uint32_t>(params.M * params.N);
+    params.filterStride = static_cast<uint32_t>(0);
+    vkCmdPushConstants(
+      commandBuffer,
+      pipeline.layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(KatagoVulkan::StridedBatchedMatmulFp32Params),
+      &params
+    );
+
+    uint32_t nnXYLen = static_cast<uint32_t>(nnXLen * nnYLen);
+    // Dispatch dimensions
+    uint32_t dispatchX = (nnXYLen + SBM_TILE_M - 1) / SBM_TILE_M;                        // ceil(M / 16)
+    uint32_t dispatchY = (static_cast<uint32_t>(outChannels) + SBM_TILE_N - 1) / SBM_TILE_N;  // ceil(N / 16)
+    uint32_t dispatchZ = static_cast<uint32_t>(batchSize);                               // batch count
+    vkCmdDispatch(commandBuffer, dispatchX, dispatchY, dispatchZ);
+  }
+
+  /**
+   * @brief create command buffer and record for conv layer, only tiled conv now.
+   * @param batchSize 
+   * @param input 
+   * @param output 
+   */
+  void record(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    if (  commandBuffer != VK_NULL_HANDLE ) {
+      return; // Already recorded
+    }
+
+    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for ConvLayer: " + name, res);
+    VkHelpers::barrierCommandBuffer(commandBuffer);
+    if ( convXSize == 1 && convYSize == 1 ) {
+      doConv1x1AsMatmulFp32(commandBuffer, batchSize,  input, output);
+    } else {
+      doConv2DTiledFp32(commandBuffer, batchSize,  input, output);
+    }
     res = VkHelpers::endCommandBuffer(commandBuffer);
   }
 
@@ -1468,11 +1563,11 @@ struct ResidualBlock {
 };
 
 struct GlobalPoolingResidualBlock {
-  ComputeHandleInternal *handle;
+  ComputeHandleInternal* handle;
   const std::string name;
   BatchNormLayer* preBN;
-  ConvLayer *regularConv;
-  ConvLayer *gpoolConv; 
+  ConvLayer* regularConv;
+  ConvLayer* gpoolConv; 
   BatchNormLayer* gpoolBN;
   MatmulLayer* gpoolToBiasMul;
   NormActConv* normActConv2;
@@ -1907,11 +2002,11 @@ void BlockStack::apply(
 struct SGFMetadataEncoder {
   ComputeHandleInternal *handle;
   const std::string name;
-  MatmulLayer *matmul1;
-  MatBiasLayer *matBias1;
-  MatmulLayer *matmul2;
-  MatBiasLayer *matBias2;
-  MatmulLayer *matmul3;
+  MatmulLayer* matmul1;
+  MatBiasLayer* matBias1;
+  MatmulLayer* matmul2;
+  MatBiasLayer* matBias2;
+  MatmulLayer* matmul3;
 
   std::vector<VkCommandBuffer> commandBuffers;
 
@@ -2060,12 +2155,12 @@ struct Trunk {
 
     initialConv->record(batchSize, input, trunk);
     initialMatmul->record(batchSize, inputGlobal, trunkScratch.buf);
-    VkCommandBuffer addChannelBiasCB = performAddChannelBiases(handle, trunk, trunkScratch.buf, trunkNumChannels, nnXLen * nnYLen);
+    VkCommandBuffer addChannelBiasCB = performAddChannelBiases(handle, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
     VkCommandBuffer addChannelBiasCB2 = VK_NULL_HANDLE;
     if ( sgfMetadataEncoder != nullptr ) {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->record(batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
-      addChannelBiasCB2 = performAddChannelBiases(handle, trunk, sgfEncodedMeta.buf, trunkNumChannels, nnXLen * nnYLen);
+      addChannelBiasCB2 = performAddChannelBiases(handle, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
     }
     blockStack.record(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum);
     trunkTipBN->record(batchSize, trunk, mask, trunk);
@@ -3387,10 +3482,7 @@ void NeuralNet::getOutput(
       );
       #endif
     }
-    #ifdef VULKAN_API_DEBUG
-    exit(EXIT_FAILURE);
-    #endif
-
+    
     assert(outputs.size() == static_cast<size_t>(batchSize));
 
     float policyProbsTmp[NNPos::MAX_NN_POLICY_SIZE];
@@ -3475,8 +3567,55 @@ void NeuralNet::getOutput(
       else {
         ASSERT_UNREACHABLE;
       }
+      // #define VULKAN_API_DEBUG
+  #ifdef VULKAN_API_DEBUG
+      // Debug: print final output for this row
+      std::cout << "=== NNOutput row " << row << " ===" << std::endl;
+      std::cout << "whiteWinProb: " << output->whiteWinProb << std::endl;
+      std::cout << "whiteLossProb: " << output->whiteLossProb << std::endl;
+      std::cout << "whiteNoResultProb: " << output->whiteNoResultProb << std::endl;
+      std::cout << "whiteScoreMean: " << output->whiteScoreMean << std::endl;
+      std::cout << "whiteScoreMeanSq: " << output->whiteScoreMeanSq << std::endl;
+      std::cout << "whiteLead: " << output->whiteLead << std::endl;
+      std::cout << "varTimeLeft: " << output->varTimeLeft << std::endl;
+      std::cout << "shorttermWinlossError: " << output->shorttermWinlossError << std::endl;
+      std::cout << "shorttermScoreError: " << output->shorttermScoreError << std::endl;
+      
+      // Print policy probs (top 10 moves)
+      std::cout << "policyProbs (top 10): ";
+      std::vector<std::pair<float, int>> policyPairs;
+      for (int i = 0; i <= nnXLen * nnYLen; i++) {
+        policyPairs.push_back({output->policyProbs[i], i});
+      }
+      std::sort(policyPairs.begin(), policyPairs.end(), [](auto& a, auto& b) { return a.first > b.first; });
+      for (int i = 0; i < std::min(10, (int)policyPairs.size()); i++) {
+        int idx = policyPairs[i].second;
+        if (idx == nnXLen * nnYLen) {
+          std::cout << "pass=" << policyPairs[i].first << " ";
+        } else {
+          int x = idx % nnXLen;
+          int y = idx / nnXLen;
+          std::cout << "(" << x << "," << y << ")=" << policyPairs[i].first << " ";
+        }
+      }
+      std::cout << std::endl;
+      
+      // Print ownership map if available
+      if (output->whiteOwnerMap != NULL) {
+        std::cout << "whiteOwnerMap (first 19 values): ";
+        for (int i = 0; i < std::min(19, nnXLen * nnYLen); i++) {
+          std::cout << output->whiteOwnerMap[i] << " ";
+        }
+        std::cout << std::endl;
+      }
+      std::cout << "========================" << std::endl;
+  #endif
     }
   }
+
+  #ifdef VULKAN_API_DEBUG
+    exit(EXIT_FAILURE);
+  #endif
 }
 
 bool NeuralNet::testEvaluateConv(
@@ -3504,21 +3643,21 @@ bool NeuralNet::testEvaluateConv(
   }
 
   // print test configs
-  // std::cout << "[testEvaluateConv] batchSize: " << batchSize
-  //           << " nnXLen: " << nnXLen
-  //           << " nnYLen: " << nnYLen
-  //           << " inChannels: " << desc->inChannels
-  //           << " outChannels: " << desc->outChannels
-  //           << " convYSize: " << desc->convYSize
-  //           << " convXSize: " << desc->convXSize 
-  //           << " useFP16: " << (useFP16 ? "true" : "false")
-  //           << " useNHWC: " << (useNHWC ? "true" : "false")
-  //           << std::endl;
-  // // print default input state;
-  // std::cout << "[testEvaluateConv] inputBuffer size: " << inputBuffer.size() << std::endl;
-  // printFloatBuffer("testEvaluateConv Input", inputBuffer.data(), inputBuffer.size(), batchSize, desc->inChannels, nnYLen, nnXLen);
-  // std::cout << "[testEvaluateConv] filter size: " << desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize << std::endl; 
-  // printFloatBuffer("testEvaluateConv Filter", desc->weights.data(), desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize, batchSize, desc->outChannels, desc->convYSize, desc->convXSize);
+  std::cout << "[testEvaluateConv] batchSize: " << batchSize
+            << " nnXLen: " << nnXLen
+            << " nnYLen: " << nnYLen
+            << " inChannels: " << desc->inChannels
+            << " outChannels: " << desc->outChannels
+            << " convYSize: " << desc->convYSize
+            << " convXSize: " << desc->convXSize 
+            << " useFP16: " << (useFP16 ? "true" : "false")
+            << " useNHWC: " << (useNHWC ? "true" : "false")
+            << std::endl;
+  // print default input state;
+  std::cout << "[testEvaluateConv] inputBuffer size: " << inputBuffer.size() << std::endl;
+  printFloatBuffer("testEvaluateConv Input", inputBuffer.data(), inputBuffer.size(), batchSize, desc->inChannels, nnYLen, nnXLen);
+  std::cout << "[testEvaluateConv] filter size: " << desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize << std::endl; 
+  printFloatBuffer("testEvaluateConv Filter", desc->weights.data(), desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize, batchSize, desc->outChannels, desc->convYSize, desc->convXSize);
 
   ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, false, false);
   // std::cout << "[testEvaluateConv] Created compute context" << std::endl;
@@ -3957,6 +4096,7 @@ namespace KatagoVulkan {
     // createConv2d5x5BnMishFp32();
     createAddPointWiseFp32();
     createMatmulFp32();
+    createStridedBatchedMatmulFp32();
     // createMatmulTiled4x4x32Fp32();
     createBatchNormMaskFp32();
     createBatchNormMaskReluFp32();
@@ -3982,6 +4122,7 @@ namespace KatagoVulkan {
     // destroyPipeline(conv2d5x5BnMishFp32);
     destroyPipeline(addPointWiseFp32);
     destroyPipeline(matmulFp32);
+    destroyPipeline(stridedBatchedMatmulFp32);
     // destroyPipeline(matmulTiledChw4x4x32Fp32);
     destroyPipeline(batchNormMaskFp32);
     destroyPipeline(batchNormMaskReluFp32);
@@ -4132,6 +4273,10 @@ namespace KatagoVulkan {
 
   void ComputePipelines::createMatmulFp32() {
     createPipeline("MatmulFp32", VkSPIRVShaders::spirv_matmul_fp32, VkSPIRVShaders::spirv_matmul_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), matmulFp32);
+  }
+
+  void ComputePipelines::createStridedBatchedMatmulFp32() {
+    createPipeline("StridedBatchedMatmulFp32", VkSPIRVShaders::spirv_strided_batched_matmul_fp32, VkSPIRVShaders::spirv_strided_batched_matmul_fp32_size, 3, sizeof(KatagoVulkan::StridedBatchedMatmulFp32Params), stridedBatchedMatmulFp32);
   }
 
   void ComputePipelines::createBatchNormMaskFp32() {

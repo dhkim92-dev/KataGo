@@ -230,6 +230,15 @@ namespace KatagoVulkan {
     uint32_t cTranspose; // Output Transpose
   };
 
+  struct StridedBatchedMatmulFp32Params {
+    uint32_t M;  
+    uint32_t N;
+    uint32_t K;  
+    uint32_t inputStride;
+    uint32_t filterStride;
+    uint32_t outputStride;
+  };
+
   /**
    * @brief Batch Normalization Mask Fp32 Push Constant Parameters 
    * @param batchSize
@@ -344,9 +353,10 @@ namespace KatagoVulkan {
     Pipeline addPointWiseFp32;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
-    // note that conv1x1 can be implemented as matmul operation
     Pipeline matmulFp32; 
-    // Pipeline matmulTiledChw4x4x32Fp32;
+
+    // note that conv1x1 can be implemented as matmul operation
+    Pipeline stridedBatchedMatmulFp32;
 
     // Batch Normalization pipelines
     // note that prediction phase does not need batch normalization operation separately
@@ -439,9 +449,9 @@ namespace KatagoVulkan {
     void createMatmulFp32();
 
     /**
-     * @brief Create a Matmul Tiled 4x4x32 Fp32 object
+     * @brief Create a Strided Batched Matmul Fp32 object
      */
-    // void createMatmulTiled4x4x32Fp32();
+    void createStridedBatchedMatmulFp32();
 
     /**
      * @brief Create a BatchNorm Mask Fp32 object

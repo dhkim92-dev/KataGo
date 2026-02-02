@@ -25,6 +25,11 @@ extern "C" {
   extern const unsigned char* _binary_matmul_fp32_end;
   extern const size_t _binary_matmul_fp32_size;
 
+  // strided_batched_matmul_fp32.hlsl
+  extern const unsigned char _binary_strided_batched_matmul_fp32_start[];
+  extern const unsigned char* _binary_strided_batched_matmul_fp32_end;
+  extern const size_t _binary_strided_batched_matmul_fp32_size;
+
   // bn_mask_fp32.hlsl
   extern const unsigned char _binary_bn_mask_fp32_start[];
   extern const unsigned char* _binary_bn_mask_fp32_end;
@@ -133,6 +138,10 @@ namespace VkSPIRVShaders {
   // matmul_fp32 - Matrix multiplication
   extern const unsigned char* spirv_matmul_fp32;
   extern size_t spirv_matmul_fp32_size;
+
+  // strided batched matmul fp32 - for 1x1 conv
+  extern const unsigned char* spirv_strided_batched_matmul_fp32;;
+  extern size_t spirv_strided_batched_matmul_fp32_size;
 
   // Future support, NCHW matmul Fp32
   // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;

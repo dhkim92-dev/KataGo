@@ -14,6 +14,10 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_matmul_fp32 = _binary_matmul_fp32_start;
   size_t spirv_matmul_fp32_size = _binary_matmul_fp32_size;
 
+  // strided_batched_matmul_fp32
+  const unsigned char* spirv_strided_batched_matmul_fp32 = _binary_strided_batched_matmul_fp32_start;
+  size_t spirv_strided_batched_matmul_fp32_size = _binary_strided_batched_matmul_fp32_size;
+
   // bn_mask_fp32
   const unsigned char* spirv_bn_mask_fp32 = _binary_bn_mask_fp32_start;
   size_t spirv_bn_mask_fp32_size = _binary_bn_mask_fp32_size;

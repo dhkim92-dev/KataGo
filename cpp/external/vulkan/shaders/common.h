@@ -80,4 +80,13 @@
 #define SUM_CHANNELS_DISPATCH_Y 1
 #define SUM_CHANNELS_DISPATCH_Z 1
 
+/**
+ * Strided Batched Matmul params (for 1x1 conv)
+ */
+#define SBM_TILE_M 16
+#define SBM_TILE_N 16
+#define SBM_TILE_K 16
+#define SBM_DISPATCH_X SBM_TILE_M
+#define SBM_DISPATCH_Y SBM_TILE_N
+
 #endif // __COMMON_HLSL__
