@@ -277,7 +277,7 @@ namespace VkHelpers {
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
     VkAccessFlags srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
   );
 };
 
