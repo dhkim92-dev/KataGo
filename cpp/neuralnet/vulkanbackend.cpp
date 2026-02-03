@@ -1,6 +1,6 @@
 /**
  * @file vulkanbackend.cpp
- * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92-dev@gmail.com, https://www.dohoon-kim.kr)
+ * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92.dev@gmail.com, https://www.dohoon-kim.kr)
  * @brief Vulkan backend for Neural Net evaluation
  */
 #ifdef USE_VULKAN_BACKEND
@@ -742,10 +742,16 @@ struct ConvLayer {
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
     KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
 
+    auto targetPipeline = (convXSize == 3 && convYSize == 3) ?
+                          pipelines->conv2dTiledBnAct3x3Fp32 :
+                          (convXSize == 5 && convYSize == 5) ?
+                          pipelines->conv2dTiledBnAct5x5Fp32 : 
+                          throw StringError("Conv2DTiledBnActFp32: Unsupported conv size " + std::to_string(convXSize) + "x" + std::to_string(convYSize) + " in layer " + name);
+
     if ( descriptorSet == VK_NULL_HANDLE ) {
       descriptorSet = VkHelpers::allocateDescriptorSet(
         handle->vulkanDevice,
-        pipelines->conv2dTiledBnActFp32.descriptorSetLayout,
+        targetPipeline.descriptorSetLayout,
         &res
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
@@ -761,11 +767,11 @@ struct ConvLayer {
       VkHelpers::writeDescriptorSetBuffer(descriptorSet, 5, mask)
     };
     VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dTiledBnActFp32.pipeline);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdBindDescriptorSets(
       cb,
       VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipelines->conv2dTiledBnActFp32.layout,
+      targetPipeline.layout,
       0,
       1,
       &descriptorSet,
@@ -782,13 +788,15 @@ struct ConvLayer {
     pushConstants.filterW = static_cast<uint32_t>(convXSize);
     pushConstants.activation = activation;
 
-    vkCmdPushConstants(cb, pipelines->conv2dTiledBnActFp32.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::Conv2DTiledBnActParams), &pushConstants);
+    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::Conv2DTiledBnActParams), &pushConstants);
 
-    const uint32_t TILE_N = CONV_BNACT_DISPATCH_X;
-    const uint32_t TILE_M = CONV_BNACT_DISPATCH_Y;
-    uint32_t dispatchX = (pushConstants.nnXLen + TILE_N - 1u) / TILE_N;
-    uint32_t dispatchY = pushConstants.nnYLen;
-    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + TILE_M - 1u) / TILE_M;
+    // Compute dispatch dimensions using macros from common.h
+    // CONV_BNACT_TILE_X: output X positions per workgroup
+    // CONV_BNACT_TILE_Y: output Y positions per workgroup (2D spatial tiling)
+    // CONV_BNACT_TILE_OC: output channels per workgroup
+    uint32_t dispatchX = (pushConstants.nnXLen + CONV_BNACT_TILE_X - 1u) / CONV_BNACT_TILE_X;
+    uint32_t dispatchY = (pushConstants.nnYLen + CONV_BNACT_TILE_Y - 1u) / CONV_BNACT_TILE_Y;
+    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + CONV_BNACT_TILE_OC - 1u) / CONV_BNACT_TILE_OC;
     uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
     vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
   }
@@ -3976,7 +3984,8 @@ namespace KatagoVulkan {
 
   void ComputePipelines::createPipelines() {
     createConv2dFp32();
-    createConv2dTiledBnActFp32();
+    createConv2dTiledBnAct3x3Fp32();
+    createConv2dTiledBnAct5x5Fp32();
     // createConv2d3x3BnFp32();
     // createConv2d3x3BnReluFp32();
     // createConv2d5x5BnFp32();
@@ -4003,7 +4012,8 @@ namespace KatagoVulkan {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
-    destroyPipeline(conv2dTiledBnActFp32);
+    destroyPipeline(conv2dTiledBnAct3x3Fp32);
+    destroyPipeline(conv2dTiledBnAct5x5Fp32);
     // destroyPipeline(conv2d3x3BnFp32);
     // destroyPipeline(conv2d3x3BnReluFp32);
     // destroyPipeline(conv2d5x5BnFp32);
@@ -4112,8 +4122,12 @@ namespace KatagoVulkan {
     createPipeline("Conv2dFp32",  VkSPIRVShaders::spirv_conv2d_fp32, VkSPIRVShaders::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
   }
 
-  void ComputePipelines::createConv2dTiledBnActFp32() {
-    createPipeline("Conv2dTiledBnActFp32", VkSPIRVShaders::spirv_conv2d_tiled_bn_act_fp32, VkSPIRVShaders::spirv_conv2d_tiled_bn_act_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnActFp32);
+  void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
+    createPipeline("Conv2dTiledBnAct3x3Fp32", VkSPIRVShaders::spirv_conv2d_tiled_bn_act_3x3_fp32, VkSPIRVShaders::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32);
+  }
+
+  void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
+    createPipeline("Conv2dTiledBnAct5x5Fp32", VkSPIRVShaders::spirv_conv2d_tiled_bn_act_5x5_fp32, VkSPIRVShaders::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32);
   }
 
   /**

@@ -6,9 +6,13 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
 
-  // conv2d_tiled_bn_act_fp32
-  const unsigned char* spirv_conv2d_tiled_bn_act_fp32 = _binary_conv2d_tiled_bn_act_fp32_start;
-  size_t spirv_conv2d_tiled_bn_act_fp32_size = _binary_conv2d_tiled_bn_act_fp32_size;
+  // conv2d_tiled_bn_act_3x3_fp32
+  const unsigned char* spirv_conv2d_tiled_bn_act_3x3_fp32 = _binary_conv2d_tiled_bn_act_3x3_fp32_start;
+  size_t spirv_conv2d_tiled_bn_act_3x3_fp32_size = _binary_conv2d_tiled_bn_act_3x3_fp32_size;
+
+  // conv2d_tiled_bn_act_5x5_fp32
+  const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32 = _binary_conv2d_tiled_bn_act_5x5_fp32_start;
+  size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size = _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
   // add_pointwise_fp32
   const unsigned char* spirv_add_pointwise_fp32 = _binary_add_pointwise_fp32_start;

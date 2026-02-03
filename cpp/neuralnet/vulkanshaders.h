@@ -16,9 +16,14 @@ extern "C" {
   extern const size_t _binary_conv2d_fp32_size;
 
   // conv2d_tiled_bn_act_fp32.hlsl
-  extern const unsigned char _binary_conv2d_tiled_bn_act_fp32_start[];
-  extern const unsigned char* _binary_conv2d_tiled_bn_act_fp32_end;
-  extern const size_t _binary_conv2d_tiled_bn_act_fp32_size;
+  extern const unsigned char _binary_conv2d_tiled_bn_act_3x3_fp32_start[];
+  extern const unsigned char* _binary_conv2d_tiled_bn_act_3x3_fp32_end;
+  extern const size_t _binary_conv2d_tiled_bn_act_3x3_fp32_size;
+
+  // conv2d_tiled_bn_act_5x5_fp32.hlsl
+  extern const unsigned char _binary_conv2d_tiled_bn_act_5x5_fp32_start[];
+  extern const unsigned char* _binary_conv2d_tiled_bn_act_5x5_fp32_end;
+  extern const size_t _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
   // add_pointwise_fp32.hlsl
   extern const unsigned char _binary_add_pointwise_fp32_start[];
@@ -112,8 +117,11 @@ namespace VkSPIRVShaders {
   extern const unsigned char* spirv_conv2d_fp32;
   extern size_t spirv_conv2d_fp32_size;
 
-  extern const unsigned char* spirv_conv2d_tiled_bn_act_fp32;
-  extern size_t spirv_conv2d_tiled_bn_act_fp32_size;
+  extern const unsigned char* spirv_conv2d_tiled_bn_act_3x3_fp32;
+  extern size_t spirv_conv2d_tiled_bn_act_3x3_fp32_size;
+
+  extern const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32;
+  extern size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size;
 
   // Convolution layers 3x3 with identity activation function
   // extern const unsigned char* spirv_conv2d_3x3_bn_fp32;

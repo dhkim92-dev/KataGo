@@ -1,6 +1,6 @@
 /**
  * @file vulkanbackend.h
- * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92-dev@gmail.com, https://www.dohoon-kim.kr)
+ * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92.dev@gmail.com, https://www.dohoon-kim.kr)
  * @brief Vulkan backend for Neural Net evaluation
  */
 #ifdef USE_VULKAN_BACKEND
@@ -346,13 +346,9 @@ namespace KatagoVulkan {
 
     // Conv2D pipelines
     Pipeline conv2dFp32; 
-    Pipeline conv2dTiledBnActFp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
-    // Pipeline conv2d3x3BnFp32;
-    // Pipeline conv2d3x3BnReluFp32;
-    // Pipeline conv2d3x3BnMishFp32;
-    // Pipeline conv2d5x5BnFp32;
-    // Pipeline conv2d5x5BnReluFp32;
-    // Pipeline conv2d5x5BnMishFp32;
+    Pipeline conv2dTiledBnAct3x3Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
+    Pipeline conv2dTiledBnAct5x5Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
+
     Pipeline addPointWiseFp32;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
@@ -408,9 +404,14 @@ namespace KatagoVulkan {
     void createConv2dFp32();
 
     /**
-     * @brief Create Conv2d Tiled Bn + Activation Fp32 object
+     * @brief Create Conv2d Tiled Bn + Activation 3x3 Fp32 object
      */
-     void createConv2dTiledBnActFp32();
+    void createConv2dTiledBnAct3x3Fp32();
+
+    /**
+     * @brief Create Conv2d Tiled Bn + Activation 5x5 Fp32 object
+     */
+    void createConv2dTiledBnAct5x5Fp32();
 
     /**
      * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.

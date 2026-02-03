@@ -61,13 +61,19 @@
 #define CONV_2D_DISPATCH_Y CONV_2D_TILE_OC
 
 /**
-* @brief Direct Conv2D kernel parameters
+* @brief Fused BN->Act->Conv2D kernel parameters
+* TILE_X: number of output X positions per workgroup
+* TILE_Y: number of output Y positions per workgroup (each thread processes TILE_Y outputs)
+* TILE_OC: number of output channels per workgroup
+* TILE_K: block size along K dimension (ic * fh * fw) for loop tiling
 */
-#define CONV_BNACT_TILE_N 8
-#define CONV_BNACT_TILE_M 8
+#define CONV_BNACT_TILE_X 16
+#define CONV_BNACT_TILE_Y 8
+#define CONV_BNACT_TILE_OC 16
 #define CONV_BNACT_TILE_K 16
-#define CONV_BNACT_DISPATCH_X 8
-#define CONV_BNACT_DISPATCH_Y 8
+#define CONV_BNACT_MAX_FHFW 9  // Maximum filter size supported (3x3)
+#define CONV_BNACT_DISPATCH_X CONV_BNACT_TILE_X
+#define CONV_BNACT_DISPATCH_Y CONV_BNACT_TILE_OC
 /**
 * Pooling Layer params
 */
