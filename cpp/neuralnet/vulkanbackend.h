@@ -125,13 +125,6 @@ struct ConvWorkspaceEltsNeeded {
 
 /**
  * @brief NN Block Stack structure
- * @param handle: Compute handle
- * @param blocks: vector of blocks
- * @param commandBuffers: command buffers for all blocks
- * @param numBlocks: number of blocks
- * @param trunkNumChannels: number of channels in trunk
- * @param nnXLen: neural net X length
- * @param nnYLen: neural net Y length
  */
 struct BlockStack {
   ComputeHandleInternal *handle;
@@ -140,8 +133,6 @@ struct BlockStack {
   const int trunkNumChannels;
   const int nnXLen;
   const int nnYLen;
-
-  std::vector<VkCommandBuffer> commandBuffers;
 
   /**
    * @brief Constructor for BlockStack
@@ -175,17 +166,7 @@ struct BlockStack {
     VulkanBuffer* maskSum
   );
 
-  void record(
-    // VkCommandBuffer commandBuffer,
-    int batchSize,
-    ScratchBuffers *scratch,
-    VulkanBuffer* trunk,
-    VulkanBuffer* trunkScratch,
-    VulkanBuffer* mask,
-    VulkanBuffer* maskSum
-  );
-
-  void apply(
+  void debug(
     int batchSize,
     ScratchBuffers *scratch,
     VulkanBuffer* trunk,
@@ -222,6 +203,17 @@ namespace KatagoVulkan {
     uint32_t nnXLen;
     uint32_t filterH; // Filter height
     uint32_t filterW; // Filter width
+  };
+
+  struct Conv2DTiledBnActParams {
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t nnYLen;
+    uint32_t nnXLen;
+    uint32_t filterH;
+    uint32_t filterW;
+    uint32_t activation; // 0: Identity, 1: ReLU, 2: Mish, 3: Mish + Scale8
   };
 
   /**
@@ -354,6 +346,7 @@ namespace KatagoVulkan {
 
     // Conv2D pipelines
     Pipeline conv2dFp32; 
+    Pipeline conv2dTiledBnActFp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
     // Pipeline conv2d3x3BnFp32;
     // Pipeline conv2d3x3BnReluFp32;
     // Pipeline conv2d3x3BnMishFp32;
@@ -413,6 +406,11 @@ namespace KatagoVulkan {
      * @brief Create a Conv2d Fp32 object
     */
     void createConv2dFp32();
+
+    /**
+     * @brief Create Conv2d Tiled Bn + Activation Fp32 object
+     */
+     void createConv2dTiledBnActFp32();
 
     /**
      * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.

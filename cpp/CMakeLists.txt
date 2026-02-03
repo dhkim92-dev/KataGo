@@ -573,15 +573,14 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
   target_compile_definitions(katago PRIVATE USE_VULKAN_BACKEND)
   find_package(Vulkan REQUIRED)
   ## Important! VMA required.
-  include_directories(SYSTEM ${Vulkan_INCLUDE_DIRS})
-  target_link_libraries(katago ${Vulkan_LIBRARIES})
-  target_include_directories(katago PRIVATE ${CMAKE_SOURCE_DIR}/external/vulkan/vk_mem_alloc.h)
-  
+  MESSAGE(STATUS "Found Vulkan SDK at ${Vulkan_INCLUDE_DIRS}")
+  set(VMA_DIR "${CMAKE_SOURCE_DIR}/external/vulkan")
+  target_include_directories(katago PRIVATE ${Vulkan_INCLUDE_DIRS} ${VMA_DIR})
+  target_link_libraries(katago Vulkan::Vulkan)
   # Link shader object libraries containing embedded SPIR-V bytecode
   foreach(_obj_lib IN LISTS VULKAN_SHADER_OBJECT_LIBS)
     target_link_libraries(katago $<TARGET_OBJECTS:${_obj_lib}>)
   endforeach()
-  
 endif()
 
 if(USE_BIGGER_BOARDS_EXPENSIVE)

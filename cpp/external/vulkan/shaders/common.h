@@ -20,16 +20,6 @@
 #define ADD_CHANNELS_DISPATCH_Z 1
 
 /**
-* @brief Convolution parameters
-*/
-#define CONV_TILE_N 8
-#define CONV_TILE_M 8
-#define CONV_TILE_K 16
-#define CONV_DISPATCH_X 8
-#define CONV_DISPATCH_Y 8
-#define CONV_DISPATCH_Z 1
-
-/**
 * Extract Channel0 NCHW compute shader dispatch parameters
 * EXTRACT_CHANNEL0_XYSTRIDE: number of threads processing spatial elements in x dimension
 * EXTRACT_CHANNEL0_NSTRIDE: number of threads processing batch elements in y dimension
@@ -55,15 +45,29 @@
 #define MATMUL_DISPATCH_X MATMUL_TILE_M
 #define MATMUL_DISPATCH_Y MATMUL_TILE_N
 
+
+/**
+* @brief Direct Conv2D kernel parameters
+* TILE_X: number of output X positions per workgroup
+* TILE_Y: number of output Y positions per workgroup
+* TILE_OC: number of output channels per workgroup
+* TILE_K: block size along K dimension (ic * fh * fw) for loop tiling
+*/
+#define CONV_2D_TILE_X 16
+#define CONV_2D_TILE_Y 8
+#define CONV_2D_TILE_OC 8
+#define CONV_2D_TILE_K 16
+#define CONV_2D_DISPATCH_X CONV_2D_TILE_X
+#define CONV_2D_DISPATCH_Y CONV_2D_TILE_OC
+
 /**
 * @brief Direct Conv2D kernel parameters
 */
-#define CONV_2D_TILE_N 8
-#define CONV_2D_TILE_M 8
-#define CONV_2D_TILE_K 16
-#define CONV_2D_DISPATCH_X 8
-#define CONV_2D_DISPATCH_Y 8
-
+#define CONV_BNACT_TILE_N 8
+#define CONV_BNACT_TILE_M 8
+#define CONV_BNACT_TILE_K 16
+#define CONV_BNACT_DISPATCH_X 8
+#define CONV_BNACT_DISPATCH_Y 8
 /**
 * Pooling Layer params
 */
