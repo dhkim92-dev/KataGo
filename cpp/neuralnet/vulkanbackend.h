@@ -165,6 +165,16 @@ struct BlockStack {
   BlockStack& operator=(const BlockStack&) = delete;
   ~BlockStack();
 
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  );
+
   void record(
     // VkCommandBuffer commandBuffer,
     int batchSize,

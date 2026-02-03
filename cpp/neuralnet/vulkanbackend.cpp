@@ -22,7 +22,7 @@
 #include "../neuralnet/vulkanshaders.h"
 #include <chrono>
 
-#ifndef VULKAN_API_DEBUG
+#ifdef VULKAN_API_DEBUG
 #define VK_BENCHMARK(msg, code) \
   {  \
     auto start = std::chrono::high_resolution_clock::now(); \
@@ -345,10 +345,31 @@ struct MatmulLayer {
     }
     VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
-    doMatmulFp32(batchSize, input, output);
+    doMatmulFp32(commandBuffer, batchSize, input, output);
     VkHelpers::barrierCommandBuffer(commandBuffer);
     res = VkHelpers::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
+  }
+
+  /**
+   * @brief create command buffer and record for matmul layer
+   * @param batchSize 
+   * @param input 
+   * @param output 
+   */
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    // VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    // CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
+    doMatmulFp32(cb, batchSize, input, output);
+    VkHelpers::barrierCommandBuffer(cb);
+    // res = VkHelpers::endCommandBuffer(commandBuffer);
+    // CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
   }
 
   /**
@@ -377,6 +398,7 @@ struct MatmulLayer {
 
 private:
   void doMatmulFp32(
+    VkCommandBuffer& cb,
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
@@ -409,7 +431,7 @@ private:
     pushConstants.cTranspose = 1; // Weights always transposed, so Output should be transposed.
 
     vkCmdPushConstants(
-      commandBuffer,
+      cb,
       pipelines->matmulFp32.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
@@ -417,12 +439,12 @@ private:
       &pushConstants
     );
     vkCmdBindPipeline(
-      commandBuffer,
+      cb,
       VK_PIPELINE_BIND_POINT_COMPUTE,
       pipelines->matmulFp32.pipeline
     );
     vkCmdBindDescriptorSets(
-      commandBuffer,
+      cb,
       VK_PIPELINE_BIND_POINT_COMPUTE,
       pipelines->matmulFp32.layout,
       0, 
@@ -436,7 +458,7 @@ private:
     // HLSL: GId.x = groupM (M axis), GId.y = groupN (N axis)
     uint32_t groupCountX = (static_cast<uint32_t>(batchSize) + MATMUL_TILE_M - 1) / MATMUL_TILE_M;  // M Direction
     uint32_t groupCountY = (static_cast<uint32_t>(outChannels) + MATMUL_TILE_N - 1) / MATMUL_TILE_N; // N Direction
-    vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
+    vkCmdDispatch(cb, groupCountX, groupCountY, 1);
   }
 };
 
@@ -543,7 +565,7 @@ struct ConvLayer {
   }
 
   void doConv2DTiledFp32(
-    VkCommandBuffer commandBuffer,
+    VkCommandBuffer& cb,
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
@@ -569,9 +591,9 @@ struct ConvLayer {
     };
     VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
     vkCmdBindDescriptorSets(
-      commandBuffer,
+      cb,
       VK_PIPELINE_BIND_POINT_COMPUTE,
       pipelines->conv2dFp32.layout,
       0, 
@@ -589,7 +611,7 @@ struct ConvLayer {
     pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
     pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
     vkCmdPushConstants(
-      commandBuffer,
+      cb,
       pipelines->conv2dFp32.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
@@ -605,11 +627,11 @@ struct ConvLayer {
     uint32_t ocGroupsPerBatch = (pushConstants.outChannels + TILE_M - 1u) / TILE_M;
     uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
 
-    vkCmdDispatch(commandBuffer, dispatchX, dispatchY, dispatchZ);
+    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
   }
 
   void doConv1x1AsMatmulFp32(
-    VkCommandBuffer commandBuffer,
+    VkCommandBuffer& cb,
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
@@ -635,9 +657,9 @@ struct ConvLayer {
     };
     VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     vkCmdBindDescriptorSets(
-      commandBuffer,
+      cb,
       VK_PIPELINE_BIND_POINT_COMPUTE,
       pipeline.layout,
       0, 
@@ -654,7 +676,7 @@ struct ConvLayer {
     params.outputStride = static_cast<uint32_t>(params.M * params.N);
     params.filterStride = static_cast<uint32_t>(0);
     vkCmdPushConstants(
-      commandBuffer,
+      cb,
       pipeline.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
@@ -667,7 +689,21 @@ struct ConvLayer {
     uint32_t dispatchX = (nnXYLen + SBM_TILE_M - 1) / SBM_TILE_M;                        // ceil(M / 16)
     uint32_t dispatchY = (static_cast<uint32_t>(outChannels) + SBM_TILE_N - 1) / SBM_TILE_N;  // ceil(N / 16)
     uint32_t dispatchZ = static_cast<uint32_t>(batchSize);                               // batch count
-    vkCmdDispatch(commandBuffer, dispatchX, dispatchY, dispatchZ);
+    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
+  }
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    if ( convXSize == 1 && convYSize == 1 ) {
+      doConv1x1AsMatmulFp32(cb, batchSize,  input, output);
+    } else {
+      doConv2DTiledFp32(cb, batchSize,  input, output);
+    }
   }
 
   /**
@@ -817,6 +853,73 @@ struct BatchNormLayer {
     globalSizes[0] = (static_cast<size_t>(numChannels) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
     globalSizes[1] = (static_cast<size_t>(nnXYLen) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
   }
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* mask,
+    VulkanBuffer* output
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    KatagoVulkan::Pipeline targetPipeline;
+    VkResult res = VK_ERROR_UNKNOWN;
+
+    switch ( activation ) {
+      case ACTIVATION_IDENTITY:
+        targetPipeline = pipelines->batchNormMaskFp32;
+        break;
+      case ACTIVATION_RELU:
+        targetPipeline = pipelines->batchNormMaskReluFp32;
+        break;
+      case ACTIVATION_MISH:
+        targetPipeline = pipelines->batchNormMaskMishFp32;
+        break;
+      case ACTIVATION_MISH_SCALE8:
+        targetPipeline = pipelines->batchNormMaskMishScale8Fp32;
+        break;
+      default:
+        Global::fatalError("Unsupported activation in BatchNormLayer: " + name);
+    }
+
+    if (descriptorSet == VK_NULL_HANDLE ) {
+      descriptorSet = VkHelpers::allocateDescriptorSet(
+        handle->vulkanDevice,
+        targetPipeline.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
+    }  
+      // update descriptor set
+    std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, mask),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, mergedScaleBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, mergedBiasBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 4, output)
+    };
+    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    KatagoVulkan::BatchNormMaskParams pushConstants = {};
+    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
+    pushConstants.numChannels = static_cast<uint32_t>(numChannels);
+    pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskParams), &pushConstants);
+    // Dispatch: x=channels, y=spatial, z=batch (shader uses BN_DISPATCH_X=16, BN_DISPATCH_Y=16, BN_DISPATCH_Z=1)
+    uint32_t dispatchX = (static_cast<uint32_t>(numChannels) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
+    uint32_t dispatchY = (static_cast<uint32_t>(nnXYLen) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
+    uint32_t dispatchZ = static_cast<uint32_t>(batchSize);
+    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
+    VkHelpers::barrierCommandBuffer(cb);
+    // res = VkHelpers::endCommandBuffer(cb);
+
+    // CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
+  }
+
 
   void record(
     int batchSize,
@@ -981,6 +1084,76 @@ struct MatBiasLayer {
     }
   }
 
+  void forward(VkCommandBuffer& cb, int batchSize, VulkanBuffer* input) {
+    assert(cb != VK_NULL_HANDLE);
+    VkResult res = VK_ERROR_UNKNOWN;
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    KatagoVulkan::Pipeline targetPipeline;
+
+    switch ( activation ) {
+      case ACTIVATION_IDENTITY:
+        targetPipeline = pipelines->addChannelBiasNCIdentityFp32;
+        break;
+      case ACTIVATION_RELU:
+        targetPipeline = pipelines->addChannelBiasNCReluFp32;
+        break;
+      case ACTIVATION_MISH:
+        targetPipeline = pipelines->addChannelBiasNCMishFp32;
+        break;
+      case ACTIVATION_MISH_SCALE8: 
+        targetPipeline = pipelines->addChannelBiasNCMishScale8Fp32;
+        break;
+      default:
+        Global::fatalError("Unsupported activation in MatBiasLayer: " + name);
+    }
+
+    if ( descriptorSet == VK_NULL_HANDLE ) {
+      descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+      CHECK_VK_MSG("Allocate descriptor set for MatBiasLayer: " + name, res);
+    }
+    // CHECK_VK_MSG("Begin command buffer for MatBiasLayer: " + name, res);
+    auto pushConstants = KatagoVulkan::AddChannelBiasNCParams();
+    pushConstants.nSize = batchSize;  // No spatial dimension for NC tensor
+    pushConstants.cSize = numChannels;
+    // update descriptor set
+    std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, biasBuf),
+    };
+
+    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
+    vkCmdPushConstants(
+      cb,
+      targetPipeline.layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(KatagoVulkan::AddChannelBiasNCParams),
+      &pushConstants
+    );
+    vkCmdBindDescriptorSets(
+      cb,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      targetPipeline.layout,
+      0, 
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+
+    static constexpr int nKernelDims = 2;
+    uint32_t dispatchX = (static_cast<uint32_t>(batchSize) + ADD_CHANNELS_DISPATCH_X - 1) / ADD_CHANNELS_DISPATCH_X;
+    uint32_t dispatchY = (static_cast<uint32_t>(numChannels) + ADD_CHANNELS_DISPATCH_Y - 1) / ADD_CHANNELS_DISPATCH_Y;
+    vkCmdDispatch(cb, dispatchX, dispatchY, 1);
+    VkHelpers::barrierCommandBuffer(cb);
+    // res = VkHelpers::endCommandBuffer(commandBuffer);
+    // CHECK_VK_MSG("End command buffer for MatBiasLayer: " + name, res);
+  }
+
+
   void record(int batchSize, VulkanBuffer* input) {
     VkResult res = VK_ERROR_UNKNOWN;
     if ( commandBuffer == VK_NULL_HANDLE ) {
@@ -1122,6 +1295,28 @@ struct NormActConv {
    * @param output
    * @param mask
    */
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* inputScratchOrInput, //It's okay if this is the same as input, if it's okay to mutate input.
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+    // VulkanBuffer* convWorkspace,
+    // VulkanBuffer* convWorkspace2
+  ) {
+    bn.forward(cb, batchSize, input, mask, inputScratchOrInput);
+    conv.forward(cb, batchSize, inputScratchOrInput, output);
+  }
+
+  /**
+   * @brief record command buffers for conv and bn layers, no winograd algorithm, so convworkspace not required now.
+   * @param batchSize
+   * @param input
+   * @param inputScratchOrInput
+   * @param output
+   * @param mask
+   */
   void record(
     int batchSize,
     VulkanBuffer* input,
@@ -1176,7 +1371,8 @@ void performExtractChannel0NCHW(
   VulkanBuffer* output,
   int batchSIze,
   int numInputChannels,
-  int nnXYLen
+  int nnXYLen,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 2;
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
@@ -1185,8 +1381,13 @@ void performExtractChannel0NCHW(
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
-  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("Begin command buffer for ExtractChannel0NCHW", res);
+
+  VkResult res = VK_ERROR_UNKNOWN;
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for ExtractChannel0NCHW", res);
+  }
+
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0NCHW", res);
@@ -1198,7 +1399,6 @@ void performExtractChannel0NCHW(
   };
   VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0NCHW", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
@@ -1228,7 +1428,10 @@ void performExtractChannel0NCHW(
   uint32_t dispatchY = static_cast<uint32_t>(batchSIze);
   vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::endCommandBuffer(commandBuffer);
+
+  if ( begin ) {
+    VkHelpers::endCommandBuffer(commandBuffer);
+  }
   // return commandBuffer;
 }
 
@@ -1239,7 +1442,8 @@ void performAddChannelBiases(
   VulkanBuffer* input,
   VulkanBuffer* bias,
   int ncSize,
-  int nnXYLen
+  int nnXYLen,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 2;
   size_t globalSizes[nKernelDims] = {
@@ -1254,8 +1458,11 @@ void performAddChannelBiases(
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
   // VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("Begin command buffer for AddChannelBiases", res);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for AddChannelBiases", res);
+  }
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = VkHelpers::allocateDescriptorSet(
       handle->vulkanDevice,
@@ -1270,7 +1477,6 @@ void performAddChannelBiases(
   };
   VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  CHECK_VK_MSG("Allocate descriptor set for AddChannelBiases", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
@@ -1300,7 +1506,9 @@ void performAddChannelBiases(
   // vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
   vkCmdDispatch(commandBuffer, globalSizes[0], globalSizes[1], 1);
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::endCommandBuffer(commandBuffer);
+  if ( begin ) {
+    VkHelpers::endCommandBuffer(commandBuffer);
+  }
   // return commandBuffer;
 }
 
@@ -1310,7 +1518,8 @@ void performAddPointWise(
   VkDescriptorSet& descriptorSet,
   VulkanBuffer* acc,
   VulkanBuffer* value,
-  int totalSize
+  int totalSize,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 1;
   size_t globalSizes[nKernelDims] = {
@@ -1320,8 +1529,11 @@ void performAddPointWise(
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
   // VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
+  }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
@@ -1339,7 +1551,6 @@ void performAddPointWise(
   };
   VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  CHECK_VK_MSG("Allocate descriptor set for AddPointWise", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWiseFp32.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
@@ -1365,7 +1576,9 @@ void performAddPointWise(
   uint32_t groupCountX = (static_cast<uint32_t>(totalSize) + ADD_POINTWISE_DISPATCH_X - 1) / ADD_POINTWISE_DISPATCH_X;
   vkCmdDispatch(commandBuffer, groupCountX, 1, 1);
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::endCommandBuffer(commandBuffer);
+  if ( begin ) {
+    VkHelpers::endCommandBuffer(commandBuffer);
+  }
 }
 
 void performGpoolMask(
@@ -1379,7 +1592,8 @@ void performGpoolMask(
   int batchSize,
   int gpoolChannels,
   int nnXYLen,
-  VkResult* result
+  VkResult* result,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 3;
   static constexpr int localSizes[nKernelDims] = {1, 1, 1};
@@ -1388,8 +1602,11 @@ void performGpoolMask(
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
-  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("Begin command buffer for GlobalPoolingMask", res);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for GlobalPoolingMask", res);
+  }
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = VkHelpers::allocateDescriptorSet(
       handle->vulkanDevice,
@@ -1440,9 +1657,10 @@ void performGpoolMask(
   uint32_t groupCountZ = static_cast<uint32_t>(batchSize);
   vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  res = VkHelpers::endCommandBuffer(commandBuffer);
+  if ( begin ) {
+    res = VkHelpers::endCommandBuffer(commandBuffer);
+  }
   *result = res;
-  CHECK_VK_MSG("End command buffer for GlobalPoolingMask", res);
 }
 
 void performValueHeadPool(
@@ -1454,15 +1672,19 @@ void performValueHeadPool(
   VulkanBuffer* maskSum,
   int batchSize,
   int valueHeadChannels,
-  int nnXYLen
+  int nnXYLen,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 3;
   static constexpr int localSizes[nKernelDims] = {1, 1, 1};
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
-  VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
+  }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
@@ -1481,7 +1703,6 @@ void performValueHeadPool(
   };
   VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  CHECK_VK_MSG("Allocate descriptor set for ValueHeadPool", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->valueHeadPoolingChannelsFp32.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
@@ -1513,7 +1734,9 @@ void performValueHeadPool(
   uint32_t groupCountZ = static_cast<uint32_t>(batchSize);
   vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::endCommandBuffer(commandBuffer);
+  if ( begin ) {
+    VkHelpers::endCommandBuffer(commandBuffer);
+  }
 }
 
 /**
@@ -1567,6 +1790,27 @@ struct ResidualBlock {
   ResidualBlock() = delete;
   ResidualBlock(const ResidualBlock&) = delete;
   ResidualBlock& operator=(const ResidualBlock&) = delete;
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask
+    // VulkanBuffer* convWorkspace,
+    // VulkanBuffer* convWorkspace2
+  ) {
+
+    SizedBuf<VulkanBuffer*> mid(
+      scratch->allocator,
+      scratch->getBufSizeXY(normActConv->outChannels)
+    );
+    normActConv->forward(cb, batchSize, trunk, trunkScratch, mid.buf , mask);
+    normActConv2->forward(cb, batchSize, mid.buf, mid.buf, trunkScratch, mask);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen), false);
+  }
+
 
   void record(
     int batchSize,
@@ -1721,6 +1965,38 @@ struct GlobalPoolingResidualBlock {
   GlobalPoolingResidualBlock(const GlobalPoolingResidualBlock&) = delete;
   GlobalPoolingResidualBlock& operator=(const GlobalPoolingResidualBlock&) = delete;
 
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+    // VulkanBuffer* convWorkspace,
+    // VulkanBuffer* convWorkspace2,
+  ) {
+    if ( !commandBuffers.empty() ) {
+      commandBuffers.clear();
+    }
+
+    SizedBuf<VulkanBuffer*> regularOut(scratch->allocator, scratch->getBufSizeXY(regularChannels));
+    SizedBuf<VulkanBuffer*> gpoolOut(scratch->allocator, scratch->getBufSizeXY(gpoolChannels));
+    SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(gpoolChannels * 3));
+    SizedBuf<VulkanBuffer*> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(regularChannels));
+
+    preBN->forward(cb, batchSize, trunk, mask, trunkScratch);
+    regularConv->forward(cb, batchSize, trunkScratch, regularOut.buf);
+    gpoolConv->forward(cb, batchSize, trunkScratch, gpoolOut.buf);
+    gpoolBN->forward(cb, batchSize, gpoolOut. buf,mask, gpoolOut.buf);
+    VkResult res;;
+    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, nnXYLen, &res, false);
+    gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
+    performAddChannelBiases(handle, cb, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen, false);
+    normActConv2->forward(cb, batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, batchSize * normActConv2->outChannels * nnXLen * nnYLen, false);
+  }
+
   void record(
     int batchSize,
     ScratchBuffers *scratch,
@@ -1868,6 +2144,26 @@ struct NestedResidualBlock {
   NestedResidualBlock() = delete;
   NestedResidualBlock(const NestedResidualBlock&) = delete;
   NestedResidualBlock& operator=(const NestedResidualBlock&) = delete;
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize, 
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  ) {
+    if ( !commandBuffers.empty() ) {
+      commandBuffers.clear();
+    }
+    SizedBuf<VulkanBuffer*> mid(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
+    SizedBuf<VulkanBuffer*> midScratch(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
+    normActConv->forward(cb, batchSize, trunk, trunkScratch, mid.buf , mask);
+    blocks->forward(cb, batchSize, scratch, mid.buf, midScratch.buf, mask, maskSum);
+    normActConv2->forward(cb, batchSize, mid.buf, mid.buf, trunkScratch, mask);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen), false);
+  }
 
   void record(
     int batchSize, 
@@ -2036,6 +2332,43 @@ void BlockStack::record(
   }
 }
 
+void BlockStack::forward(
+  VkCommandBuffer& cb,
+  int batchSize,
+  ScratchBuffers *scratch,
+  VulkanBuffer* trunk,
+  VulkanBuffer* trunkScratch,
+  VulkanBuffer* mask,
+  VulkanBuffer* maskSum
+) {
+  assert(cb != VK_NULL_HANDLE);
+
+  for (int i = 0 ; i< numBlocks ; ++i ) {
+    int blockType = blocks[i].first;
+    if ( blockType == ORDINARY_BLOCK_KIND ) {
+      ResidualBlock* blockPtr = static_cast<ResidualBlock*>(blocks[i].second.get());
+      if(blockPtr == nullptr) {
+        Global::fatalError("BlockStack::forward: ResidualBlock pointer is null at index " + Global::intToString(i));
+      }
+      blockPtr->forward(cb, batchSize, scratch, trunk, trunkScratch, mask);
+    } else if ( blockType == GLOBAL_POOLING_BLOCK_KIND ) {
+      GlobalPoolingResidualBlock* blockPtr = static_cast<GlobalPoolingResidualBlock*>(blocks[i].second.get());
+      if(blockPtr == nullptr) {
+        Global::fatalError("BlockStack::forward: GlobalPoolingResidualBlock pointer is null at index " + Global::intToString(i));
+      }
+      blockPtr->forward(cb, batchSize, scratch, trunk, trunkScratch, mask, maskSum);
+    } else if ( blockType == NESTED_BOTTLENECK_BLOCK_KIND ) {
+      NestedResidualBlock* blockPtr = static_cast<NestedResidualBlock*>(blocks[i].second.get());
+      if(blockPtr == nullptr) {
+        Global::fatalError("BlockStack::forward: NestedResidualBlock pointer is null at index " + Global::intToString(i));
+      }
+      blockPtr->forward(cb, batchSize, scratch, trunk, trunkScratch, mask, maskSum);
+    } else {
+      ASSERT_UNREACHABLE;
+    }
+  }
+}
+
 void BlockStack::apply(
   int batchSize,
   ScratchBuffers *scratch,
@@ -2111,6 +2444,23 @@ struct SGFMetadataEncoder {
   SGFMetadataEncoder() = delete;
   SGFMetadataEncoder(const SGFMetadataEncoder&) = delete;
   SGFMetadataEncoder& operator=(const SGFMetadataEncoder&) = delete;
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    SizedBuf<VulkanBuffer*> internalBuf1(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
+    SizedBuf<VulkanBuffer*> internalBuf2(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
+    matmul1->forward(cb, batchSize, input, internalBuf1.buf);
+    matBias1->forward(cb, batchSize, internalBuf1.buf);
+    matmul2->forward(cb, batchSize, internalBuf1.buf, internalBuf2.buf);
+    matBias2->forward(cb, batchSize, internalBuf2.buf);
+    matmul3->forward(cb, batchSize, internalBuf2.buf, output);
+  }
 
   /**
    * @brief record SGFMetadataEncoder
@@ -2215,6 +2565,32 @@ struct Trunk {
 
   ~Trunk() {
 
+  }
+
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* inputGlobal,
+    VulkanBuffer* inputMeta,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    SizedBuf<VulkanBuffer*> trunkScratch( scratch->allocator, scratch->getBufSizeXY(trunkNumChannels) );
+
+    initialConv->forward(cb, batchSize, input, trunk);
+    initialMatmul->forward(cb, batchSize, inputGlobal, trunkScratch.buf);
+    performAddChannelBiases(handle, cb, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen, false);
+    if ( sgfMetadataEncoder != nullptr ) {
+      SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
+      sgfMetadataEncoder->forward(cb, batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
+      performAddChannelBiases(handle, cb, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, nnXLen * nnYLen, false);
+    }
+    blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum);
+    trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
   }
 
   void record(
@@ -2372,6 +2748,42 @@ struct PolicyHead {
 
   }
 
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* policyPass,
+    VulkanBuffer* policy
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    SizedBuf<VulkanBuffer*> p1Out(scratch->allocator, scratch->getBufSizeXY(p1Channels));
+    SizedBuf<VulkanBuffer*> gpoolOut(scratch->allocator, scratch->getBufSizeXY(g1Channels));
+    SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(g1Channels * 3));
+    SizedBuf<VulkanBuffer*> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+    SizedBuf<VulkanBuffer*> p1Pass(scratch->allocator, scratch->getBufSizeFloat(p1Channels));
+
+    p1Conv->forward(cb, batchSize, trunk, p1Out.buf);
+    g1Conv->forward(cb, batchSize, trunk, gpoolOut.buf);
+    g1BN->forward(cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf);
+    VkResult res;;
+    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res, false);
+    gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
+    performAddChannelBiases(handle, cb, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, nnXLen * nnYLen, false);
+    p1BN->forward(cb, batchSize, p1Out.buf, mask, p1Out.buf);
+    p2Conv->forward(cb, batchSize, p1Out.buf, policy);
+
+    if ( modelVersion >= 15 ) {
+      gpoolToPassMul->forward(cb, batchSize, gpoolConcat.buf, p1Pass.buf);
+      gpoolToPassBias->forward(cb, batchSize, p1Pass.buf);
+      gpoolToPassMul2->forward(cb, batchSize, p1Pass.buf, policyPass);
+    } else {
+      gpoolToPassMul->forward(cb, batchSize, gpoolConcat.buf, policyPass);
+    }
+  }
+
   void record(
     int batchSize,
     ScratchBuffers *scratch,
@@ -2524,6 +2936,37 @@ struct ValueHead {
 
   }
 
+  void forward(
+    VkCommandBuffer& cb,
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* trunk,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* value,
+    VulkanBuffer* scoreValue,
+    VulkanBuffer* ownership
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    SizedBuf<VulkanBuffer*> v1Out(scratch->allocator, scratch->getBufSizeXY(v1Channels));
+    SizedBuf<VulkanBuffer*> v1Mean(scratch->allocator, scratch->getBufSizeFloat(v1Channels*3));
+    SizedBuf<VulkanBuffer*> v2Out(scratch->allocator, scratch->getBufSizeFloat(v2Channels));
+
+    v1Conv->forward(cb, batchSize, trunk, v1Out.buf);
+    v1BN->forward(cb, batchSize, v1Out.buf, mask, v1Out.buf);
+    VkResult res;;
+    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, nnXLen * nnYLen, false);
+
+    v2Mul->forward(cb, batchSize, v1Mean.buf, v2Out.buf);
+    v2Bias->forward(cb, batchSize, v2Out.buf);
+    v3Mul->forward(cb, batchSize, v2Out.buf, value);
+    v3Bias->forward(cb, batchSize, value);
+
+    sv3Mul->forward(cb, batchSize, v2Out.buf, scoreValue);
+    sv3Bias->forward(cb, batchSize, scoreValue);
+    vOwnershipConv->forward(cb, batchSize, v1Out.buf, ownership);
+  }
+
   void record(
     int batchSize,
     ScratchBuffers *scratch,
@@ -2635,7 +3078,8 @@ void computeMaskSums(
   int nnXLen,
   int nnYLen,
   VulkanBuffer* mask,
-  VulkanBuffer* maskSum
+  VulkanBuffer* maskSum,
+  bool begin = true
 ) {
   static constexpr int nKernelDims = 3;
   // SumChannels shader uses numthreads(SUM_CHANNELS_DISPATCH_X=64, 1, 1)
@@ -2664,7 +3108,10 @@ void computeMaskSums(
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
   }
-  res = VkHelpers::beginCommandBuffer(commandBuffer);
+
+  if ( begin ) {
+    res = VkHelpers::beginCommandBuffer(commandBuffer);
+  }
   CHECK_VK_MSG("Begin compute mask sum command buffer", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
@@ -2676,7 +3123,10 @@ void computeMaskSums(
   // Dispatch: X=1 (reduction), Y=numChannels(=1 for mask sum), Z=batchSize
   vkCmdDispatch(commandBuffer, 1u, static_cast<uint32_t>(numChannels), static_cast<uint32_t>(batchSize));
   VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::endCommandBuffer(commandBuffer);
+
+  if ( begin ) {
+    VkHelpers::endCommandBuffer(commandBuffer);
+  }
 }
 
 /**
@@ -2783,6 +3233,35 @@ struct Model {
       VkHelpers::destroyFence(handle->vulkanDevice, fence);
       fence = VK_NULL_HANDLE; 
     }
+  }
+
+  void forward(
+    int batchSize,
+    ScratchBuffers *scratch,
+    VulkanBuffer* input,
+    VulkanBuffer* inputGlobal,
+    VulkanBuffer* inputMeta,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* trunkBuf,
+    VulkanBuffer* policyPass,
+    VulkanBuffer* policy,
+    VulkanBuffer* value,
+    VulkanBuffer* scoreValue,
+    VulkanBuffer* ownership
+  ) {
+    VkCommandBuffer forwardCB = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = VkHelpers::beginCommandBuffer(forwardCB);
+    CHECK_VK_MSG("Begin model forward command buffer", res);
+    performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen, false);
+    computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum, false);
+    trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum);
+    policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy);
+    valueHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership); 
+    VkHelpers::endCommandBuffer(forwardCB);
+    vkResetFences(handle->vulkanDevice->device, 1, &fence);
+    VkHelpers::submitCommandBuffers(handle->vulkanDevice, { forwardCB }, fence);
+    vkWaitForFences(handle->vulkanDevice->device, 1, &fence, VK_TRUE, UINT64_MAX);
   }
 
   void record(
@@ -3448,6 +3927,8 @@ void NeuralNet::getOutput(
       CHECK_VK_MSG("Copy input meta buffer to device", res);
     }
 
+
+    #ifdef VULKAN_API_DEBUG
     VK_BENCHMARK(
       "model->record",
       computeHandle->model->record(
@@ -3467,8 +3948,25 @@ void NeuralNet::getOutput(
       );
     )
 
-    #ifdef VULKAN_API_DEBUG
-    computeHandle->model->debug(
+    VK_BENCHMARK("model->debug",
+      computeHandle->model->debug(
+        batchSize,
+        computeHandle->scratch.get(),
+        buffers->input,
+        buffers->inputGlobal,
+        buffers->inputMeta,
+        buffers->mask,
+        buffers->maskSum,
+        buffers->trunk,
+        buffers->policyPass,
+        buffers->policy,
+        buffers->value,
+        buffers->scoreValue,
+        buffers->ownership
+      );
+    );
+    #else 
+    VK_BENCHMARK("model->forward", computeHandle->model->forward(
       batchSize,
       computeHandle->scratch.get(),
       buffers->input,
@@ -3482,16 +3980,8 @@ void NeuralNet::getOutput(
       buffers->value,
       buffers->scoreValue,
       buffers->ownership
-    );
-    #else 
-    VK_BENCHMARK(
-      "model->apply",
-      computeHandle->model->apply();
-    );
+    ););
     #endif
-
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
 
     // Read back PolicyPass result
     VkHelpers::copyDeviceBufferToHost(
@@ -3503,9 +3993,6 @@ void NeuralNet::getOutput(
       &res
     );
     CHECK_VK_MSG("Copy policy pass results buffer to host", res);
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
-
 
     #ifdef VULKAN_API_DEBUG
     printHostBuffer(
@@ -3516,8 +4003,6 @@ void NeuralNet::getOutput(
     #endif
     // std::cout << "policy pass result[0]: " << inputBuffers->policyPassResults[0] << std::endl;
 
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
 
     // Read back Policy result
     if ( useFP16Storage ) {
@@ -3552,8 +4037,6 @@ void NeuralNet::getOutput(
     );
     CHECK_VK_MSG("Copy value results buffer to host", res);
     vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
-
 
     #ifdef VULKAN_API_DEBUG
     printHostBuffer(
@@ -3573,8 +4056,6 @@ void NeuralNet::getOutput(
       &res
     );
     CHECK_VK_MSG("Copy score value results buffer to host", res);
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
 
     #ifdef VULKAN_API_DEBUG
     printHostBuffer(
@@ -3597,8 +4078,6 @@ void NeuralNet::getOutput(
         &res
       );
       CHECK_VK_MSG("Copy ownership results buffer to host", res);
-      vkQueueWaitIdle(handle->queue);
-      vkDeviceWaitIdle(handle->device);
       #ifdef VULKAN_API_DEBUG
       printHostBuffer(
         "[NeuralNet::getOutput] ownership results",
@@ -3608,11 +4087,7 @@ void NeuralNet::getOutput(
       #endif
     }
 
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
     vkResetCommandPool(handle->device, handle->vulkanDevice->commandPool, 0);
-    vkQueueWaitIdle(handle->queue);
-    vkDeviceWaitIdle(handle->device);
     
     assert(outputs.size() == static_cast<size_t>(batchSize));
 
