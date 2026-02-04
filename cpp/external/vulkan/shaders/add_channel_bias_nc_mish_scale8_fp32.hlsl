@@ -5,6 +5,7 @@
 *   accum[n,c] = (a < 2.5) ? a * tanh(log(1 + exp(a*8))) : a
 * where a = accum[n,c] + bias[c]
 * Matches OpenCL addCBiasesNCAct kernel behavior
+* Uses 1D dispatch for better GPU utilization with small batch sizes
 *
 * Binding 0: accum (RW) - input/output tensor [N, C]
 * Binding 1: bias       - bias vector [C]
@@ -25,13 +26,13 @@ RWStructuredBuffer<float> g_accum;
 [[vk::binding(1, 0)]]
 StructuredBuffer<float>   g_bias;
 
-[numthreads(ADD_CHANNELS_DISPATCH_X, ADD_CHANNELS_DISPATCH_Y, 1)]
+[numthreads(ADD_CHANNEL_BIAS_NC_DISPATCH_X, ADD_CHANNEL_BIAS_NC_DISPATCH_Y, ADD_CHANNEL_BIAS_NC_DISPATCH_Z)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-    uint n = DTid.x;   // batch
-    uint c = DTid.y;   // channel
-    if (n < params.nSize && c < params.cSize) {
-        uint idx = n * params.cSize + c;
+    uint totalSize = params.nSize * params.cSize;
+    uint idx = DTid.x;
+    if (idx < totalSize) {
+        uint c = idx % params.cSize;  // channel index
         g_accum[idx] = MISH_SCALE8(g_accum[idx] + g_bias[c]);
     }
 }

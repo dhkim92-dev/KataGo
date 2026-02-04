@@ -428,7 +428,9 @@ private:
       nullptr
     );
 
-    // Matmul uses numthreads(MATMUL_DISPATCH_X=16, MATMUL_DISPATCH_Y=16) with TILE_M=16, TILE_N=16
+    // Optimized Matmul uses numthreads(MATMUL_THREAD_M=16, MATMUL_THREAD_N=16) with register tiling
+    // Each thread computes MATMUL_WORK_M=4 x MATMUL_WORK_N=4 outputs
+    // Workgroup tile size: TILE_M=64 (16*4), TILE_N=64 (16*4)
     // HLSL: GId.x = groupM (M axis), GId.y = groupN (N axis)
     uint32_t groupCountX = (static_cast<uint32_t>(batchSize) + MATMUL_TILE_M - 1) / MATMUL_TILE_M;  // M Direction
     uint32_t groupCountY = (static_cast<uint32_t>(outChannels) + MATMUL_TILE_N - 1) / MATMUL_TILE_N; // N Direction
@@ -527,10 +529,10 @@ struct BatchNormLayer {
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
 
     // globalSizes are dispatch group counts, computed by dividing problem size by local workgroup size
-    // BatchNorm uses numthreads(BN_DISPATCH_X=16, BN_DISPATCH_Y=16, BN_DISPATCH_Z=1)
-    // Thread mapping: x->channel, y->spatial, z->batch
-    globalSizes[0] = (static_cast<size_t>(numChannels) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
-    globalSizes[1] = (static_cast<size_t>(nnXYLen) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
+    // BatchNorm uses numthreads(BN_DISPATCH_X=32, BN_DISPATCH_Y=8, BN_DISPATCH_Z=1)
+    // Thread mapping optimized for memory coalescing: x->spatial, y->channel, z->batch
+    globalSizes[0] = (static_cast<size_t>(nnXYLen) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
+    globalSizes[1] = (static_cast<size_t>(numChannels) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
   }
 
   void forward(
@@ -588,9 +590,10 @@ struct BatchNormLayer {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskParams), &pushConstants);
-    // Dispatch: x=channels, y=spatial, z=batch (shader uses BN_DISPATCH_X=16, BN_DISPATCH_Y=16, BN_DISPATCH_Z=1)
-    uint32_t dispatchX = (static_cast<uint32_t>(numChannels) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
-    uint32_t dispatchY = (static_cast<uint32_t>(nnXYLen) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
+    // Dispatch: x=spatial, y=channels, z=batch (optimized for memory coalescing in NCHW layout)
+    // Shader uses numthreads(BN_DISPATCH_X=32, BN_DISPATCH_Y=8, BN_DISPATCH_Z=1)
+    uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
+    uint32_t dispatchY = (static_cast<uint32_t>(numChannels) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
     uint32_t dispatchZ = static_cast<uint32_t>(batchSize);
     vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
     VkHelpers::barrierCommandBuffer(cb);
@@ -1117,10 +1120,10 @@ struct MatBiasLayer {
       nullptr
     );
 
-    static constexpr int nKernelDims = 2;
-    uint32_t dispatchX = (static_cast<uint32_t>(batchSize) + ADD_CHANNELS_DISPATCH_X - 1) / ADD_CHANNELS_DISPATCH_X;
-    uint32_t dispatchY = (static_cast<uint32_t>(numChannels) + ADD_CHANNELS_DISPATCH_Y - 1) / ADD_CHANNELS_DISPATCH_Y;
-    vkCmdDispatch(cb, dispatchX, dispatchY, 1);
+    // 1D dispatch: total elements = batchSize * numChannels
+    uint32_t totalSize = static_cast<uint32_t>(batchSize) * static_cast<uint32_t>(numChannels);
+    uint32_t dispatchX = (totalSize + ADD_CHANNEL_BIAS_NC_THREADS - 1) / ADD_CHANNEL_BIAS_NC_THREADS;
+    vkCmdDispatch(cb, dispatchX, 1, 1);
     VkHelpers::barrierCommandBuffer(cb);
     // res = VkHelpers::endCommandBuffer(commandBuffer);
     // CHECK_VK_MSG("End command buffer for MatBiasLayer: " + name, res);
@@ -1372,12 +1375,11 @@ void performAddChannelBiases(
     sizeof(KatagoVulkan::AddChannelBiasNCHWParams),
     &pushConstants
   );
-  // Dispatch count = globalSizes / localSizes
-  // AddChannelBias shader uses numthreads(ADD_CHANNELS_DISPATCH_X=16, ADD_CHANNELS_DISPATCH_Y=16, 1)
-  uint32_t dispatchX = (static_cast<uint32_t>(globalSizes[0]) + ADD_CHANNELS_DISPATCH_X - 1) / ADD_CHANNELS_DISPATCH_X;
-  uint32_t dispatchY = (static_cast<uint32_t>(globalSizes[1]) + ADD_CHANNELS_DISPATCH_Y - 1) / ADD_CHANNELS_DISPATCH_Y;
-  // vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
-  vkCmdDispatch(commandBuffer, globalSizes[0], globalSizes[1], 1);
+  // Dispatch count = ceil(size / workgroupSize)
+  // AddChannelBias NCHW shader uses numthreads(ADD_CHANNELS_DISPATCH_X=16, ADD_CHANNELS_DISPATCH_Y=16, 1)
+  uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + ADD_CHANNELS_DISPATCH_X - 1) / ADD_CHANNELS_DISPATCH_X;
+  uint32_t dispatchY = (static_cast<uint32_t>(ncSize) + ADD_CHANNELS_DISPATCH_Y - 1) / ADD_CHANNELS_DISPATCH_Y;
+  vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
   VkHelpers::barrierCommandBuffer(commandBuffer);
   if ( begin ) {
     VkHelpers::endCommandBuffer(commandBuffer);
@@ -1521,9 +1523,9 @@ void performGpoolMask(
     &pushConstants
   );
 
-  // GlobalPooling shader uses numthreads(POOLING_DISPATCH_X=64, 1, 1)
+  // GlobalPooling shader uses numthreads(POOLING_DISPATCH_X=128, 1, 1)
   // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
-  // OpenCL equivalent: localSizes={XYSTRIDE,CHANNELSTRIDE,BATCHSTRIDE}, globalSizes={XYSTRIDE, roundUp(channels), roundUp(batch)}
+  // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
   // Since Vulkan shader has fixed numthreads with Y,Z=1, dispatch Y,Z directly equals channel and batch counts
   uint32_t groupCountX = 1u;
   uint32_t groupCountY = static_cast<uint32_t>(gpoolChannels);
@@ -1599,9 +1601,9 @@ void performValueHeadPool(
     sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams),
     &pushConstants
   );
-  // ValueHeadPool shader uses numthreads(POOLING_DISPATCH_X=64, 1, 1)
+  // ValueHeadPool shader uses numthreads(POOLING_DISPATCH_X=128, 1, 1)
   // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
-  // Same pattern as GlobalPooling - dispatch Y,Z directly equals channel and batch counts
+  // Same pattern as GlobalPooling - each workgroup processes one (batch, channel) pair
   uint32_t groupCountX = 1u;
   uint32_t groupCountY = static_cast<uint32_t>(valueHeadChannels);
   uint32_t groupCountZ = static_cast<uint32_t>(batchSize);
@@ -2515,9 +2517,9 @@ void computeMaskSums(
   bool begin = true
 ) {
   static constexpr int nKernelDims = 3;
-  // SumChannels shader uses numthreads(SUM_CHANNELS_DISPATCH_X=64, 1, 1)
+  // SumChannels shader uses numthreads(SUM_CHANNELS_DISPATCH_X=128, 1, 1)
   // Dispatch: X=1 (single workgroup for reduction), Y=numChannels, Z=batchSize
-  // Each workgroup processes one (batch, channel) pair
+  // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
   // VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
   int numChannels = 1;

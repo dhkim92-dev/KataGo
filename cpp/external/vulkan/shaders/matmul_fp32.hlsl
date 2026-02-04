@@ -1,14 +1,13 @@
 /**
 * @author dhkim92.dev@gmail.com
 */
-// Tiled MatMul HLSL for Vulkan
+// Optimized Tiled MatMul HLSL for Vulkan with Register Tiling
+// Each thread computes MATMUL_WORK_M x MATMUL_WORK_N output elements
 // Globals: input tensor (A), weight tensor (B), output tensor (C)
 // Push constants match KatagoVulkan::MatmulFp32: M,K,N,numBatchElts,cTranspose
 
 #include "common.h"
 #include "functions.h"
-
-// Threadgroup size should match TILE_M x TILE_N for this simple implementation
 
 // Push constants - mapped by host as push constants
 struct MatmulPushConstants  {
@@ -23,19 +22,21 @@ struct MatmulPushConstants  {
 MatmulPushConstants params;
 
 // Descriptor bindings: weights(B) read-only, input(A) read-write, output(C) read-write
-// weights (read-only),input (read-write), output (read-write)
 // NOTE: Host packs weights as N x K (outChannels x inChannels) row-major: index = n*K + k
 [[vk::binding(0, 0)]]
 StructuredBuffer<float> gInput;
 [[vk::binding(1, 0)]]
-StructuredBuffer<float>  gWeights;
+StructuredBuffer<float> gWeights;
 [[vk::binding(2, 0)]]
 RWStructuredBuffer<float> gOutput;
 
-groupshared float Asub[MATMUL_TILE_M * MATMUL_TILE_K];
-groupshared float Bsub[MATMUL_TILE_K * MATMUL_TILE_N];
+// Shared memory with padding to avoid bank conflicts
+// A tile: MATMUL_TILE_M x MATMUL_TILE_K
+// B tile: MATMUL_TILE_K x MATMUL_TILE_N
+groupshared float Asub[MATMUL_TILE_M * (MATMUL_TILE_K + MATMUL_SMEM_PAD)];
+groupshared float Bsub[MATMUL_TILE_K * (MATMUL_TILE_N + MATMUL_SMEM_PAD)];
 
-[numthreads(MATMUL_TILE_M, MATMUL_TILE_N, 1)]
+[numthreads(MATMUL_THREAD_M, MATMUL_THREAD_N, 1)]
 void main(uint3 DTid : SV_DispatchThreadID,
           uint3 GTid : SV_GroupThreadID,
           uint3 GId  : SV_GroupID)
@@ -46,86 +47,136 @@ void main(uint3 DTid : SV_DispatchThreadID,
     uint groupZ = GId.z; // instance index (0..numBatchElts-1)
 
     // Local thread coordinates inside group
-    uint localRow = GTid.x; // 0..MATMUL_TILE_M-1
-    uint localCol = GTid.y; // 0..MATMUL_TILE_N-1
+    uint localM = GTid.x; // 0..MATMUL_THREAD_M-1
+    uint localN = GTid.y; // 0..MATMUL_THREAD_N-1
+    uint tid = localM * MATMUL_THREAD_N + localN; // 0..255
 
-    // Global row/col base for this tile
+    // Global row/col base for this workgroup tile
     uint rowBase = groupM * MATMUL_TILE_M;
     uint colBase = groupN * MATMUL_TILE_N;
 
-    // Row and col this thread will compute within C
-    uint row = rowBase + localRow;
-    uint col = colBase + localCol;
-
     // Per-instance offsets assuming contiguous per-instance layout
-    uint aInstanceStride = params.M * params.K; // elements per A instance
-    uint bInstanceStride = params.K * params.N; // elements per B instance
-    uint cInstanceStride = params.M * params.N; // elements per C instance
+    uint aInstanceStride = params.M * params.K;
+    uint bInstanceStride = params.K * params.N;
+    uint cInstanceStride = params.M * params.N;
 
     uint aBase = groupZ * aInstanceStride;
     uint bBase = groupZ * bInstanceStride;
     uint cBase = groupZ * cInstanceStride;
 
-    // Accumulator
-    float acc = 0.0f;
+    // Accumulators - each thread computes WORK_M x WORK_N outputs
+    float acc[MATMUL_WORK_M][MATMUL_WORK_N];
+    [unroll]
+    for (uint wm = 0; wm < MATMUL_WORK_M; ++wm) {
+        [unroll]
+        for (uint wn = 0; wn < MATMUL_WORK_N; ++wn) {
+            acc[wm][wn] = 0.0f;
+        }
+    }
 
-    // Linear thread ID for efficient shared memory loading
-    uint tid = localRow * MATMUL_TILE_N + localCol; // 0..255
+    // Number of threads and elements to load
+    uint numThreads = MATMUL_THREAD_M * MATMUL_THREAD_N;  // 256
+    uint aElems = MATMUL_TILE_M * MATMUL_TILE_K;          // 64 * 16 = 1024
+    uint bElems = MATMUL_TILE_K * MATMUL_TILE_N;          // 16 * 64 = 1024
+    uint aLoadsPerThread = (aElems + numThreads - 1) / numThreads;  // 4
+    uint bLoadsPerThread = (bElems + numThreads - 1) / numThreads;  // 4
+
+    uint aStride = MATMUL_TILE_K + MATMUL_SMEM_PAD;
+    uint bStride = MATMUL_TILE_N + MATMUL_SMEM_PAD;
 
     // Loop over K in blocks
     [loop]
     for (uint kk = 0; kk < params.K; kk += MATMUL_TILE_K) {
-        // Load A sub-tile into shared memory (TILE_M x TILE_K = 128 elements)
-        // Each thread loads at most 1 element
-        if (tid < MATMUL_TILE_M * MATMUL_TILE_K) {
-            uint aLocalRow = tid / MATMUL_TILE_K;
-            uint aLocalCol = tid % MATMUL_TILE_K;
-            uint aRow = rowBase + aLocalRow;
-            uint aCol = kk + aLocalCol;
-            float aVal = 0.0f;
-            if (aRow < params.M && aCol < params.K) {
-                uint aIndex = aBase + aRow * params.K + aCol;
-                aVal = gInput[aIndex];
+        // Load A sub-tile into shared memory (TILE_M x TILE_K)
+        // Each thread loads multiple elements
+        [unroll]
+        for (uint i = 0; i < aLoadsPerThread; ++i) {
+            uint loadIdx = tid + i * numThreads;
+            if (loadIdx < aElems) {
+                uint aLocalRow = loadIdx / MATMUL_TILE_K;
+                uint aLocalCol = loadIdx % MATMUL_TILE_K;
+                uint aRow = rowBase + aLocalRow;
+                uint aCol = kk + aLocalCol;
+                float aVal = 0.0f;
+                if (aRow < params.M && aCol < params.K) {
+                    uint aIndex = aBase + aRow * params.K + aCol;
+                    aVal = gInput[aIndex];
+                }
+                Asub[aLocalRow * aStride + aLocalCol] = aVal;
             }
-            Asub[tid] = aVal;
         }
 
-        // Load B sub-tile into shared memory (TILE_K x TILE_N = 128 elements)
-        // Each thread loads at most 1 element
-        if (tid < MATMUL_TILE_K * MATMUL_TILE_N) {
-            uint bLocalRow = tid / MATMUL_TILE_N; // k offset
-            uint bLocalCol = tid % MATMUL_TILE_N; // n offset
-            uint bRow = kk + bLocalRow;
-            uint bCol = colBase + bLocalCol;
-            float bVal = 0.0f;
-            if (bRow < params.K && bCol < params.N) {
-                uint bIndex = bBase + bCol * params.K + bRow;
-                bVal = gWeights[bIndex];
+        // Load B sub-tile into shared memory (TILE_K x TILE_N)
+        [unroll]
+        for (uint i = 0; i < bLoadsPerThread; ++i) {
+            uint loadIdx = tid + i * numThreads;
+            if (loadIdx < bElems) {
+                uint bLocalRow = loadIdx / MATMUL_TILE_N;  // k offset
+                uint bLocalCol = loadIdx % MATMUL_TILE_N;  // n offset
+                uint bRow = kk + bLocalRow;
+                uint bCol = colBase + bLocalCol;
+                float bVal = 0.0f;
+                if (bRow < params.K && bCol < params.N) {
+                    // Weights stored as [N][K] (col-major from host perspective)
+                    uint bIndex = bBase + bCol * params.K + bRow;
+                    bVal = gWeights[bIndex];
+                }
+                Bsub[bLocalRow * bStride + bLocalCol] = bVal;
             }
-            Bsub[tid] = bVal;
         }
 
         GroupMemoryBarrierWithGroupSync();
 
-        // Compute partial product for this tile
+        // Compute partial products - each thread computes WORK_M x WORK_N outputs
         [unroll]
         for (uint kInner = 0; kInner < MATMUL_TILE_K; ++kInner) {
-            float aVal = Asub[localRow * MATMUL_TILE_K + kInner];
-            float bVal = Bsub[kInner * MATMUL_TILE_N + localCol];
-            acc += aVal * bVal;
+            // Load A values for this thread's rows into registers
+            float aReg[MATMUL_WORK_M];
+            [unroll]
+            for (uint wm = 0; wm < MATMUL_WORK_M; ++wm) {
+                uint aRow = localM * MATMUL_WORK_M + wm;
+                aReg[wm] = Asub[aRow * aStride + kInner];
+            }
+
+            // Load B values for this thread's columns into registers
+            float bReg[MATMUL_WORK_N];
+            [unroll]
+            for (uint wn = 0; wn < MATMUL_WORK_N; ++wn) {
+                uint bCol = localN * MATMUL_WORK_N + wn;
+                bReg[wn] = Bsub[kInner * bStride + bCol];
+            }
+
+            // Outer product: acc += aReg * bReg^T
+            [unroll]
+            for (uint wm = 0; wm < MATMUL_WORK_M; ++wm) {
+                [unroll]
+                for (uint wn = 0; wn < MATMUL_WORK_N; ++wn) {
+                    acc[wm][wn] += aReg[wm] * bReg[wn];
+                }
+            }
         }
 
         GroupMemoryBarrierWithGroupSync();
     }
 
-    // Write result
-    if (row < params.M && col < params.N) {
-        uint cIndex;
-        if (params.cTranspose == 1) {
-            cIndex = cBase + row * params.N + col;  // [M][N] row-major
-        } else {
-            cIndex = cBase + col * params.M + row;  // [N][M] column-major
+    // Write results - each thread writes WORK_M x WORK_N outputs
+    [unroll]
+    for (uint wm = 0; wm < MATMUL_WORK_M; ++wm) {
+        uint row = rowBase + localM * MATMUL_WORK_M + wm;
+        if (row < params.M) {
+            [unroll]
+            for (uint wn = 0; wn < MATMUL_WORK_N; ++wn) {
+                uint col = colBase + localN * MATMUL_WORK_N + wn;
+                if (col < params.N) {
+                    uint cIndex;
+                    if (params.cTranspose == 1) {
+                        cIndex = cBase + row * params.N + col;  // [M][N] row-major
+                    } else {
+                        cIndex = cBase + col * params.M + row;  // [N][M] column-major
+                    }
+                    gOutput[cIndex] = acc[wm][wn];
+                }
+            }
         }
-        gOutput[cIndex] = acc;
     }
 }

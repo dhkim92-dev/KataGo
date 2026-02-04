@@ -2,6 +2,10 @@
 * @author dhkim92.dev@gmail.com
 * @brief BatchNorm (Mask) + ReLU Activation FP32 compute shader
 * Format: NCHW
+* Thread mapping optimized for memory coalescing:
+*   x -> spatial (contiguous in NCHW memory layout)
+*   y -> channel
+*   z -> batch
 */
 
 #include "common.h"
@@ -26,12 +30,12 @@ StructuredBuffer<float> g_bias;
 RWStructuredBuffer<float> g_output;
 
 
-[numthreads(BN_DISPATCH_X,BN_DISPATCH_Y,BN_DISPATCH_Z)]
+[numthreads(BN_DISPATCH_X, BN_DISPATCH_Y, BN_DISPATCH_Z)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-        uint channelIdx = DTid.x;
-    uint spatialIdx = DTid.y;
-    uint batchIdx = DTid.z;
+    uint spatialIdx = DTid.x;   // x -> spatial (contiguous memory access)
+    uint channelIdx = DTid.y;   // y -> channel
+    uint batchIdx = DTid.z;     // z -> batch
     
     if (batchIdx >= params.batchSize || channelIdx >= params.numChannels || spatialIdx >= params.nnXYLen) {
         return; 
