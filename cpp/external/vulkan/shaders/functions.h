@@ -21,7 +21,10 @@
 #define SQRTEIGHTH 0.35355339059f
 #define LOG1PEXPTHRESHOLD 20.0f
 #define RELU(x) max(0.0f, x)
-#define MISH(x) (x * tanh(log(1.0f + exp(x))))
+// MISH with numerical stability: for large x, tanh(softplus(x)) ≈ 1, so mish(x) ≈ x
+// This matches OpenCL's implementation which uses log1p(exp(x)) with threshold check
+#define MISH(x) ((x) < LOG1PEXPTHRESHOLD ? (x) * tanh(log(1.0f + exp(x))) : (x))
+// MISH_SCALE8: threshold is LOG1PEXPTHRESHOLD * 0.125 = 2.5
 #define MISH_SCALE8(x) ((x) < 2.5f ? (x) * tanh(log(1.0f + exp((x) * 8.0f))) : (x))
 #define IDENTITY(x) (x)
 #endif // __FUNCTIONS_HLSL__

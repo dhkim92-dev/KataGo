@@ -40,6 +40,7 @@ static void printHostBuffer(
   const float* hostBuffer,
   size_t numElts
 ) {
+#ifdef VULKAN_API_DEBUG
   // print prefix first
   std::cout << prefix << " = " << std::endl;
   // print vector as python format, that can copy it to python code
@@ -51,6 +52,7 @@ static void printHostBuffer(
     }
   }
   std::cout << "]" << std::endl;
+#endif
 }
 
 static void printDeviceBuffer(
@@ -60,6 +62,7 @@ static void printDeviceBuffer(
   size_t numElts,
   bool summarized = true
 ) {
+#ifdef VULKAN_API_DEBUG
   VkResult res;
   std::vector<float> hostBuffer(numElts);
   VkHelpers::copyDeviceBufferToHost(
@@ -78,6 +81,7 @@ static void printDeviceBuffer(
   std::cout << "[";
 
   int limits = summarized ? 10 : numElts;
+  limits  = limits > numElts ? numElts : limits;
   for ( size_t i = 0 ; i < limits ; i++ ) {
     std::cout << hostBuffer[i];
     if ( i != limits - 1 ) {
@@ -85,6 +89,7 @@ static void printDeviceBuffer(
     }
   }
   std::cout << "]" << std::endl;
+#endif
 }
 
 struct ComputeContext {
@@ -2208,6 +2213,9 @@ struct Trunk {
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
     performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
     VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
+    {
+      printDeviceBuffer(name  + "/add_channel_bias0 Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(trunkNumChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
+    }
     if ( sgfMetadataEncoder != nullptr ) {
       VkCommandBuffer addChannelBiasCB2 = VK_NULL_HANDLE;
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));

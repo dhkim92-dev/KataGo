@@ -58,12 +58,14 @@ groupshared float biasCache[CONV_BNACT_TILE_K];
 groupshared float maskCache[FHFW][CONV_BNACT_TILE_Y][CONV_BNACT_TILE_X + 1];
 
 // Inline function to apply activation
+// Activation values must match activations.h:
+// ACTIVATION_IDENTITY = 0, ACTIVATION_RELU = 1, ACTIVATION_MISH = 2, ACTIVATION_MISH_SCALE8 = 12
 float applyActivation(float x, uint activation)
 {
     if (activation == 0u) return IDENTITY(x);
     if (activation == 1u) return RELU(x);
     if (activation == 2u) return MISH(x);
-    if (activation == 3u) return MISH_SCALE8(x);
+    if (activation == 12u) return MISH_SCALE8(x);
     return RELU(x);
 }
 
