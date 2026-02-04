@@ -58,6 +58,7 @@ struct VulkanBuffer {
   VkBuffer buffer;
   VmaAllocation allocation;
   VmaAllocationInfo allocationInfo;
+  VkDeviceSize requestedSize;
   VulkanBuffer() = default;
   ~VulkanBuffer() = default;
   VulkanBuffer(const VulkanBuffer&) = delete;
@@ -152,7 +153,7 @@ namespace VkHelpers {
     WriteDescriptorSet result;
     result.bufferInfo.buffer = buffer->buffer;
     result.bufferInfo.offset = 0;
-    result.bufferInfo.range = buffer->allocationInfo.size;
+    result.bufferInfo.range = buffer->requestedSize;
     result.vkWriteDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     result.vkWriteDescriptorSet.dstSet = dstSet;
     result.vkWriteDescriptorSet.dstBinding = dstBinding;

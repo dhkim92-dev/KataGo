@@ -11,10 +11,11 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <iomanip>
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
-
+// #define SHADER_PROFILE
 #define FLOAT16_SIZE_IN_BYTES 2
 
 static void checkBufferSize(int batchSize, int nnXLen, int nnYLen, int channels) {
@@ -27,6 +28,17 @@ static size_t byteSizeofVectorContents(const typename std::vector<T>& vec) {
   return sizeof(T) * vec.size();
 }
 
+struct CommandDispatchInfo {
+  std::string shaderName;
+  uint64_t startQueryIdx;
+  uint64_t endQueryIdx;
+};
+
+struct ShaderExecutionInfo {
+  uint64_t callCount;
+  uint64_t totalExecutionTimeNs;
+};
+
 struct ComputeHandleInternal {
   const ComputeContext* context;
   const VulkanDevice* vulkanDevice;
@@ -36,6 +48,98 @@ struct ComputeHandleInternal {
   bool usingFp16Compute = false;
   bool usingFP16TensorCores = false;
   bool usingFP16TensorCoresFor1x1 = false;
+
+#ifdef SHADER_PROFILE
+  uint64_t runCount = 0;
+  uint64_t queryIdx = 0;
+  VkQueryPool queryPool = VK_NULL_HANDLE;
+  std::vector<CommandDispatchInfo> commandDispatchInfos;
+  std::unordered_map<std::string, ShaderExecutionInfo> shaderProfileInfos;
+
+  void dumpShaderProfile() {
+    runCount++;
+
+    // Get timestampPeriod for tick -> nanosecond conversion
+    double timestampPeriod = 1.0;
+    if (vulkanDevice != nullptr) {
+      timestampPeriod = static_cast<double>(vulkanDevice->info.properties.limits.timestampPeriod);
+    }
+
+    // Query results for each dispatch and accumulate into shaderProfileInfos
+    for (const auto& dispatchInfo : commandDispatchInfos) {
+      const std::string& name = dispatchInfo.shaderName;
+      uint64_t startIdx = dispatchInfo.startQueryIdx;
+      uint64_t endIdx = dispatchInfo.endQueryIdx;
+
+      if (endIdx <= startIdx) continue;
+
+      // Read start and end timestamps (2 queries per dispatch)
+      uint64_t timestamps[2] = {0, 0};
+      VkResult res = vkGetQueryPoolResults(
+        device,
+        queryPool,
+        static_cast<uint32_t>(startIdx),
+        2,  // start and end timestamps
+        sizeof(timestamps),
+        timestamps,
+        sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+      );
+
+      uint64_t executionNs = 0;
+      if (res == VK_SUCCESS && timestamps[1] >= timestamps[0]) {
+        uint64_t ticks = timestamps[1] - timestamps[0];
+        double ns = static_cast<double>(ticks) * timestampPeriod;
+        executionNs = static_cast<uint64_t>(ns + 0.5);
+      }
+
+      // Accumulate into shaderProfileInfos
+      auto iter = shaderProfileInfos.find(name);
+      if (iter == shaderProfileInfos.end()) {
+        ShaderExecutionInfo newInfo;
+        newInfo.callCount = 1;
+        newInfo.totalExecutionTimeNs = executionNs;
+        shaderProfileInfos[name] = newInfo;
+      } else {
+        iter->second.callCount += 1;
+        iter->second.totalExecutionTimeNs += executionNs;
+      }
+    }
+
+    // Print profile results every 100 runs
+    if (runCount % 100 == 0) {
+      std::cout << "## Vulkan Shader Profile Results (Run " << runCount << "):\n";
+      std::cout << std::fixed << std::setprecision(3);
+
+      for (auto& pair : shaderProfileInfos) {
+        const std::string& name = pair.first;
+        const ShaderExecutionInfo& info = pair.second;
+
+        double totalTimeSec = static_cast<double>(info.totalExecutionTimeNs) / 1e9;  // ns -> sec
+        double avgTimeMs = (info.callCount > 0)
+          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(info.callCount) / 1e6  // ns -> ms
+          : 0.0;
+
+        std::cout << name << " / " << info.callCount
+                  << " / " << totalTimeSec << " s / " << avgTimeMs << " ms\n";
+
+        // Reset counters for next interval
+        pair.second.callCount = 0;
+        pair.second.totalExecutionTimeNs = 0;
+      }
+
+      std::cout << std::defaultfloat;
+      std::cout << "## End of Vulkan Shader Profile Results\n";
+    }
+
+    // Clear dispatch infos and reset query pool for next batch
+    commandDispatchInfos.clear();
+    queryIdx = 0;
+    vkResetQueryPool(device, queryPool, 0, 4096);
+  }
+
+  
+#endif
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
 };

@@ -695,6 +695,7 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
     &buffer->allocationInfo
   );
   *result = res;
+  buffer->requestedSize = static_cast<VkDeviceSize>(size);
   return buffer;
 }
 
@@ -783,6 +784,7 @@ VulkanBuffer* VkHelpers::createStagingBuffer(
     &buffer->allocationInfo
   );
   *result = res;
+  buffer->requestedSize = static_cast<VkDeviceSize>(size);
   return buffer;
 }
 
@@ -809,6 +811,7 @@ VulkanBuffer* VkHelpers::createReadbackBuffer(
     &buffer->allocationInfo
   );
   *result = res;
+  buffer->requestedSize = static_cast<VkDeviceSize>(size);
   return buffer;
 }
 
