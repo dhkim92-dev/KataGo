@@ -1,0 +1,81 @@
+#version 450
+
+/**
+* @author dhkim92.dev@gmail.com
+* @brief Sum Channels NCHW FP32 compute shader
+* Sums all spatial elements for each (batch, channel) pair
+* Input: N, C, HW (NCHW format)
+* Output: N, C (sum over spatial dimensions)
+*/
+
+#include "common.h"
+#include "functions.h"
+
+// Workgroup configuration
+// SUM_CHANNELS_XYSTRIDE: number of threads for parallel reduction over spatial dimension
+// Must match local_size_x
+layout(push_constant) uniform SumChannelsParams {
+    uint batchSize;
+    uint numChannels;
+    uint nnXYLen;
+} params;
+
+layout(set = 0, binding = 0) readonly buffer g_input_block {
+    float g_input[];   // N, C, HW
+};
+layout(set = 0, binding = 1) buffer g_output_block {
+    float g_output[]; // N, C
+};
+
+// Shared memory for parallel reduction
+shared float partialSums[SUM_CHANNELS_XYSTRIDE];
+
+layout(local_size_x = SUM_CHANNELS_DISPATCH_X, local_size_y = 1, local_size_z = 1) in;
+
+void main()
+{
+    uvec3 groupThreadId = gl_LocalInvocationID;
+    uvec3 groupId = gl_WorkGroupID;
+    uvec3 dispatchThreadId = gl_GlobalInvocationID;
+
+    uint xyBase = groupThreadId.x;  // Local thread index for reduction
+    uint c = groupId.y;             // Channel index
+    uint n = groupId.z;             // Batch index
+
+    uint nSize = params.batchSize;
+    uint cSize = params.numChannels;
+    uint xySize = params.nnXYLen;
+
+    float sum = 0.0;
+    
+    if (n < nSize && c < cSize) {
+        // Sum up the elements that this thread is responsible for
+        // Each thread handles elements spaced XYSTRIDE apart
+        for (uint xy = xyBase; xy < xySize; xy += SUM_CHANNELS_XYSTRIDE) {
+            uint idx = (n * cSize + c) * xySize + xy;
+            sum += g_input[idx];
+        }
+    }
+
+    // Write to shared memory for performing the reduction
+    partialSums[xyBase] = sum;
+
+    // Parallel folding downward
+    for (uint span = SUM_CHANNELS_XYSTRIDE / 2; span > 0; span /= 2) {
+        // memoryBarrierShared();
+        barrier();
+
+        if (xyBase < span) {
+            partialSums[xyBase] += partialSums[xyBase + span];
+        }
+    }
+    // memoryBarrierShared();
+    barrier();
+
+    // Write final result
+    if (n < nSize && c < cSize && xyBase == 0) {
+        float finalSum = partialSums[0];
+        uint outIdx = n * cSize + c;
+        g_output[outIdx] = finalSum;
+    }
+}

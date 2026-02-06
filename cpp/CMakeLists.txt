@@ -149,24 +149,20 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     )
 
   #--------------------------- VULKAN SHADER COMPILATION ---------------------------------------------------------------
-  # Find DXC (DirectX Shader Compiler) - platform specific paths
+
+  # ==================== glslc-based GLSL (.comp) shader compilation ====================
+  # Find glslc (from Vulkan SDK or system)
   if(WIN32)
-    # Windows: Vulkan SDK or Windows SDK location
-    find_program(DXC_EXECUTABLE dxc
+    find_program(GLSLC_EXECUTABLE glslc
       HINTS
-        ENV DXC_PATH
         ENV VULKAN_SDK
         "$ENV{VULKAN_SDK}/Bin"
         "$ENV{VULKAN_SDK}/Bin32"
         "C:/VulkanSDK/*/Bin"
-        "$ENV{ProgramFiles}/Windows Kits/10/bin/*/x64"
-        "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64"
     )
   elseif(APPLE)
-    # macOS: Homebrew, Vulkan SDK, or manual install
-    find_program(DXC_EXECUTABLE dxc
+    find_program(GLSLC_EXECUTABLE glslc
       HINTS
-        ENV DXC_PATH
         ENV VULKAN_SDK
         "$ENV{VULKAN_SDK}/bin"
         /usr/local/bin
@@ -174,10 +170,8 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
         /opt/local/bin
     )
   else()
-    # Linux: Package manager or Vulkan SDK
-    find_program(DXC_EXECUTABLE dxc
+    find_program(GLSLC_EXECUTABLE glslc
       HINTS
-        ENV DXC_PATH
         ENV VULKAN_SDK
         "$ENV{VULKAN_SDK}/bin"
         /usr/bin
@@ -185,14 +179,14 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     )
   endif()
 
-  if(NOT DXC_EXECUTABLE)
-    message(FATAL_ERROR "dxc not found. Install DirectX Shader Compiler:\n"
-      "  - Windows: Install Vulkan SDK or use Windows SDK\n"
-      "  - macOS: brew install microsoft/dxc-macos/directx-shader-compiler\n"
-      "  - Linux: Install vulkan-sdk or build from https://github.com/microsoft/DirectXShaderCompiler\n"
-      "Or set DXC_PATH environment variable to the dxc executable path.")
+  if(NOT GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc not found. Install Vulkan SDK or shaderc:\n"
+      "  - Windows/Linux/macOS: Install Vulkan SDK (https://vulkan.lunarg.com/sdk/home)\n"
+      "  - macOS: brew install shaderc\n"
+      "  - Linux: apt install glslc  or  dnf install glslc\n"
+      "Or set VULKAN_SDK environment variable.")
   endif()
-  message(STATUS "Found DXC: ${DXC_EXECUTABLE}")
+  message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
 
   # Shader source and output directories
   set(VK_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan/shaders)
@@ -202,37 +196,33 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
   file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
   file(MAKE_DIRECTORY ${GENERATED_DIR})
 
-  # Collect HLSL files (only top-level .hlsl, not include headers)
-  file(GLOB VK_HLSL_FILES "${VK_SHADER_SRC_DIR}/*.hlsl")
+  # Collect GLSL compute shader files (.comp)
+  file(GLOB VK_GLSL_FILES "${VK_SHADER_SRC_DIR}/*.comp")
   # Collect header dependencies for proper rebuilds
-  file(GLOB VK_HLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.h")
+  file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.h")
 
   # List to collect all shader object libraries
   set(SHADER_OBJECT_LIBS)
 
-  foreach(_hlsl_path IN LISTS VK_HLSL_FILES)
-    get_filename_component(_base ${_hlsl_path} NAME_WE)
+  foreach(_comp_path IN LISTS VK_GLSL_FILES)
+    get_filename_component(_base ${_comp_path} NAME_WE)
     set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
     set(_out_c ${GENERATED_DIR}/${_base}.c)
 
-    # Step 1: Compile HLSL to SPIR-V using DXC
-    # -spirv: Output SPIR-V
-    # -fvk-use-scalar-layout: Use scalar block layout for better compatibility
-    # -fspv-target-env=vulkan1.2: Target Vulkan 1.2
+    # Step 1: Compile GLSL (.comp) to SPIR-V using glslc
+    # --target-env=vulkan1.2: Target Vulkan 1.2
+    # -fshader-stage=compute: Specify compute shader stage
     # -I: Include path for common.h and functions.h
     add_custom_command(
       OUTPUT ${_out_spv}
-      COMMAND ${DXC_EXECUTABLE}
-        -spirv
-        -fvk-use-scalar-layout
-        -fspv-target-env=vulkan1.2
-        -T cs_6_0
-        -E main
+      COMMAND ${GLSLC_EXECUTABLE}
+        --target-env=vulkan1.2
+        -fshader-stage=compute
         -I ${VK_SHADER_SRC_DIR}
-        -Fo ${_out_spv}
-        ${_hlsl_path}
-      DEPENDS ${_hlsl_path} ${VK_HLSL_INCLUDES}
-      COMMENT "Compiling HLSL to SPIR-V: ${_base}.hlsl -> ${_base}.spv"
+        -o ${_out_spv}
+        ${_comp_path}
+      DEPENDS ${_comp_path} ${VK_GLSL_INCLUDES}
+      COMMENT "Compiling GLSL to SPIR-V: ${_base}.comp -> ${_base}.spv"
       VERBATIM
     )
 
@@ -261,6 +251,118 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
 
   # Store shader object libraries for linking with katago
   set(VULKAN_SHADER_OBJECT_LIBS ${SHADER_OBJECT_LIBS})
+
+  # ==================== DXC-based HLSL shader compilation (DISABLED) ====================
+  # The following DXC-based pipeline has been replaced by glslc above.
+  # Kept here for reference only.
+  #
+  # # Find DXC (DirectX Shader Compiler) - platform specific paths
+  # if(WIN32)
+  #   # Windows: Vulkan SDK or Windows SDK location
+  #   find_program(DXC_EXECUTABLE dxc
+  #     HINTS
+  #       ENV DXC_PATH
+  #       ENV VULKAN_SDK
+  #       "$ENV{VULKAN_SDK}/Bin"
+  #       "$ENV{VULKAN_SDK}/Bin32"
+  #       "C:/VulkanSDK/*/Bin"
+  #       "$ENV{ProgramFiles}/Windows Kits/10/bin/*/x64"
+  #       "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64"
+  #   )
+  # elseif(APPLE)
+  #   # macOS: Homebrew, Vulkan SDK, or manual install
+  #   find_program(DXC_EXECUTABLE dxc
+  #     HINTS
+  #       ENV DXC_PATH
+  #       ENV VULKAN_SDK
+  #       "$ENV{VULKAN_SDK}/bin"
+  #       /usr/local/bin
+  #       /opt/homebrew/bin
+  #       /opt/local/bin
+  #   )
+  # else()
+  #   # Linux: Package manager or Vulkan SDK
+  #   find_program(DXC_EXECUTABLE dxc
+  #     HINTS
+  #       ENV DXC_PATH
+  #       ENV VULKAN_SDK
+  #       "$ENV{VULKAN_SDK}/bin"
+  #       /usr/bin
+  #       /usr/local/bin
+  #   )
+  # endif()
+  #
+  # if(NOT DXC_EXECUTABLE)
+  #   message(FATAL_ERROR "dxc not found. Install DirectX Shader Compiler:\n"
+  #     "  - Windows: Install Vulkan SDK or use Windows SDK\n"
+  #     "  - macOS: brew install microsoft/dxc-macos/directx-shader-compiler\n"
+  #     "  - Linux: Install vulkan-sdk or build from https://github.com/microsoft/DirectXShaderCompiler\n"
+  #     "Or set DXC_PATH environment variable to the dxc executable path.")
+  # endif()
+  # message(STATUS "Found DXC: ${DXC_EXECUTABLE}")
+  #
+  # # Shader source and output directories
+  # set(VK_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan/shaders)
+  # set(SPIRV_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/spirv)
+  # set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+  #
+  # file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
+  # file(MAKE_DIRECTORY ${GENERATED_DIR})
+  #
+  # # Collect HLSL files (only top-level .hlsl, not include headers)
+  # file(GLOB VK_HLSL_FILES "${VK_SHADER_SRC_DIR}/*.hlsl")
+  # # Collect header dependencies for proper rebuilds
+  # file(GLOB VK_HLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.h")
+  #
+  # # List to collect all shader object libraries
+  # set(SHADER_OBJECT_LIBS)
+  #
+  # foreach(_hlsl_path IN LISTS VK_HLSL_FILES)
+  #   get_filename_component(_base ${_hlsl_path} NAME_WE)
+  #   set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
+  #   set(_out_c ${GENERATED_DIR}/${_base}.c)
+  #
+  #   # Step 1: Compile HLSL to SPIR-V using DXC
+  #   add_custom_command(
+  #     OUTPUT ${_out_spv}
+  #     COMMAND ${DXC_EXECUTABLE}
+  #       -spirv
+  #       -fvk-use-scalar-layout
+  #       -fspv-target-env=vulkan1.2
+  #       -T cs_6_0
+  #       -E main
+  #       -I ${VK_SHADER_SRC_DIR}
+  #       -Fo ${_out_spv}
+  #       ${_hlsl_path}
+  #     DEPENDS ${_hlsl_path} ${VK_HLSL_INCLUDES}
+  #     COMMENT "Compiling HLSL to SPIR-V: ${_base}.hlsl -> ${_base}.spv"
+  #     VERBATIM
+  #   )
+  #
+  #   # Step 2: Convert SPIR-V binary to C source file
+  #   add_custom_command(
+  #     OUTPUT ${_out_c}
+  #     COMMAND ${CMAKE_COMMAND}
+  #       -DSPV_FILE=${_out_spv}
+  #       -DOUT_FILE=${_out_c}
+  #       -DSHADER_NAME=${_base}
+  #       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderSource.cmake
+  #     DEPENDS ${_out_spv}
+  #     COMMENT "Generating C source from SPIR-V: ${_base}.spv -> ${_base}.c"
+  #     VERBATIM
+  #   )
+  #
+  #   # Step 3: Create object library from the generated C source
+  #   set(_obj_lib spirv_${_base}_obj)
+  #   add_library(${_obj_lib} OBJECT ${_out_c})
+  #   set_target_properties(${_obj_lib} PROPERTIES LINKER_LANGUAGE C)
+  #
+  #   # Collect object library for linking
+  #   list(APPEND SHADER_OBJECT_LIBS ${_obj_lib})
+  # endforeach()
+  #
+  # # Store shader object libraries for linking with katago
+  # set(VULKAN_SHADER_OBJECT_LIBS ${SHADER_OBJECT_LIBS})
 
 elseif(USE_BACKEND STREQUAL "")
   message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=TENSORRT or -DUSE_BACKEND=OPENCL or -DUSE_BACKEND=EIGEN to compile with the respective backend.${ColorReset}")

@@ -1,0 +1,31 @@
+#version 450
+
+/**
+* @author dhkim92.dev@gmail.com
+* @brief Add Point Wise FP32 compute shader
+* Accumulates value into accum: accum[i] += value[i]
+*/
+
+#include "common.h"
+#include "functions.h"
+
+layout(push_constant) uniform AddPointWiseParams {
+    uint totalSize;
+} params;
+
+layout(set = 0, binding = 0) buffer g_accum_block {
+    float g_accum[];
+};
+
+layout(set = 0, binding = 1) readonly buffer g_value_block {
+    float g_value[];
+};
+
+layout(local_size_x = ADD_POINTWISE_DISPATCH_X, local_size_y = ADD_POINTWISE_DISPATCH_Y, local_size_z = ADD_POINTWISE_DISPATCH_Z) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.totalSize)
+        return;
+    g_accum[idx] = g_accum[idx] + g_value[idx];
+}
