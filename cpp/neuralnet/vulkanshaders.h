@@ -10,97 +10,102 @@
  * Symbol naming convention: _binary_<shader_name>_start, _binary_<shader_name>_end, _binary_<shader_name>_size
  */
 extern "C" {
-  // conv2d_fp32.hlsl
+  // conv2d_fp32.glsl
   extern const unsigned char _binary_conv2d_fp32_start[];
   extern const unsigned char* _binary_conv2d_fp32_end;
   extern const size_t _binary_conv2d_fp32_size;
 
-  // conv2d_tiled_bn_act_fp32.hlsl
+  // conv2d_tiled_bn_act_fp32.glsl
   extern const unsigned char _binary_conv2d_tiled_bn_act_3x3_fp32_start[];
   extern const unsigned char* _binary_conv2d_tiled_bn_act_3x3_fp32_end;
   extern const size_t _binary_conv2d_tiled_bn_act_3x3_fp32_size;
 
-  // conv2d_tiled_bn_act_5x5_fp32.hlsl
+  // conv2d_tiled_bn_act_5x5_fp32.glsl
   extern const unsigned char _binary_conv2d_tiled_bn_act_5x5_fp32_start[];
   extern const unsigned char* _binary_conv2d_tiled_bn_act_5x5_fp32_end;
   extern const size_t _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
-  // add_pointwise_fp32.hlsl
+  // add_pointwise_fp32.glsl
   extern const unsigned char _binary_add_pointwise_fp32_start[];
   extern const unsigned char* _binary_add_pointwise_fp32_end;
   extern const size_t _binary_add_pointwise_fp32_size;
 
-  // matmul_fp32.hlsl
+  // matmul_fp32.glsl
   extern const unsigned char _binary_matmul_fp32_start[];
   extern const unsigned char* _binary_matmul_fp32_end;
   extern const size_t _binary_matmul_fp32_size;
 
-  // strided_batched_matmul_fp32.hlsl
+  // batched_xgemm_direct_fp32.glsl
+  extern const unsigned char _binary_batched_xgemm_direct_start[];
+  extern const unsigned char* _binary_batched_xgemm_direct_end;
+  extern const size_t _binary_batched_xgemm_direct_size;
+
+  // strided_batched_matmul_fp32.glsl
   extern const unsigned char _binary_strided_batched_matmul_fp32_start[];
   extern const unsigned char* _binary_strided_batched_matmul_fp32_end;
   extern const size_t _binary_strided_batched_matmul_fp32_size;
 
-  // bn_mask_fp32.hlsl
+  // bn_mask_fp32.glsl
   extern const unsigned char _binary_bn_mask_fp32_start[];
   extern const unsigned char* _binary_bn_mask_fp32_end;
   extern const size_t _binary_bn_mask_fp32_size;
 
-  // bn_mask_relu_fp32.hlsl
+  // bn_mask_relu_fp32.glsl
   extern const unsigned char _binary_bn_mask_relu_fp32_start[];
   extern const unsigned char* _binary_bn_mask_relu_fp32_end;
   extern const size_t _binary_bn_mask_relu_fp32_size;
 
-  // bn_mask_mish_fp32.hlsl
+  // bn_mask_mish_fp32.glsl
   extern const unsigned char _binary_bn_mask_mish_fp32_start[];
   extern const unsigned char* _binary_bn_mask_mish_fp32_end;
   extern const size_t _binary_bn_mask_mish_fp32_size;
 
-  // bn_mask_mish_scale8_fp32.hlsl
+  // bn_mask_mish_scale8_fp32.glsl
   extern const unsigned char _binary_bn_mask_mish_scale8_fp32_start[];
   extern const unsigned char* _binary_bn_mask_mish_scale8_fp32_end;
   extern const size_t _binary_bn_mask_mish_scale8_fp32_size;
 
-  // global_pooling_channels_fp32.hlsl
+  // global_pooling_channels_fp32.glsl
   extern const unsigned char _binary_global_pooling_channels_fp32_start[];
   extern const unsigned char* _binary_global_pooling_channels_fp32_end;
   extern const size_t _binary_global_pooling_channels_fp32_size;
 
-  // value_head_pool_channels_fp32.hlsl
+  // value_head_pool_channels_fp32.glsl
   extern const unsigned char _binary_value_head_pool_channels_fp32_start[];
   extern const unsigned char* _binary_value_head_pool_channels_fp32_end;
   extern const size_t _binary_value_head_pool_channels_fp32_size;
 
-  // sum_channels_fp32.hlsl
+  // sum_channels_fp32.glsl
   extern const unsigned char _binary_sum_channels_fp32_start[];
   extern const unsigned char* _binary_sum_channels_fp32_end;
   extern const size_t _binary_sum_channels_fp32_size;
 
-  // add_channel_bias_nchw_fp32.hlsl
+  // add_channel_bias_nchw_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nchw_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nchw_fp32_end;
   extern const size_t _binary_add_channel_bias_nchw_fp32_size;
 
-  // add_channel_bias_nc_identity_fp32.hlsl
+  // add_channel_bias_nc_identity_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_identity_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nc_identity_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_identity_fp32_size;
 
-  // add_channel_bias_nc_relu_fp32.hlsl
+  // add_channel_bias_nc_relu_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_relu_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nc_relu_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_relu_fp32_size;
 
-  // add_channel_bias_nc_mish_fp32.hlsl
+  // add_channel_bias_nc_mish_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_mish_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nc_mish_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_mish_fp32_size;
 
-  // add_channel_bias_nc_mish_scale8_fp32.hlsl
+  // add_channel_bias_nc_mish_scale8_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_mish_scale8_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nc_mish_scale8_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_mish_scale8_fp32_size;
 
-  // extract channel0_nchw_fp32.hlsl
+  // extract channel0_nchw_fp32.glsl
   extern const unsigned char _binary_extract_channel0_nchw_fp32_start[];
   extern const unsigned char* _binary_extract_channel0_nchw_fp32_end;
   extern const size_t _binary_extract_channel0_nchw_fp32_size;
@@ -154,6 +159,10 @@ namespace VkSPIRVShaders {
   // matmul_fp32 - Matrix multiplication
   extern const unsigned char* spirv_matmul_fp32;
   extern size_t spirv_matmul_fp32_size;
+
+  // batched_xgemm_direct_fp32 - batched xgemm direct fp32
+  extern const unsigned char* spirv_batched_xgemm_direct;
+  extern size_t spirv_batched_xgemm_direct_size;
 
   // strided batched matmul fp32 - for 1x1 conv
   extern const unsigned char* spirv_strided_batched_matmul_fp32;;

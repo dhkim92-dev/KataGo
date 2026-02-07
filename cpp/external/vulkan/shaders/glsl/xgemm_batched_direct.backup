@@ -1,0 +1,597 @@
+#version 450
+
+#include "common.h"
+
+SPECIALIZATION_CONSTANT(0, int, WGD, 32) // Work Group Dimension(M, K, N)
+SPECIALIZATION_CONSTANT(1, int, MDIMCD, 16) // Threads per workgroup in M dimension
+SPECIALIZATION_CONSTANT(2, int, NDIMCD, 16) // Threads per workgroup in N dimension
+SPECIALIZATION_CONSTANT(3, int, MDIMAD, 16) // Re-shaped tile dimension of matrix A: KDIMAD * MDIMAD
+SPECIALIZATION_CONSTANT(4, int, NDIMBD, 16)// Re-shaped tile dimension of matrix B: KDIMBD * NDIMBD
+SPECIALIZATION_CONSTANT(5, int, PADA, 2) // Local memory padding for matrix A
+SPECIALIZATION_CONSTANT(6, int, PADB, 2) // Local memory padding for matrix B
+
+#define MWID (WGD / MDIMCD) // Work per work-item in M dimension
+#define NWID (WGD / NDIMCD) // Work per work-item in N dimension
+#define KDIMAD ((MDIMCD * NDIMCD) / MDIMAD) // Re-shaped tile dimension of matrix A: KDIMAD * MDIMAD
+#define KDIMBD ((MDIMCD * NDIMCD) / NDIMBD) // Re-shaped tile dimension of matrix B: KDIMBD * NDIMBD
+#define MWAD (WGD / MDIMAD) // Amount of loads per thread for matrix A in M dimension
+#define KWAD (WGD / KDIMAD) // Amount of loads per thread for matrix A in K dimension
+#define KWBD (WGD / KDIMBD) // Amount of loads per thread for matrix B in K dimension
+#define NWBD (WGD / NDIMBD) // Amount of loads per thread for matrix B in N dimension
+#define KWID 1 // Unroll factor for K dimension loop
+
+#define PRECISSION 32
+#define PRECISSION_STORAGE 32
+#define WORD uint
+
+#ifndef VWMD
+#define VWMD 1
+#endif
+
+#ifndef VWND
+#define VWND 1
+#endif
+
+#define Multiply(c, a, b) c = a * b
+#define MultiplyAdd(c, a, b) c = c + a * b;
+#define MultiplySubtract(c, a, b) c -= a * b;
+#define AbsoluteValue(value) value = abs(value);
+#define Negate(value) value = -value;
+#define Add(c, a, b) c = a + b;
+#define Subtract(c, a, b) c = a - b;
+#define AXPBY(e, a, b, c, d) e = a * b + c * d;
+
+// Define real type
+#define real float
+#define real4 vec4
+#define realstore float
+#define real4store vec4
+
+#if VWND == 1
+  #define realND real
+  #define realstoreND real
+  #define LOADGLOBALN(__buf, __idx) LOADGLOBAL(__buf, __idx)
+  #define STOREGLOBALN(__buf, __idx, __val) STOREGLOBAL(__buf, __idx, __val)
+  #define LOADLOCALN(__buf, __idx) LOADLOCAL(__buf, __idx)
+  #define STORELOCALN(__buf, __idx, __val) STORELOCAL(__buf, __idx, __val)
+#else
+  #define realND real4
+  #define realstoreND real4
+  #define LOADGLOBALN(__buf, __idx) LOADGLOBAL4(__buf, __idx)
+  #define STOREGLOBALN(__buf, __idx, __val) STOREGLOBAL4(__buf, __idx, __val)
+  #define LOADLOCALN(__buf, __idx) LOADLOCAL4(__buf, __idx)
+  #define STORELOCALN(__buf, __idx, __val) STORELOCAL4(__buf, __idx, __val)
+#endif
+
+#if VWMD == 1
+  #define realMD real
+  #define realstoreMD real
+  #define LOADGLOBALM(__buf, __idx) LOADGLOBAL(__buf, __idx)
+  #define STOREGLOBALM(__buf, __idx, __val) STOREGLOBAL(__buf, __idx, __val)
+  #define LOADLOCALM(__buf, __idx) LOADLOCAL(__buf, __idx)
+  #define STORELOCALM(__buf, __idx, __val) STORELOCAL(__buf, __idx, __val)
+#else
+  #define realMD real4
+  #define realstoreMD real4
+  #define LOADGLOBALM(__buf, __idx) LOADGLOBAL4(__buf, __idx)
+  #define STOREGLOBALM(__buf, __idx, __val) STOREGLOBAL4(__buf, __idx, __val)
+  #define LOADLOCALM(__buf, __idx) LOADLOCAL4(__buf, __idx)
+  #define STORELOCALM(__buf, __idx, __val) STORELOCAL4(__buf, __idx, __val)
+#endif
+
+// In this code, all buffers and shared memory are defined as real4 type.
+// below __idx is calculated in terms of float elements, not vec4 type
+// for example, LOADGLOBAL(gA, 1) returns gA[0][1], not gA[1]
+//              LOADGLOBAL4(gA, 0) returns ga[0],
+//              LOADGLOBAL4(gA, 1) returns ga[0]
+//              LOADGLOBAL4(gA, 2) returns ga[0]
+//              LOADGLOBAL4(gA, 3) returns ga[0]
+// Same for STORE and local memory access macros and funcitons
+/**
+* @brief Global memory load/store macros, 
+* @param __buf: buffer name, handle it as real array, not real4
+* @param __idx: index to access the buffer, in terms of real elements
+* @param __val: value to load/store
+*/
+// #define STOREGLOBAL(__buf, __idx, __val) ((__buf[__idx>>2][__idx&3]) = (__val))
+// #define LOADGLOBAL(__buf, __idx) ((__buf[__idx>>2][__idx&3]))
+// #define STOREGLOBAL4(__buf, __idx, __val) __buf[__idx>>2] = __val
+// #define LOADGLOBAL4(__buf, __idx) __buf[__idx>>2]
+#define STOREGLOBAL(__buf, __idx, __val) ((__buf[__idx]) = (__val))
+#define LOADGLOBAL(__buf, __idx) ((__buf[__idx]))
+#define STOREGLOBAL4(__buf, __idx, __val) { \
+__buf[__idx] = __val.x; \
+__buf[__idx + 1] = __val.y; \
+__buf[__idx + 2] = __val.z; \
+__buf[__idx + 3] = __val.w; \
+}
+#define LOADGLOBAL4(__buf, __idx) vec4(__buf[__idx], __buf[__idx + 1], __buf[__idx + 2], __buf[__idx + 3])
+
+/**
+* @brief Shared memory load/store macros, 
+* @param __buf: buffer name, handle it as real array
+* @param __idx: index to access the buffer, in terms of real elements
+* @param __val: value to load/store
+*/
+// #define STORELOCAL(__buf, __idx, __val) ((__buf[__idx>>2][__idx&3]) = (__val))
+// #define LOADLOCAL(__buf, __idx) ((__buf[__idx>>2][__idx&3]))
+#define STORELOCAL(__buf, __idx, __val) ((__buf[__idx]) = (__val))
+#define LOADLOCAL(__buf, __idx) ((__buf[__idx]))
+
+/**
+* @brief Shared memory load/store macros for real4 type, 
+*        16 byte aligned access only
+* @param __buf: buffer name, it's real array!!
+* @param __idx: index to access the buffer, should be casted to real4 index
+* @param __val: value to load/store, should be real4 type
+*/
+// #define STORELOCAL4(__buf, __idx, __val) __buf[__idx>>2] = __val
+// #define LOADLOCAL4(__buf, __idx) __buf[__idx>>2]
+#define STORELOCAL4(__buf, __idx, __val) { \
+__buf[__idx] = __val.x; \
+__buf[__idx + 1] = __val.y; \
+__buf[__idx + 2] = __val.z; \
+__buf[__idx + 3] = __val.w; \
+}
+#define LOADLOCAL4(__buf, __idx) vec4(__buf[__idx], __buf[__idx + 1], __buf[__idx + 2], __buf[__idx + 3])
+
+
+
+layout(push_constant) uniform BatchedXGEMMDirectParams {
+  int M; // Number of rows of matrix A and C
+  int N; // Number of columns of matrix B and C
+  int K; // Number of columns of matrix A and rows of matrix B
+  int a_lead;
+  int b_lead;
+  int c_lead;
+  int a_transpose;
+  int b_transpose;
+  int c_transpose;
+} params;
+
+layout(set = 0, binding = 0) readonly buffer MatrixA {
+  real gA[];
+};
+
+layout(set = 0, binding = 1) readonly buffer MatrixB {
+  real gB[];
+};
+
+layout(set = 0, binding = 2) buffer MatrixC {
+  real gC[];
+};
+
+#if PRECISSION_STORAGE == 32 
+  // shared real4 sma[WGD / 4 * (WGD + PADA)];
+  // shared real4 smb[WGD / 4 * (WGD + PADB)];
+  shared real sma[WGD * (WGD + PADA)];
+  shared real smb[WGD * (WGD + PADB)];
+#else 
+  #error "Unsupported PRECISSION_STORAGE"
+#endif
+
+#define GlobalToPrivateDirectA( __buf, __mi, __a_ld, __a_off, __idm, __idk, __a_transpose ) LOADGLOBAL(__buf, __a_off + ((__a_transpose) == 1 ? ( (__idm + __mi ) * __a_ld + __idk ) :  ((__idk * __a_ld) + (__idm + __mi))))
+
+#define GlobalToPrivateDirectB( __buf, __ni, __b_ld, __b_off, __idn, __idk, __b_transpose ) LOADGLOBAL(__buf, __b_off + ((__b_transpose) == 1 ? ( (__idn + __ni ) * __b_ld + __idk ) :  ((__idk * __b_ld) + (__idn + __ni))))
+
+#define GlobalToPrivateCheckedA( __buf, __mi, __a_ld, __a_off, __idm, __idk, __a_transpose, __M) ( (__idm + __mi < __M ) ? ( LOADGLOBAL( __buf, __a_off + ((__a_transpose == 1) ? (__idm + __mi) * __a_ld + __idk : ( __idk * __a_ld ) + ( __idm + __mi ) )  ) ) : 0.0 )
+
+#define GlobalToPrivateCheckedB( __buf, __ni, __b_ld, __b_off, __idn, __idk, __b_transpose, __N) ( (__idn + __ni < __N ) ? ( LOADGLOBAL( __buf, __b_off + ((__b_transpose == 1) ? (__idn + __ni) * __b_ld + __idk : ( __idk * __b_ld ) + ( __idn + __ni ) )  ) ) : 0.0 )
+
+#define LocalToPrivateDirectA(__buf, __mi, __kg, __a_transpose) LOADLOCAL( __buf, ( (__a_transpose) == 1 ? ( (__mi + LocalId0() * MWID) * (WGD + PADA) + (__kg) ) : ( (__kg) * (WGD + PADA) + (__mi + LocalId0() * MWID) ) ) )
+
+#define LocalToPrivateDirectB(__buf, __ni, __kg, __b_transpose) LOADLOCAL( __buf, ( (__b_transpose) == 1 ? ( (__ni + LocalId1() * NWID) * (WGD + PADB) + (__kg) ) : ( (__kg) * (WGD + PADB) + (__ni + LocalId1() * NWID) ) ) )
+
+void StoreResultsDirect(
+  real c_value,
+  int _mi, int _ni, int idm, int idn,
+  int c_lead, int c_offset, int c_transpose
+) {
+  int c_index = (c_transpose == 1) ? ( idm + _mi) * c_lead + (idn + _ni) : (idn + _ni) * c_lead + (idm + _mi);
+
+  real result;
+  Multiply(result, 1.0, c_value);
+  STOREGLOBAL(gC, c_index + c_offset, result);
+}
+
+void StoreResultsChecked(
+  real c_value,
+  int _mi, int _ni, int idm, int idn,
+  int M, int N,
+  int c_lead, int c_offset, int c_transpose
+) {
+  if ( (idm + _mi) < M && (idn + _ni) < N ) {
+    int c_index = (c_transpose == 1) ? ( idm + _mi) * c_lead + (idn + _ni) : (idn + _ni) * c_lead + (idm + _mi);
+    real result;
+    Multiply(result, 1.0, c_value);
+    STOREGLOBAL(gC, c_index + c_offset, result);
+  }
+}
+
+void GlobalToLocalDirectA(
+  int a_lead, int a_offset, int kwg,
+  int a_transpose
+) {
+  #if MDIMCD == NDIMAD
+    const int la0 = LocalId0();
+    const int la1 = LocalId1();
+  #else
+    const int tid = LocalId0() + MDIMCD*LocalId1();
+    const int la0 = tid % MDIMAD;
+    const int la1 = tid / MDIMAD;
+  #endif
+
+  #pragma unroll
+  for ( int _mia = 0 ; _mia < MWAD ; _mia += 1) {
+    #pragma unroll
+    for (int _kia = 0 ; _kia < KWAD ; _kia +=1 ) {
+      int mg = _mia + la0 * MWAD;
+      int kg = _kia + la1 * KWAD;
+      int idm = (a_transpose == 1) ? mg + kwg : mg + GroupId0() * (WGD);
+      int idk = (a_transpose == 1) ? kg + GroupId0() * WGD : kg + kwg;
+
+      const realMD avec = LOADGLOBALM(gA, idk * a_lead + idm + a_offset);
+      STORELOCALM(sma, kg * (WGD + PADA) + mg, avec);
+    }
+  }
+}
+
+void GlobalToLocalDirectB(
+  int b_lead, int b_offset, int kwg,
+  int b_transpose
+) {
+  #if NDIMCD == NDIMBD
+    const int lb0 = LocalId0();
+    const int lb1 = LocalId1();
+  #else
+    const int tid = LocalId0() + NDIMCD*LocalId1();
+    const int lb0 = tid % NDIMBD;
+    const int lb1 = tid / NDIMBD;
+  #endif
+
+  #pragma unroll
+  for ( int _kib = 0 ; _kib < KWBD ; _kib += 1) {
+    #pragma unroll
+    for (int _nib = 0 ; _nib < NWBD ; _nib +=1 ) {
+      int ng = _nib + lb0 * NWBD;
+      int kg = _kib + lb1 * KWBD;
+      int idn = (b_transpose == 1) ? ng + GroupId1() * (WGD) : ng + kwg;
+      int idk = (b_transpose == 1) ? kg + GroupId1()*WGD : kg + kwg;
+
+      const realND bvec = LOADGLOBALN(gB, idk * b_lead + idn + b_offset);
+      STORELOCALN(smb, kg * (WGD + PADB) + ng, bvec);
+    }
+  }
+}
+
+void GlobalToLocalScalarA(
+  const int a_lead, const int a_offset,
+  const int kwg, 
+  const int a_transpose
+) {
+
+  #if MDIMCD == NDIMAD
+    const int la0 = LocalId0();
+    const int la1 = LocalId1();
+  #else
+    const int tid = LocalId0() + MDIMCD*LocalId1();
+    const int la0 = tid % MDIMAD;
+    const int la1 = tid / MDIMAD;
+  #endif
+
+  #pragma unroll
+  for ( int _mia = 0 ; _mia < MWAD ; _mia += 1 ) {
+    #pragma unroll
+    for ( int _kia = 0 ; _kia < KWAD ; _kia += 1 ) {
+      int mg = _mia + la0 * MWAD;
+      int kg = _kia + la1 * KWAD;
+      int idm = (a_transpose == 1) ? mg + kwg : mg + GroupId0() * (WGD);
+      int idk = (a_transpose == 1) ? kg + GroupId0() * WGD : kg + kwg;
+
+      real result = LOADGLOBAL(gA, idk * a_lead + idm + a_offset);
+      STORELOCAL(sma, kg * (WGD + PADA) + mg, result);
+    } 
+  }
+}
+
+void GlobalToLocalScalarB(
+  const int b_lead, const int b_offset,
+  const int kwg, 
+  const int b_transpose
+) {
+  
+  #if NDIMCD == NDIMBD
+    const int lb0 = LocalId0();
+    const int lb1 = LocalId1();
+  #else
+    const int tid = LocalId0() + NDIMCD*LocalId1();
+    const int lb0 = tid % NDIMBD;
+    const int lb1 = tid / NDIMBD;
+  #endif
+
+  #pragma unroll
+  for ( int _kib = 0 ; _kib < KWBD ; _kib += 1 ) {
+    #pragma unroll
+    for ( int _nib = 0 ; _nib < NWBD ; _nib += 1 ) {
+      int ng = _nib + lb0 * NWBD;
+      int kg = _kib + lb1 * KWBD;
+      int idn = (b_transpose == 1) ? ng + kwg : ng + GroupId1() * (WGD);
+      int idk = (b_transpose == 1) ? kg + GroupId1()*WGD : kg + kwg;
+
+      real result = LOADGLOBAL(gB, idk * b_lead + idn + b_offset);
+      STORELOCAL(smb, kg * (WGD + PADB) + ng, result);
+    }
+  }
+}
+
+void GlobalToLocalCheckedA(
+  const int a_lead, const int a_offset,
+  const int kwg, 
+  const int a_transpose,
+  const int kSizeM, const int kSizeK
+) {
+  #if MDIMCD == MDIMAD
+    const int la0 = LocalId0();
+    const int la1 = LocalId1();
+  #else 
+    const int tid = LocalId0() + MDIMCD*LocalId1();
+    const int la0 = tid % MDIMAD;
+    const int la1 = tid / MDIMAD;
+  #endif
+
+  #pragma unroll
+  for ( int _mia = 0 ; _mia < MWAD ; _mia += 1 ) {
+    #pragma unroll
+    for ( int _kia = 0 ; _kia < KWAD ; _kia += 1 ) {
+      int mg = _mia + la0 * MWAD;
+      int kg = _kia + la1 * KWAD;
+      int idm = (a_transpose == 1) ? mg + kwg : mg + GroupId0() * (WGD);
+      int idk = (a_transpose == 1) ? kg + GroupId0() * WGD : kg + kwg;
+
+      bool condition = (a_transpose == 1) ? (idm < kSizeK) && (idk < kSizeM) :
+                                           (idm < kSizeM) && (idk < kSizeK);
+
+      if ( condition ) {
+        real result = LOADGLOBAL(gA, idk * a_lead + idm + a_offset);
+        STORELOCAL(sma, kg * (WGD + PADA) + mg, result);
+      } else {
+        STORELOCAL(sma, kg * (WGD + PADA) + mg, 0.0);
+      }
+    }
+  }
+}
+
+void GlobalToLocalCheckedB(
+  const int b_lead, const int b_offset,
+  const int kwg, 
+  const int b_transpose,
+  const int kSizeN, const int kSizeK
+) {
+  #if NDIMCD == NDIMBD
+    const int lb0 = LocalId0();
+    const int lb1 = LocalId1();
+  #else 
+    const int tid = LocalId0() + NDIMCD*LocalId1();
+    const int lb0 = tid % NDIMBD;
+    const int lb1 = tid / NDIMBD;
+  #endif
+
+  #pragma unroll
+  for ( int _kib = 0 ; _kib < KWBD ; _kib += 1 ) {
+    #pragma unroll
+    for ( int _nib = 0 ; _nib < NWBD ; _nib += 1 ) {
+      int ng = _nib + lb0 * NWBD;
+      int kg = _kib + lb1 * KWBD;
+      int idn = (b_transpose == 1) ? ng + kwg : ng + GroupId1() * (WGD);
+      int idk = (b_transpose == 1) ? kg + GroupId1()*WGD : kg + kwg;
+
+      bool condition = (b_transpose == 1) ? (idn < kSizeK) && (idk < kSizeN) :
+                                           (idn < kSizeN) && (idk < kSizeK);
+
+      if ( condition ) {
+        real result = LOADGLOBAL(gB, idk * b_lead + idn + b_offset);
+        STORELOCAL(smb, kg * (WGD + PADB) + ng, result);
+      } else {
+        STORELOCAL(smb, kg * (WGD + PADB) + ng, 0.0);
+      }
+    }
+  }
+}
+
+void xgemmDirect(
+  int kSizeM, int kSizeN, int kSizeK,
+  int a_offset, int a_lead,
+  int b_offset, int b_lead,
+  int c_offset, int c_lead,
+  int a_transpose, int b_transpose, int c_transpose
+) {
+  real apd[MWID];
+  real bpd[NWID];
+  real cpd[NWID * MWID];
+
+  #pragma unroll
+  for ( int mi = 0 ; mi < MWID ; mi += 1 ) {
+    #pragma unroll
+    for ( int ni = 0 ; ni < NWID ; ni += 1 ) {
+      cpd[ni * MWID + mi] = 0.0;
+    }
+  }
+
+  
+  const int idm = LocalId0() * MWID + GroupId0() * WGD;
+  const int idn = LocalId1() * NWID + GroupId1() * WGD;
+
+  if ( (idm < (kSizeM/WGD)* WGD) && ( idn < (kSizeN/WGD)*WGD ) ) {
+    // Complete tiles run fast version of GEMM
+    int kwg = 0; // loop variable for K dimension tile index
+
+    for ( ; kwg < (kSizeK / WGD) * WGD ; kwg += WGD) {
+      // Loads global data to local memory
+      if ( (a_lead & (VWMD-1)) == 0 && (a_offset & (VWMD-1)) == 0 ) {
+        GlobalToLocalDirectA(a_lead, a_offset, kwg, a_transpose);
+      } else {
+        GlobalToLocalScalarA(a_lead, a_offset, kwg, a_transpose);
+      }
+
+      if ( (b_lead & (VWND-1)) == 0 && (b_offset & (VWND-1)) == 0 ) {
+        GlobalToLocalDirectB(b_lead, b_offset, kwg, b_transpose);
+      } else {
+        GlobalToLocalScalarB(b_lead, b_offset, kwg, b_transpose);
+      }
+      barrier();
+
+      // Loops over all workitem tiles
+      for ( int pwi = 0 ; pwi < WGD ; pwi += KWID ) {
+        #pragma unroll
+        for (int _pit = 0 ; _pit < KWID ; _pit += 1 ) {
+          int kg = pwi + _pit;
+
+          // Load private data from local memory
+          #pragma unroll
+          for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+            apd[_mi] = LocalToPrivateDirectA(sma, _mi, kg, a_transpose);
+          }
+
+          #pragma unroll
+          for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+            bpd[_ni] = LocalToPrivateDirectB(smb, _ni, kg, b_transpose);
+          }
+
+          // Compute and accumulate
+          #pragma unroll
+          for (int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+            #pragma unroll
+            for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+              MultiplyAdd( cpd[_ni * MWID + _mi], apd[_mi], bpd[_ni] );
+            }
+          }
+        }
+      }
+      barrier();
+    }
+
+    // Loop over remaining K dimension elements
+    for (; kwg < kSizeK ; ++kwg ) {
+
+      // Load private data from global memory
+      #pragma unroll
+      for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+        apd[_mi] = GlobalToPrivateDirectA(gA, _mi, a_lead, a_offset, idm, kwg, a_transpose);
+      }
+      #pragma unroll
+      for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+        bpd[_ni] = GlobalToPrivateDirectB(gB, _ni, b_lead, b_offset, idn, kwg, b_transpose);
+      }
+
+      #pragma unroll
+      for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+        #pragma unroll
+        for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+          MultiplyAdd( cpd[_ni * MWID + _mi], apd[_mi], bpd[_ni] );
+        }
+      }
+    }
+
+    // Store results to global memory
+    #pragma unroll
+    for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+      #pragma unroll
+      for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+        StoreResultsDirect(
+          cpd[_ni * MWID + _mi],
+          _mi, _ni, idm, idn,
+          c_lead, c_offset, c_transpose
+        );
+      }
+    }
+  } else {
+    int kwg = 0;
+    for ( ; kwg < (kSizeK / WGD) * WGD ; kwg += WGD) {
+      // Loads global data to local memory
+      GlobalToLocalCheckedA(a_lead, a_offset, kwg, a_transpose, kSizeM, kSizeK);
+      GlobalToLocalCheckedB(b_lead, b_offset, kwg, b_transpose, kSizeN, kSizeK);
+      barrier();
+
+      // Loops over all workitem tiles
+      for ( int pwi = 0 ; pwi < WGD ; pwi += KWID ) {
+        #pragma unroll
+        for (int _pit = 0 ; _pit < KWID ; _pit += 1 ) {
+          int kg = pwi + _pit;
+
+          // Load private data from local memory
+          #pragma unroll
+          for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+            apd[_mi] = LocalToPrivateDirectA(sma, _mi, kg, a_transpose);
+          }
+
+          #pragma unroll
+          for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+            bpd[_ni] = LocalToPrivateDirectB(smb, _ni, kg, b_transpose);
+          }
+
+          // Compute and accumulate
+          #pragma unroll
+          for (int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+            #pragma unroll
+            for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+              MultiplyAdd( cpd[_ni * MWID + _mi], apd[_mi], bpd[_ni] );
+            }
+          }
+        }
+      }
+      barrier();
+    }
+
+    for ( ; kwg < kSizeK ; ++kwg ) {
+      #pragma unroll
+      for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+        apd[_mi] = GlobalToPrivateCheckedA(gA, _mi, a_lead, a_offset, idm, kwg, a_transpose, kSizeM);
+      }
+      #pragma unroll
+      for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+        bpd[_ni] = GlobalToPrivateCheckedB(gB, _ni, b_lead, b_offset, idn, kwg, b_transpose, kSizeN);
+      }
+
+      #pragma unroll
+      for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+        #pragma unroll
+        for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+          MultiplyAdd( cpd[_ni * MWID + _mi], apd[_mi], bpd[_ni] );
+        }
+      }
+    }
+
+    // Store results to global memory
+    #pragma unroll
+    for ( int _ni = 0 ; _ni < NWID ; _ni += 1 ) {
+      #pragma unroll
+      for ( int _mi = 0 ; _mi < MWID ; _mi += 1 ) {
+        StoreResultsChecked(
+          cpd[_ni * MWID + _mi],
+          _mi, _ni, idm, idn,
+          kSizeM, kSizeN,
+          c_lead, c_offset, c_transpose
+        );
+      }
+    }
+  }
+}
+
+layout (
+  local_size_x_id = 1,  // MDIMCD
+  local_size_y_id = 2,  // NDIMCD
+  local_size_z = 1
+) in;
+void main() {
+  int batch = GroupId2();
+  int a_offset = batch * params.M * params.K;
+  int b_offset = batch * params.N * params.K;
+  int c_offset = batch * params.M * params.N;
+  xgemmDirect(
+    params.M, params.N, params.K,
+    a_offset, params.a_lead,
+    b_offset, params.b_lead,
+    c_offset, params.c_lead,
+    params.a_transpose, params.b_transpose, params.c_transpose
+  );
+}

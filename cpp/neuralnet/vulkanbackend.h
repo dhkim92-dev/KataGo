@@ -1,5 +1,4 @@
 /**
- * @file vulkanbackend.h
  * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92.dev@gmail.com, https://www.dohoon-kim.kr)
  * @brief Vulkan backend for Neural Net evaluation
  */
@@ -15,7 +14,7 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
-// #define SHADER_PROFILE
+#define SHADER_PROFILE
 #define FLOAT16_SIZE_IN_BYTES 2
 
 static void checkBufferSize(int batchSize, int nnXLen, int nnYLen, int channels) {
@@ -336,6 +335,18 @@ namespace KatagoVulkan {
     uint32_t cTranspose; // Output Transpose
   };
 
+  struct BatchedXGEMMDirectParams {
+    uint32_t M;  
+    uint32_t N;
+    uint32_t K;  
+    uint32_t aLead;
+    uint32_t bLead;
+    uint32_t cLead;
+    uint32_t aTranspose; // Input A Transpose
+    uint32_t bTranspose; // Input B Transpose
+    uint32_t cTranspose; // Output C Transpose
+  };
+
   struct StridedBatchedMatmulFp32Params {
     uint32_t M;  
     uint32_t N;
@@ -457,6 +468,7 @@ namespace KatagoVulkan {
 
     // Pipeline for matrix multiplication
     Pipeline matmulFp32; 
+    Pipeline batchedXGEMMDirect;
 
     // note that conv1x1 can be implemented as matmul operation
     Pipeline stridedBatchedMatmulFp32;
@@ -500,7 +512,8 @@ namespace KatagoVulkan {
       size_t spirvSize,
       size_t bindingSize,
       uint32_t pushConstantSize,
-      Pipeline &outPipeline
+      Pipeline &outPipeline,
+      VkSpecializationInfo* specializationInfo = nullptr
     );
     /**
      * @brief Create a Conv2d Fp32 object
@@ -562,6 +575,11 @@ namespace KatagoVulkan {
     void createMatmulFp32();
 
     /**
+     * @brief Create a Batched XGEMM Direct Fp32 object
+     */
+    void createBatchedXGEMMDirect();
+
+     /**
      * @brief Create a Strided Batched Matmul Fp32 object
      */
     void createStridedBatchedMatmulFp32();

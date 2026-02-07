@@ -1,9 +1,24 @@
-#ifndef __COMMON_HLSL__
-#define __COMMON_HLSL__
+#ifndef COMMON_GLSL_H
+#define COMMON_GLSL_H
 /**
 * @author dhkim92.dev@gmail.com
-* @brief common.hlsl defined parameters
+* @brief common.glsl defined parameters
 */
+
+#define SPECIALIZATION_CONSTANT(__id, __type, __name, __default) layout(constant_id = __id) const __type __name = __default
+
+#define GroupId0() (int(gl_WorkGroupID.x))
+#define GroupId1() (int(gl_WorkGroupID.y))
+#define GroupId2() (int(gl_WorkGroupID.z))
+#define LocalId0() (int(gl_LocalInvocationID.x))
+#define LocalId1() (int(gl_LocalInvocationID.y))
+#define LocalId2() (int(gl_LocalInvocationID.z))
+#define LocalSize0() (int(gl_WorkGroupSize.x))
+#define LocalSize1() (int(gl_WorkGroupSize.y))
+#define LocalSize2() (int(gl_WorkGroupSize.z))
+#define GlobalId0() (GroupId0() * LocalSize0 + LocalId0())
+#define GlobalId1() (GroupId1() * LocalSize1 + LocalId1())
+#define GlobalId2() (GroupId2() * LocalSize2 + LocalId2())
 
 /**
 * @brief BatchNorm NCHW compute shader dispatch parameters
@@ -136,4 +151,4 @@
 #define SBM_DISPATCH_X SBM_TILE_M
 #define SBM_DISPATCH_Y SBM_TILE_N
 
-#endif // __COMMON_HLSL__
+#endif //

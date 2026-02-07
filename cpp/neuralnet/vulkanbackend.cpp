@@ -12,7 +12,7 @@
 #include "../core/simpleallocator.h"
 #include "../core/test.h"
 #include "../core/using.h"
-#include "../external/vulkan/shaders/common.h"
+#include "../external/vulkan/shaders/glsl/common.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/modelversion.h"
 #include "../neuralnet/nneval.h"
@@ -22,6 +22,7 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
+#define SHADER_PROFILE
 #ifdef SHADER_PROFILE
 #define SHADER_PROFILE_START(shaderName, cb) \
   uint64_t beginQueryIdx = handle->queryIdx; \
@@ -360,7 +361,8 @@ struct MatmulLayer {
     // printDeviceBuffer(name + " input", handle->vulkanDevice, input, batchSize * inChannels);
     VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
-    doMatmulFp32(commandBuffer, batchSize, input, output);
+    // doMatmulFp32(commandBuffer, batchSize, input, output);
+    doBatchedXGEMMDirectFP32_MK_NK_MN(commandBuffer, batchSize, input, output);
     res = VkHelpers::endCommandBuffer(commandBuffer);
     VkHelpers::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
@@ -381,6 +383,7 @@ struct MatmulLayer {
   ) {
     assert(cb != VK_NULL_HANDLE);
     doMatmulFp32(cb, batchSize, input, output);
+    // doBatchedXGEMMDirectFP32_MK_NK_MN(cb, batchSize, input, output);
     VkHelpers::barrierCommandBuffer(cb);
   }
 
@@ -451,6 +454,87 @@ private:
     SHADER_PROFILE_START("MATMUL_FP32", cb);
     vkCmdDispatch(cb, groupCountX, groupCountY, 1);
     SHADER_PROFILE_END("MATMUL_FP32", cb);
+  }
+
+  void doBatchedXGEMMDirectFP32_MK_NK_MN(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output
+  ) {
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    auto *pipelines = handle->context->pipelinesPerDev.at(gpuId);
+    VkResult res;
+    if ( descriptorSet == VK_NULL_HANDLE ) {
+      descriptorSet = VkHelpers::allocateDescriptorSet(
+        handle->vulkanDevice,
+        pipelines->batchedXGEMMDirect.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("Allocate descriptor set for MatmulLayer: " + name, res);
+    }
+
+    // update descriptor set
+    std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, matBuf),
+      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, output)
+    };
+    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    auto pushConstants = KatagoVulkan::BatchedXGEMMDirectParams();
+    pushConstants.M = static_cast<uint32_t>(batchSize);
+    pushConstants.K = static_cast<uint32_t>(inChannels);
+    pushConstants.N = static_cast<uint32_t>(outChannels);
+    pushConstants.aLead = pushConstants.K;
+    pushConstants.bLead = pushConstants.K;
+    pushConstants.cLead = pushConstants.N;
+    pushConstants.aTranspose = 1;
+    pushConstants.bTranspose = 1; //
+    pushConstants.cTranspose = 1; //
+
+    static constexpr uint32_t nKernelDims = 3;
+
+
+    uint32_t globalSizes[nKernelDims];
+    uint32_t WGD = 32;
+    uint32_t MDIMCD = 8;
+    uint32_t NDIMCD = 16;
+    uint32_t mCeiled = VkHelpers::roundUpToMultiple(pushConstants.M, WGD);
+    uint32_t nCeiled = VkHelpers::roundUpToMultiple(pushConstants.N, WGD);
+    globalSizes[0] = (mCeiled / WGD); // M direction
+    globalSizes[1] = (nCeiled / WGD); // N direction
+    globalSizes[2] = 1;
+
+    vkCmdBindPipeline(
+      cb,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipelines->batchedXGEMMDirect.pipeline
+    );
+    vkCmdPushConstants(
+      cb,
+      pipelines->batchedXGEMMDirect.layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(KatagoVulkan::BatchedXGEMMDirectParams),
+      &pushConstants
+    );
+
+    vkCmdBindDescriptorSets(
+      cb,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipelines->batchedXGEMMDirect.layout,
+      0,
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+
+    SHADER_PROFILE_START("BATCHED_XGEMM_DIRECT_FP32", cb);
+    vkCmdDispatch(cb, static_cast<uint32_t>(globalSizes[0]), static_cast<uint32_t>(globalSizes[1]), static_cast<uint32_t>(globalSizes[2]));
+    SHADER_PROFILE_END("BATCHED_XGEMM_DIRECT_FP32", cb);
+    VkHelpers::barrierCommandBuffer(cb);
   }
 };
 
@@ -4058,6 +4142,7 @@ namespace KatagoVulkan {
     // createConv2d5x5BnMishFp32();
     createAddPointWiseFp32();
     createMatmulFp32();
+    createBatchedXGEMMDirect();
     createStridedBatchedMatmulFp32();
     // createMatmulTiled4x4x32Fp32();
     createBatchNormMaskFp32();
@@ -4086,6 +4171,7 @@ namespace KatagoVulkan {
     // destroyPipeline(conv2d5x5BnMishFp32);
     destroyPipeline(addPointWiseFp32);
     destroyPipeline(matmulFp32);
+    destroyPipeline(batchedXGEMMDirect);
     destroyPipeline(stridedBatchedMatmulFp32);
     // destroyPipeline(matmulTiledChw4x4x32Fp32);
     destroyPipeline(batchNormMaskFp32);
@@ -4129,7 +4215,8 @@ namespace KatagoVulkan {
     size_t spirvSize,
     size_t bindingSize,
     uint32_t pushConstantSize,
-    Pipeline &outPipeline
+    Pipeline &outPipeline,
+    VkSpecializationInfo* specializationInfo
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
 
@@ -4174,7 +4261,7 @@ namespace KatagoVulkan {
     }
     outPipeline.layout = VkHelpers::createPipelineLayout(device,{ outPipeline.descriptorSetLayout }, pushConstants, &res);
     CHECK_VK_MSG(pipelineName + "PipelineLayout",res);
-    outPipeline.pipeline = VkHelpers::createComputePipeline(device, outPipeline.layout, cache, shaderModule, &res);
+    outPipeline.pipeline = VkHelpers::createComputePipeline(device, outPipeline.layout, cache, shaderModule, &res, specializationInfo);
     CHECK_VK_MSG(pipelineName + "ComputePipeline",res);
     // std::cout << "Created Compute Pipeline: " << pipelineName << " result : " << res << std::endl;
     vkDestroyShaderModule(device, shaderModule, nullptr);
@@ -4245,6 +4332,37 @@ namespace KatagoVulkan {
 
   void ComputePipelines::createMatmulFp32() {
     createPipeline("MatmulFp32", VkSPIRVShaders::spirv_matmul_fp32, VkSPIRVShaders::spirv_matmul_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), matmulFp32);
+  }
+
+  void ComputePipelines::createBatchedXGEMMDirect() {
+    uint32_t WGD = 16;
+    uint32_t MDIMCD = 8;
+    uint32_t NDIMCD = 8;
+    uint32_t NDIMAD = 8;
+    uint32_t MDIMBD = 8;
+    uint32_t PADA = 1;
+    uint32_t PADB = 1;
+    std::vector<uint32_t> specData = {
+      WGD,
+      MDIMCD,
+      NDIMCD,
+      NDIMAD,
+      MDIMBD,
+      PADA,
+      PADB
+    };
+    std::vector<VkSpecializationMapEntry> specEntries(specData.size());
+    for ( size_t i = 0 ; i < specData.size() ; i++ ) {
+      specEntries[i].constantID = static_cast<uint32_t>(i);
+      specEntries[i].offset = static_cast<uint32_t>(i * sizeof(uint32_t));
+      specEntries[i].size = sizeof(uint32_t);
+    }
+    VkSpecializationInfo specInfo = {};
+    specInfo.dataSize = specData.size() * sizeof(uint32_t);
+    specInfo.pData = specData.data();
+    specInfo.mapEntryCount = static_cast<uint32_t>(specEntries.size());
+    specInfo.pMapEntries = specEntries.data();
+    createPipeline("BatchedXGEMMDirect", VkSPIRVShaders::spirv_batched_xgemm_direct, VkSPIRVShaders::spirv_batched_xgemm_direct_size, 3, sizeof(KatagoVulkan::BatchedXGEMMDirectParams), batchedXGEMMDirect, &specInfo);
   }
 
   void ComputePipelines::createStridedBatchedMatmulFp32() {
