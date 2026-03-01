@@ -4897,19 +4897,18 @@ namespace KatagoVulkan {
   }
 
   void ComputePipelines::createWinogradInputTransform() {
-    WinogradInputTransformSpec spec {
-      .localSizeX = (tuneParams.conv3x3.inputTransformLocalXSize),
-      .localSizeY = (tuneParams.conv3x3.inputTransformLocalYSize),
-      .localSizeZ = 1,
-      .inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize),
-      .inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize),
-      .outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize),
-      .outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize),
-      .inTileYOffset= -1,
-      .inTileXOffset= -1,
-      .convY = 3,
-      .convX = 3
-    };
+    WinogradInputTransformSpec spec;
+    spec.localSizeX = (tuneParams.conv3x3.inputTransformLocalXSize);
+    spec.localSizeY = (tuneParams.conv3x3.inputTransformLocalYSize);
+    spec.localSizeZ = 1;
+    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
+    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
+    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
+    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
+    spec.inTileYOffset= -1;
+    spec.inTileXOffset= -1;
+    spec.convY = 3;
+    spec.convX = 3;
     std::vector<int32_t> specData_3322 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
     std::vector<VkSpecializationMapEntry> specEntry = VkHelpers::createSpecMapEntries(specData_3322.size());
     VkSpecializationInfo si3322 = VkHelpers::createSpecializationInfo(specData_3322, specEntry);
@@ -4929,20 +4928,19 @@ namespace KatagoVulkan {
   }
 
   void ComputePipelines::createWinogradInputTransformBnAct() {
-    auto spec = WinogradInputTransformBnActSpec {
-      .localSizeX = tuneParams.conv3x3.inputTransformLocalXSize,
-      .localSizeY = tuneParams.conv3x3.inputTransformLocalYSize,
-      .localSizeZ = 1,
-      .inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize),
-      .inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize),
-      .outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize),
-      .outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize),
-      .inTileYOffset= -1,
-      .inTileXOffset= -1,
-      .convY = 3,
-      .convX = 3,
-      .activation = ACTIVATION_IDENTITY
-    };
+    auto spec = WinogradInputTransformBnActSpec();
+    spec.localSizeX = tuneParams.conv3x3.inputTransformLocalXSize;
+    spec.localSizeY = tuneParams.conv3x3.inputTransformLocalYSize;
+    spec.localSizeZ = 1;
+    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
+    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
+    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
+    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
+    spec.inTileYOffset= -1;
+    spec.inTileXOffset= -1;
+    spec.convY = 3;
+    spec.convX = 3;
+    spec.activation = ACTIVATION_IDENTITY;
     std::vector<int32_t> specData_3322_identity = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     std::vector<VkSpecializationMapEntry> specEntry = VkHelpers::createSpecMapEntries(specData_3322_identity.size());
     VkSpecializationInfo si3322_identity = VkHelpers::createSpecializationInfo(specData_3322_identity, specEntry);
@@ -5075,19 +5073,18 @@ namespace KatagoVulkan {
   }
 
   void ComputePipelines::createBatchedXgemmDirect() {
-    auto spec = XgemmDirectSpec {
-      .localSizeX = tuneParams.xgemmDirect.MDIMCD,
-      .localSizeY = tuneParams.xgemmDirect.NDIMCD,
-      .localSizeZ = 1,
-      .WGD = static_cast<int>(tuneParams.xgemmDirect.WGD),
-      .MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD),
-      .NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD),
-      .MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD),
-      .NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD),
-      .KWID = static_cast<int>(tuneParams.xgemmDirect.KWID),
-      .PADA = static_cast<int>(tuneParams.xgemmDirect.PADA),
-      .PADB = static_cast<int>(tuneParams.xgemmDirect.PADB)
-    };
+    auto spec = XgemmDirectSpec();
+    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
+    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
+    spec.localSizeZ = 1;
+    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
+    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
+    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
+    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
+    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
+    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
+    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
+    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
     std::vector<VkSpecializationMapEntry> mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = VkHelpers::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);
@@ -5096,16 +5093,15 @@ namespace KatagoVulkan {
 
   void ComputePipelines::createXGEMMBatchedFp32() {
 
-    auto spec = XGEMMBatchedSpec{
-      .localSizeX = tuneParams.xgemm.MDIMC,
-      .localSizeY = tuneParams.xgemm.NDIMC,
-      .localSizeZ = 1,
-      .MWG = tuneParams.xgemm.MWG,
-      .NWG = tuneParams.xgemm.NWG,
-      .KWG = tuneParams.xgemm.KWG,
-      .MDIMC = tuneParams.xgemm.MDIMC,
-      .NDIMC = tuneParams.xgemm.NDIMC
-    };
+    auto spec = XGEMMBatchedSpec();
+    spec.localSizeX = tuneParams.xgemm.MDIMC;
+    spec.localSizeY = tuneParams.xgemm.NDIMC;
+    spec.localSizeZ = 1;
+    spec.MWG = tuneParams.xgemm.MWG;
+    spec.NWG = tuneParams.xgemm.NWG;
+    spec.KWG = tuneParams.xgemm.KWG;
+    spec.MDIMC = tuneParams.xgemm.MDIMC;
+    spec.NDIMC = tuneParams.xgemm.NDIMC;
     std::vector<VkSpecializationMapEntry> mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = VkHelpers::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);
@@ -5113,19 +5109,18 @@ namespace KatagoVulkan {
   }
 
   void ComputePipelines::createXGEMMStridedBatchedFp32() {
-    auto spec = XgemmDirectSpec {
-      .localSizeX = tuneParams.xgemmDirect.MDIMCD,
-      .localSizeY = tuneParams.xgemmDirect.NDIMCD,
-      .localSizeZ = 1,
-      .WGD = static_cast<int>(tuneParams.xgemmDirect.WGD),
-      .MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD),
-      .NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD),
-      .MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD),
-      .NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD),
-      .KWID = static_cast<int>(tuneParams.xgemmDirect.KWID),
-      .PADA = static_cast<int>(tuneParams.xgemmDirect.PADA),
-      .PADB = static_cast<int>(tuneParams.xgemmDirect.PADB)
-    };
+    auto spec = XgemmDirectSpec();
+    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
+    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
+    spec.localSizeZ = 1;
+    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
+    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
+    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
+    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
+    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
+    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
+    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
+    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
     auto specData = VkHelpers::createSpecData(&spec, sizeof(spec));
     auto mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);

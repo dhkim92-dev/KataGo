@@ -143,16 +143,16 @@ void convInputsToWinogradDomain(
   const int batchNumTilesPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
   const int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams{
-    .batchSize = batchSize,
-    .nnYLen = nnYLen,
-    .nnXLen = nnXLen,
-    .numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize,
-    .numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize,
-    .inChannels = inChannels,
-    .inChannelsPadded = static_cast<uint32_t>(inChannelsPadded),
-    .ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded)
-  };
+  auto params = KatagoVulkan::WinogradInputTransformParams();
+  params.batchSize = batchSize;
+  params.nnYLen = nnYLen;
+  params.nnXLen = nnXLen;
+  params.numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
+  params.numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
+  params.inChannels = inChannels;
+  params.inChannelsPadded = static_cast<uint32_t>(inChannelsPadded);
+  params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
+  // };
   // std::printf("convInputsToWinogradDomain: batchSize = %d nnYLen = %d nnXLen = %d numTilesY = %d numTilesX = %d inChannels = %d inChannelsPadded = %d batchNumTilesPadded = %d\n",
     // params.batchSize, params.nnYLen, params.nnXLen, params.numTilesY, params.numTilesX, params.inChannels, params.inChannelsPadded, params.ntxtySizePadded
   // );
@@ -239,16 +239,15 @@ void convInputToWinogradDomainBnActMask(
   const int batchNumTilesPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
   const int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams{
-    .batchSize = batchSize,
-    .nnYLen = nnYLen,
-    .nnXLen = nnXLen,
-    .numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize,
-    .numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize,
-    .inChannels = inChannels,
-    .inChannelsPadded = static_cast<uint32_t>(inChannelsPadded),
-    .ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded)
-  };
+  auto params = KatagoVulkan::WinogradInputTransformParams();
+  params.batchSize = batchSize;
+  params.nnYLen = nnYLen;
+  params.nnXLen = nnXLen;
+  params.numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
+  params.numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
+  params.inChannels = inChannels;
+  params.inChannelsPadded = static_cast<uint32_t>(inChannelsPadded);
+  params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   constexpr uint32_t dim = 3;
@@ -300,16 +299,15 @@ void winogradOutputToSpatialDomain(
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Output Transform", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::WinogradOutputTransformParams{
-    .batchSize = static_cast<int>(batchSize),
-    .ySize = static_cast<int>(nnYLen),
-    .xSize = static_cast<int>(nnXLen),
-    .numTilesY = static_cast<int>(numTilesY),
-    .numTilesX = static_cast<int>(numTilesX),
-    .outChannels = static_cast<int>(outChannels),
-    .outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, outChannelsPadMultiple),
-    .ntxtySizePadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple)
-  };
+  auto params = KatagoVulkan::WinogradOutputTransformParams();
+  params.batchSize = static_cast<int>(batchSize);
+  params.ySize = static_cast<int>(nnYLen);
+  params.xSize = static_cast<int>(nnXLen);
+  params.numTilesY = static_cast<int>(numTilesY);
+  params.numTilesX = static_cast<int>(numTilesX);
+  params.outChannels = static_cast<int>(outChannels);
+  params.outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
+  params.ntxtySizePadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
 
   // std::printf(
   //   "winogradOutputToSpatialDomain: batchSize=%d ySize=%d xSize=%d numTilesY=%d numTilesX=%d outChannels=%d outChannelsPadded=%d ntxtySizePadded=%d\n",
@@ -371,17 +369,16 @@ void xgemmBatched(
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
 
-  auto params = KatagoVulkan::XGEMMBatchedParams{
-    .M = M,
-    .N = N,
-    .K = K,
-    .aOne = M,
-    .aTwo = K,
-    .bOne = N,
-    .bTwo = K,
-    .cOne = M,
-    .cTwo = N,
-  };
+  auto params = KatagoVulkan::XGEMMBatchedParams();
+  params.M = M;
+  params.N = N;
+  params.K = K;
+  params.aOne = M;
+  params.aTwo = K;
+  params.bOne = N;
+  params.bTwo = K;
+  params.cOne = M;
+  params.cTwo = N;
   // std::printf(
   //   "Launching BatchedXGemm_KM_KN_NM with M=%d, N=%d, K=%d, numBatchElts=%d\n",
   //   M, N, K, numBatchElts
@@ -441,18 +438,17 @@ void xgemmStridedBatchedNN(
 
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::XgemmStridedBatchedFp32Params{
-    .kSizeM = kSizeM,
-    .kSizeN = kSizeN,
-    .kSizeK = kSizeK,
-    .aLead = kSizeM,
-    .aStride = aStride,
-    .bLead = kSizeN,
-    .bStride = bStride,
-    .cLead = kSizeM,
-    .cStride = cStride,
-    .cTranspose = 0
-  };
+  auto params = KatagoVulkan::XgemmStridedBatchedFp32Params();
+  params.kSizeM = kSizeM;
+  params.kSizeN = kSizeN;
+  params.kSizeK = kSizeK;
+  params.aLead = kSizeM;
+  params.aStride = aStride;
+  params.bLead = kSizeN;
+  params.bStride = bStride;
+  params.cLead = kSizeM;
+  params.cStride = cStride;
+  params.cTranspose = 0;
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
   size_t mCeiled = VkHelpers::roundUpToMultiple(kSizeM, tuneParams.xgemmDirect.WGD);
@@ -512,15 +508,14 @@ void batchedXGemmDirect_MK_NK_MN(
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
     
-    auto params = KatagoVulkan::BatchedXgemmDirectFp32Params{
-      .kSizeM = static_cast<uint32_t>(M),
-      .kSizeN = static_cast<uint32_t>(N),
-      .kSizeK = static_cast<uint32_t>(K),
-      .aLead = static_cast<uint32_t>(K),
-      .bLead = static_cast<uint32_t>(K),
-      .cLead = static_cast<uint32_t>(N),
-      .cTranspose = 1
-    };
+    auto params = KatagoVulkan::BatchedXgemmDirectFp32Params();
+    params.kSizeM = static_cast<uint32_t>(M);
+    params.kSizeN = static_cast<uint32_t>(N);
+    params.kSizeK = static_cast<uint32_t>(K);
+    params.aLead = static_cast<uint32_t>(K);
+    params.bLead = static_cast<uint32_t>(K);
+    params.cLead = static_cast<uint32_t>(N);
+    params.cTranspose = 1;
     vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
     const uint32_t WGD = tuneParams.xgemmDirect.WGD;
