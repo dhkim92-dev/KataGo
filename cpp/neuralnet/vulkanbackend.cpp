@@ -815,6 +815,11 @@ struct ConvLayer {
     }
 
     VkResult res;
+    numTilesX = 0;
+    numTilesY = 0;
+    numTilesTotal = 0;
+    inTilesXYSize = 0;
+    outTilesXYSize = 0;
 
     // if ( convYSize == 3 || convYSize == 5 ) {
       // outTilesY = convYSize == 3 ? handle->tuneParams.conv3x3.outTileYSize : handle->tuneParams.conv5x5.outTileYSize;
@@ -3532,6 +3537,8 @@ struct Buffers {
     // TODO: Implement workspace allocation when winograd or other conv algorithms are added.
     ConvWorkspaceEltsNeeded convWorkspaceElts = m.requiredConvWorkspaceElts(handle);
 
+    std::printf("Conv workspace elts needed: size1=%zu, size2=%zu\n", convWorkspaceElts.size1, convWorkspaceElts.size2);
+
     convWorkspace = VkHelpers::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size1 * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create conv workspace buffer", res);
     convWorkspace2 = VkHelpers::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size2 * sizeof(float), false, &res);
@@ -4894,12 +4901,12 @@ namespace KatagoVulkan {
       .localSizeX = (tuneParams.conv3x3.inputTransformLocalXSize),
       .localSizeY = (tuneParams.conv3x3.inputTransformLocalYSize),
       .localSizeZ = 1,
+      .inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize),
+      .inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize),
       .outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize),
       .outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize),
-      .inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize),
-      .inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize),
-      .inTileXOffset= -1,
       .inTileYOffset= -1,
+      .inTileXOffset= -1,
       .convY = 3,
       .convX = 3
     };
@@ -4912,10 +4919,10 @@ namespace KatagoVulkan {
     spec.convY = 5;
     spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
     spec.outTileYSize = tuneParams.conv5x5.outTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
     spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.inTileXOffset= -2;
+    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
     spec.inTileYOffset= -2;
+    spec.inTileXOffset= -2;
     std::vector<int32_t> specData_5544 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
     VkSpecializationInfo si5544 = VkHelpers::createSpecializationInfo(specData_5544, specEntry);
     createPipeline("WinogradInputTransform for 5x5 kernels", VkSPIRVShaders::spirv_winograd_input_transform, VkSPIRVShaders::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
@@ -4925,12 +4932,13 @@ namespace KatagoVulkan {
     auto spec = WinogradInputTransformBnActSpec {
       .localSizeX = tuneParams.conv3x3.inputTransformLocalXSize,
       .localSizeY = tuneParams.conv3x3.inputTransformLocalYSize,
+      .localSizeZ = 1,
       .inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize),
       .inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize),
       .outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize),
       .outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize),
-      .inTileXOffset= -1,
       .inTileYOffset= -1,
+      .inTileXOffset= -1,
       .convY = 3,
       .convX = 3,
       .activation = ACTIVATION_IDENTITY

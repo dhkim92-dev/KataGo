@@ -260,8 +260,6 @@ struct ConvWorkspaceEltsNeeded {
   }
 };
 
-
-
 /**
  * @brief NN Block Stack structure
  */
