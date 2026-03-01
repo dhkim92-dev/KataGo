@@ -527,8 +527,8 @@ void batchedXGemmDirect_MK_NK_MN(
     const uint32_t MDIMCD = tuneParams.xgemmDirect.MDIMCD;
     const uint32_t NDIMCD = tuneParams.xgemmDirect.NDIMCD;
 
-    size_t mCeiled = VkHelpers::roundUpToMultiple(M, MDIMCD);
-    size_t nCeiled = VkHelpers::roundUpToMultiple(N, NDIMCD);
+    size_t mCeiled = VkHelpers::roundUpToMultiple(M, WGD);
+    size_t nCeiled = VkHelpers::roundUpToMultiple(N, WGD);
     uint32_t global[3] = {
       static_cast<uint32_t>(mCeiled * MDIMCD / WGD),
       static_cast<uint32_t>(nCeiled * NDIMCD / WGD),

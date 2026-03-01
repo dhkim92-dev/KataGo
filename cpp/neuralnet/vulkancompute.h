@@ -47,16 +47,59 @@ struct VulkanTuneParams {
   VulkanTuneParams(const VulkanTuneParams& other) = default;
 
   VulkanTuneParams() {
+    // conv3x3 = ConvTuneParams{
+    //   .inTileYSize = 6,
+    //   .inTileXSize = 6,
+    //   .outTileYSize = 4,
+    //   .outTileXSize = 4,
+    //   .inputTransformLocalXSize = 4,
+    //   .inputTransformLocalYSize = 2,
+    //   .outputTransformLocalXSize = 8,
+    //   .outputTransformLocalYSize = 2,
+    //   .outputTransformLocalZSize = 2
+    // };
+    // conv5x5 = ConvTuneParams{
+    //   .inTileYSize = 6,
+    //   .inTileXSize = 6,
+    //   .outTileYSize = 2,
+    //   .outTileXSize = 2,
+    //   .inputTransformLocalXSize = 4,
+    //   .inputTransformLocalYSize = 2,
+    //   .outputTransformLocalXSize = 8,
+    //   .outputTransformLocalYSize = 2,
+    //   .outputTransformLocalZSize = 2
+    // };
+    // xgemm = XgemmTuneParams{
+    //   .MDIMC = 16,
+    //   .NDIMC = 16,
+    //   .MWG = 64,
+    //   .NWG = 64,
+    //   .KWG = 16,
+    //   .MDIMA = 16,
+    //   .NDIMB = 16
+    // };
+
+    // xgemmDirect = XgemmDirectTuneParams{
+    //   .WGD = 32,
+    //   .MDIMCD = 8,
+    //   .NDIMCD = 8,
+    //   .MDIMAD = 8,
+    //   .NDIMBD = 8,
+    //   .KWID = 2,
+    //   .PADA = 1,
+    //   .PADB = 1
+    // };
+
     conv3x3 = ConvTuneParams{
       .inTileYSize = 6,
       .inTileXSize = 6,
       .outTileYSize = 4,
       .outTileXSize = 4,
-      .inputTransformLocalXSize = 4,
+      .inputTransformLocalXSize = 128,
       .inputTransformLocalYSize = 2,
       .outputTransformLocalXSize = 8,
-      .outputTransformLocalYSize = 2,
-      .outputTransformLocalZSize = 2
+      .outputTransformLocalYSize = 4,
+      .outputTransformLocalZSize = 8
     };
 
     conv5x5 = ConvTuneParams{
@@ -64,12 +107,13 @@ struct VulkanTuneParams {
       .inTileXSize = 6,
       .outTileYSize = 2,
       .outTileXSize = 2,
-      .inputTransformLocalXSize = 4,
+      .inputTransformLocalXSize = 128,
       .inputTransformLocalYSize = 2,
       .outputTransformLocalXSize = 8,
       .outputTransformLocalYSize = 2,
       .outputTransformLocalZSize = 2
     };
+
     xgemm = XgemmTuneParams{
       .MDIMC = 16,
       .NDIMC = 16,
