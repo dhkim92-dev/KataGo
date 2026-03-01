@@ -11,10 +11,33 @@
 #include <unordered_map>
 #include <cstdint>
 #include <iomanip>
+#include "../core/simpleallocator.h"
+#include "../neuralnet/nninputs.h"
+#include "../neuralnet/nninterface.h"
 #include "../neuralnet/vulkanhelpers.h"
+#include "../neuralnet/vulkancompute.h"
 #include "../neuralnet/vulkanshaders.h"
 
-#define SHADER_PROFILE
+#define ACTIVATION_IDENTITY 0
+#define ACTIVATION_RELU 1
+#define ACTIVATION_MISH 2
+#define ACTIVATION_MISH_SCALE8 12
+
+// #define SHADER_PROFILE
+#ifdef SHADER_PROFILE
+#define SHADER_PROFILE_START(shaderName, cb) { \
+  uint64_t beginQueryIdx = handle->queryIdx; \
+  uint64_t endQueryIdx = handle->queryIdx+1; \
+  handle->queryIdx+=2; \
+  vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, handle->queryPool, beginQueryIdx);
+#define SHADER_PROFILE_END(shaderName, cb)  \
+  vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, handle->queryPool, endQueryIdx); \
+  handle->commandDispatchInfos.push_back( { shaderName, beginQueryIdx, endQueryIdx } );
+}
+#else 
+#define SHADER_PROFILE_START(shaderName, cb)
+#define SHADER_PROFILE_END(shaderName, cb) 
+#endif
 #define FLOAT16_SIZE_IN_BYTES 2
 
 static void checkBufferSize(int batchSize, int nnXLen, int nnYLen, int channels) {
@@ -41,6 +64,7 @@ struct ShaderExecutionInfo {
 struct ComputeHandleInternal {
   const ComputeContext* context;
   const VulkanDevice* vulkanDevice;
+  VulkanTuneParams tuneParams;
   VkDevice device;
   VkQueue queue;
   bool usingFP16Storage = false;
@@ -141,6 +165,18 @@ struct ComputeHandleInternal {
 #endif
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
+
+  int getXGemmMPaddingMult() const {
+    return tuneParams.xgemm.MWG;
+  }
+
+  int getXGemmNPaddingMult() const {
+    return tuneParams.xgemm.NWG;
+  }
+
+  int getXgemmKPaddingMult() const {
+    return tuneParams.xgemm.KWG;
+  }
 };
 
 
@@ -259,6 +295,8 @@ struct BlockStack {
   BlockStack& operator=(const BlockStack&) = delete;
   ~BlockStack();
 
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal *handle, size_t maxBatchSize) const;
+
   void forward(
     VkCommandBuffer& cb,
     int batchSize,
@@ -266,7 +304,9 @@ struct BlockStack {
     VulkanBuffer* trunk,
     VulkanBuffer* trunkScratch,
     VulkanBuffer* mask,
-    VulkanBuffer* maskSum
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace,
+    VulkanBuffer* convWorkspace2
   );
 
   void debug(
@@ -275,7 +315,9 @@ struct BlockStack {
     VulkanBuffer* trunk,
     VulkanBuffer* trunkScratch,
     VulkanBuffer* mask,
-    VulkanBuffer* maskSum
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace,
+    VulkanBuffer* convWorkspace2
   );
 };
 
@@ -291,9 +333,6 @@ namespace KatagoVulkan {
    *        Not implemented yet. support in future. Maybe profiled tuning will be adopted.
    *        Becuase vulkan can not decide optimal parameters at runtime like OpenCL.
    */
-  struct VulkanTuneParams {
-
-  };
 
   /**
    * @brief Push constant parameters for Conv2D operation. it makes easier to pass small parameters to shader.
@@ -319,6 +358,69 @@ namespace KatagoVulkan {
     uint32_t activation; // 0: Identity, 1: ReLU, 2: Mish, 3: Mish + Scale8
   };
 
+  struct WinogradInputTransformParams {
+    uint32_t batchSize;
+    uint32_t nnYLen;
+    uint32_t nnXLen;
+    uint32_t numTilesY;
+    uint32_t numTilesX;
+    uint32_t inChannels;
+    uint32_t inChannelsPadded;
+    uint32_t ntxtySizePadded;
+  };
+
+  struct WinogradInputTransformBnActSpec {
+    uint32_t localSizeX = 1;
+    uint32_t localSizeY = 1;
+    uint32_t localSizeZ = 1;
+    int inTileYSize = 4;
+    int inTileXSize = 4;
+    int outTileYSize = 2;
+    int outTileXSize = 2;
+    int inTileYOffset = -1;
+    int inTileXOffset = -1;
+    int convY = 3;
+    int convX = 3;
+    int activation = 0; // 0: Identity, 1: ReLU, 2: Mish, 12: Mish + Scale8
+  };
+
+  struct WinogradInputTransformSpec {
+    uint32_t localSizeX = 1;
+    uint32_t localSizeY = 1;
+    uint32_t localSizeZ = 1;
+    int inTileYSize = 4;
+    int inTileXSize = 4;
+    int outTileYSize = 2;
+    int outTileXSize = 2;
+    int inTileYOffset = -1;
+    int inTileXOffset = -1;
+    int convY = 3;
+    int convX = 3;
+  };
+
+  struct WinogradOutputTransformParams {
+    int batchSize;
+    int ySize;
+    int xSize;
+    int numTilesY;
+    int numTilesX;
+    int outChannels;
+    int outChannelsPadded;
+    int ntxtySizePadded;
+  };
+
+  struct WinogradOutputTransformSpec {
+    uint32_t localSizeX = 1;
+    uint32_t localSizeY = 1;
+    uint32_t localSizeZ = 1;
+    int inTileYSize = 4;
+    int inTileXSize = 4;
+    int outTileYSize = 2;
+    int outTileXSize = 2;
+    int convY = 3;
+    int convX = 3;
+  };
+
   /**
    * @brief Matmul pipeline Push Constant Parameters
    * @param M: rows of A and C, each batch
@@ -335,6 +437,30 @@ namespace KatagoVulkan {
     uint32_t cTranspose; // Output Transpose
   };
 
+  struct XGEMMBatchedParams{
+    uint32_t M;  
+    uint32_t N;  
+    uint32_t K;
+    uint32_t aOne;
+    uint32_t aTwo;
+    uint32_t bOne;
+    uint32_t bTwo;
+    uint32_t cOne;
+    uint32_t cTwo;
+  };
+
+  struct XGEMMBatchedSpec {
+    uint32_t localSizeX = 16;
+    uint32_t localSizeY = 16;
+    uint32_t localSizeZ = 1;
+    uint32_t MWG=64;
+    uint32_t NWG=64;
+    uint32_t KWG=32;
+    uint32_t MDIMC=16;
+    uint32_t NDIMC=16;
+   };
+
+
   struct BatchedXGEMMDirectParams {
     uint32_t M;  
     uint32_t N;
@@ -347,13 +473,41 @@ namespace KatagoVulkan {
     uint32_t cTranspose; // Output C Transpose
   };
 
-  struct StridedBatchedMatmulFp32Params {
-    uint32_t M;  
-    uint32_t N;
-    uint32_t K;  
-    uint32_t inputStride;
-    uint32_t filterStride;
-    uint32_t outputStride;
+  struct XgemmDirectSpec {
+    uint32_t localSizeX = 16;
+    uint32_t localSizeY = 16;
+    uint32_t localSizeZ = 1;
+    int WGD = 32;
+    int MDIMCD = 8;
+    int NDIMCD = 8;
+    int MDIMAD = 16;
+    int NDIMBD = 16;
+    int KWID = 2;
+    int PADA = 1;
+    int PADB = 1;
+  };
+
+  struct XgemmStridedBatchedFp32Params {
+    uint32_t kSizeM;  
+    uint32_t kSizeN;
+    uint32_t kSizeK;  
+    uint32_t aLead;
+    uint32_t aStride;
+    uint32_t bLead;
+    uint32_t bStride;
+    uint32_t cLead;
+    uint32_t cStride;
+    uint32_t cTranspose;
+  };
+
+  struct BatchedXgemmDirectFp32Params {
+    uint32_t kSizeM;  
+    uint32_t kSizeN;
+    uint32_t kSizeK;  
+    uint32_t aLead;
+    uint32_t bLead;
+    uint32_t cLead;
+    uint32_t cTranspose; // Output C Transpose
   };
 
   /**
@@ -438,14 +592,6 @@ namespace KatagoVulkan {
     uint32_t H; // Height
     uint32_t W; // Width
   };
-
-  struct Pipeline {
-    VkPipelineLayout layout;
-    VkPipeline pipeline;
-    VkDescriptorSetLayout descriptorSetLayout;
-  };
-
-
   /**
    * @brief Compute pipelines for various operations
    */
@@ -455,6 +601,7 @@ namespace KatagoVulkan {
     // const bool usingFP16Compute;
     // const bool usingFP16TensorCores;
     VkDevice device;
+    const VulkanTuneParams tuneParams;
     VkPipelineCache cache;
 
     // In this code, assume that NCHW is default format if no postfix is given.
@@ -464,14 +611,31 @@ namespace KatagoVulkan {
     Pipeline conv2dTiledBnAct3x3Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
     Pipeline conv2dTiledBnAct5x5Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
 
+    Pipeline winogradInputTransform3x3;
+    Pipeline winogradInputTransform5x5;
+
+    Pipeline winogradInputTransform3x3_bnact_identity;
+    Pipeline winogradInputTransform3x3_bnact_relu;
+    Pipeline winogradInputTransform3x3_bnact_mish;
+    Pipeline winogradInputTransform3x3_bnact_mish_scale8;
+    Pipeline winogradInputTransform5x5_bnact_identity;
+    Pipeline winogradInputTransform5x5_bnact_relu;
+    Pipeline winogradInputTransform5x5_bnact_mish;
+    Pipeline winogradInputTransform5x5_bnact_mish_scale8;
+
+    Pipeline winogradOutputTransform3x3;
+    Pipeline winogradOutputTransform5x5;
+
     Pipeline addPointWiseFp32;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
     Pipeline matmulFp32; 
-    Pipeline batchedXGEMMDirect;
+    Pipeline batchedXgemmDirect;
+    Pipeline xgemmBatchedFp32;
 
     // note that conv1x1 can be implemented as matmul operation
-    Pipeline stridedBatchedMatmulFp32;
+    // Pipeline stridedBatchedMatmulFp32;
+    Pipeline xgemmStridedBatchedFp32;
 
     // Batch Normalization pipelines
     // note that prediction phase does not need batch normalization operation separately
@@ -495,7 +659,7 @@ namespace KatagoVulkan {
     Pipeline addChannelBiasNCMishScale8Fp32;
     Pipeline extractChannel0NCHWFp32;
 
-    ComputePipelines(VkDevice device_);
+    ComputePipelines(VkDevice device_, const VulkanTuneParams& tuneParams_);
     ComputePipelines() = delete;
     ComputePipelines(const ComputePipelines&) = delete;
     ComputePipelines& operator=(const ComputePipelines&) = delete;
@@ -529,6 +693,12 @@ namespace KatagoVulkan {
      * @brief Create Conv2d Tiled Bn + Activation 5x5 Fp32 object
      */
     void createConv2dTiledBnAct5x5Fp32();
+
+    void createWinogradInputTransform();
+
+    void createWinogradInputTransformBnAct();
+
+    void createWinogradOutputTransform();
 
     /**
      * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
@@ -577,12 +747,17 @@ namespace KatagoVulkan {
     /**
      * @brief Create a Batched XGEMM Direct Fp32 object
      */
-    void createBatchedXGEMMDirect();
+    void createBatchedXgemmDirect();
+
+    /**
+     * @brief Create a XGEMM Batched Fp32 object
+     */
+    void createXGEMMBatchedFp32();
 
      /**
      * @brief Create a Strided Batched Matmul Fp32 object
      */
-    void createStridedBatchedMatmulFp32();
+    void createXGEMMStridedBatchedFp32();
 
     /**
      * @brief Create a BatchNorm Mask Fp32 object

@@ -143,6 +143,18 @@ size_t VkHelpers::roundUpToMultiple(size_t size, size_t ofThis) {
   return (size + ofThis - 1) / ofThis * ofThis;
 }
 
+int VkHelpers::roundUpToMultipleInt(int size, int ofThis) {
+  // Use 64-bit arithmetic to avoid overflow when multiplying large sizes,
+  // then clamp to INT_MAX to keep return value in int range.
+  if(ofThis <= 0) return size;
+  int64_t s = static_cast<int64_t>(size);
+  int64_t o = static_cast<int64_t>(ofThis);
+  int64_t ret = ((s + o - 1) / o) * o;
+  if(ret > static_cast<int64_t>(std::numeric_limits<int>::max()))
+    return std::numeric_limits<int>::max();
+  return static_cast<int>(ret);
+}
+
 size_t VkHelpers::powerOf2ify(size_t size) {
   if(size <= 2)
     return size;
@@ -285,7 +297,14 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     // Get shader float16/int8 features
     VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features = {};
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+    VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features = {};
     shaderFloat16Int8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    features2.pNext = &shaderFloat16Int8Features;
+    cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    shaderFloat16Int8Features.pNext = &cooperativeMatrixFeatures;
+    maintenance4Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
+    cooperativeMatrixFeatures.pNext = &maintenance4Features;
     features2.pNext = &shaderFloat16Int8Features;
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
@@ -293,11 +312,14 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
       logger->write("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No"));
     } 
 
-    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
-    cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
-    features2.pNext = &cooperativeMatrixFeatures;
-    vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+    // VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+    // cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    // features2.pNext = &cooperativeMatrixFeatures;
+    // vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
     deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
+    deviceInfo.maintenance4Features = maintenance4Features;
+    deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
+
     if ( logger != nullptr ) {
       logger->write("  Cooperative Matrix Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE ? "Yes" : "No"));
     }
@@ -364,9 +386,46 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   queueCI.queueCount = 1;
   queueCI.pQueuePriorities = &queuePriority;
 
+  VkPhysicalDeviceFeatures2 requestedFeatures = {};
+  requestedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  requestedFeatures.features = deviceInfo.features; // start with all available features, we'll disable unsupported
+
+  VkPhysicalDeviceShaderFloat16Int8Features f16Feat = {};
+  f16Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+
+  if ( deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_FALSE ) {
+    std::cout << "Device " << deviceInfo.deviceName << " does not support shaderFloat16, disabling it." << std::endl;
+    f16Feat.shaderFloat16 = VK_FALSE;
+  } else {
+    f16Feat.shaderFloat16 = VK_TRUE;
+  }
+
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmFeatures = {};
+  cmFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+  requestedFeatures.pNext = &cmFeatures;
+  if ( deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_FALSE ) {
+      std::cout << "Device " << deviceInfo.deviceName << " does not support cooperativeMatrix, disabling it." << std::endl;
+      cmFeatures.cooperativeMatrix = VK_FALSE;
+  } else {
+    cmFeatures.cooperativeMatrix = VK_TRUE;
+  }
+
+  VkPhysicalDeviceMaintenance4FeaturesKHR m4Features = {};
+  m4Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
+  if ( deviceInfo.maintenance4Features.maintenance4 == VK_FALSE ) {
+    std::cout << "Device " << deviceInfo.deviceName << " does not support maintenance4, disabling it." << std::endl;
+    m4Features.maintenance4 = VK_FALSE;
+  } else {
+    m4Features.maintenance4 = VK_TRUE;
+  }
+  
+  cmFeatures.pNext = &m4Features;
+  f16Feat.pNext = &cmFeatures;
+  requestedFeatures.pNext = &f16Feat;
+
   VkDeviceCreateInfo deviceCI = {};
   deviceCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  deviceCI.pNext = &deviceInfo.shaderFloat16Int8Features;
+  deviceCI.pNext = &requestedFeatures;
   deviceCI.queueCreateInfoCount = 1;
   deviceCI.pQueueCreateInfos = &queueCI;
   deviceCI.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
@@ -1014,8 +1073,51 @@ void VkHelpers::barrierCommandBuffer(
   vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }
 
-#endif
+void VkHelpers::barrierCommandBufferForBuffer(
+  VkCommandBuffer commandBuffer,
+  VulkanBuffer* buffer,
+  VkPipelineStageFlags srcStageMask,
+  VkAccessFlags srcAccessMask,
+  VkPipelineStageFlags dstStageMask,
+  VkAccessFlags dstAccessMask
+) {
+  VkBufferMemoryBarrier bufferBarrier = {};
+  bufferBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  bufferBarrier.srcAccessMask = srcAccessMask;
+  bufferBarrier.dstAccessMask = dstAccessMask;
+  bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  bufferBarrier.buffer = buffer->buffer;
+  bufferBarrier.offset = 0;
+  bufferBarrier.size = VK_WHOLE_SIZE;
+  vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 1, &bufferBarrier, 0, nullptr);
+}
 
+std::vector<int32_t> VkHelpers::createSpecData(void* data, size_t dataSize) {
+  size_t cnt = dataSize / sizeof(int32_t);
+  int32_t* intData = reinterpret_cast<int32_t*>(data);
+  std::vector<int32_t> specData(intData, intData + cnt);
+  return specData;
+}
+
+std::vector<VkSpecializationMapEntry> VkHelpers::createSpecMapEntries(size_t dataCount) {
+  std::vector<VkSpecializationMapEntry> mapEntries(dataCount);
+  for ( size_t i = 0; i < dataCount; i++ ) {
+    mapEntries[i].constantID = static_cast<uint32_t>(i);
+    mapEntries[i].offset = static_cast<uint32_t>(i * sizeof(int32_t));
+    mapEntries[i].size = sizeof(int32_t);
+  }
+  return mapEntries;
+}
+
+VkSpecializationInfo VkHelpers::createSpecializationInfo(const std::vector<int32_t>& specData, const std::vector<VkSpecializationMapEntry>& mapEntries) {
+  VkSpecializationInfo specInfo = {};
+  specInfo.mapEntryCount = static_cast<uint32_t>(mapEntries.size());
+  specInfo.pMapEntries = mapEntries.data();
+  specInfo.dataSize = specData.size() * sizeof(int32_t);
+  specInfo.pData = specData.data();
+  return specInfo;
+}
 
 namespace VkDebug {
 
@@ -1055,3 +1157,4 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 }
 
 } // namespace VkDebug
+#endif

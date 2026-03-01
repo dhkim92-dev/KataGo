@@ -25,6 +25,20 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_tiled_bn_act_5x5_fp32_end;
   extern const size_t _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
+  // winograd_input_transform.glsl
+  extern const unsigned char _binary_winograd_input_transform_start[];
+  extern const unsigned char* _binary_winograd_input_transform_end;
+  extern const size_t _binary_winograd_input_transform_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_end;
+  extern const size_t _binary_winograd_input_transform_bnact_size;
+
+  // winograd_output_transform.glsl
+  extern const unsigned char _binary_winograd_output_transform_start[];
+  extern const unsigned char* _binary_winograd_output_transform_end;
+  extern const size_t _binary_winograd_output_transform_size;
+
   // add_pointwise_fp32.glsl
   extern const unsigned char _binary_add_pointwise_fp32_start[];
   extern const unsigned char* _binary_add_pointwise_fp32_end;
@@ -35,15 +49,20 @@ extern "C" {
   extern const unsigned char* _binary_matmul_fp32_end;
   extern const size_t _binary_matmul_fp32_size;
 
+  // xgemm_batched_fp32.glsl
+  extern const unsigned char _binary_xgemm_batched_fp32_start[];
+  extern const unsigned char* _binary_xgemm_batched_fp32_end;
+  extern const size_t _binary_xgemm_batched_fp32_size;
+
   // batched_xgemm_direct_fp32.glsl
   extern const unsigned char _binary_batched_xgemm_direct_start[];
   extern const unsigned char* _binary_batched_xgemm_direct_end;
   extern const size_t _binary_batched_xgemm_direct_size;
 
-  // strided_batched_matmul_fp32.glsl
-  extern const unsigned char _binary_strided_batched_matmul_fp32_start[];
-  extern const unsigned char* _binary_strided_batched_matmul_fp32_end;
-  extern const size_t _binary_strided_batched_matmul_fp32_size;
+  // xgemm_strided_batched_nn_fp32.glsl
+  extern const unsigned char _binary_xgemm_strided_batched_nn_fp32_start[];
+  extern const unsigned char* _binary_xgemm_strided_batched_nn_fp32_end;
+  extern const size_t _binary_xgemm_strided_batched_nn_fp32_size;
 
   // bn_mask_fp32.glsl
   extern const unsigned char _binary_bn_mask_fp32_start[];
@@ -128,6 +147,15 @@ namespace VkSPIRVShaders {
   extern const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32;
   extern size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size;
 
+  extern const unsigned char* spirv_winograd_input_transform;
+  extern size_t spirv_winograd_input_transform_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_bnact;
+  extern size_t spirv_winograd_input_transform_bnact_size;
+
+  extern const unsigned char* spirv_winograd_output_transform;
+  extern size_t spirv_winograd_output_transform_size;
+
   // Convolution layers 3x3 with identity activation function
   // extern const unsigned char* spirv_conv2d_3x3_bn_fp32;
   // extern size_t spirv_conv2d_3x3_bn_fp32_size;
@@ -160,13 +188,16 @@ namespace VkSPIRVShaders {
   extern const unsigned char* spirv_matmul_fp32;
   extern size_t spirv_matmul_fp32_size;
 
+  extern const unsigned char* spirv_xgemm_batched_fp32;
+  extern size_t spirv_xgemm_batched_fp32_size;
+
   // batched_xgemm_direct_fp32 - batched xgemm direct fp32
   extern const unsigned char* spirv_batched_xgemm_direct;
   extern size_t spirv_batched_xgemm_direct_size;
 
   // strided batched matmul fp32 - for 1x1 conv
-  extern const unsigned char* spirv_strided_batched_matmul_fp32;;
-  extern size_t spirv_strided_batched_matmul_fp32_size;
+  extern const unsigned char* spirv_xgemm_strided_batched_nn_fp32;;
+  extern size_t spirv_xgemm_strided_batched_nn_fp32_size;
 
   // Future support, NCHW matmul Fp32
   // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;

@@ -6,6 +6,7 @@
 */
 
 #define SPECIALIZATION_CONSTANT(__id, __type, __name, __default) layout(constant_id = __id) const __type __name = __default
+#define SPEC(__id, __type, __name, __default) layout(constant_id = __id) const __type __name = __default
 
 #define GroupId0() (int(gl_WorkGroupID.x))
 #define GroupId1() (int(gl_WorkGroupID.y))
@@ -16,9 +17,9 @@
 #define LocalSize0() (int(gl_WorkGroupSize.x))
 #define LocalSize1() (int(gl_WorkGroupSize.y))
 #define LocalSize2() (int(gl_WorkGroupSize.z))
-#define GlobalId0() (GroupId0() * LocalSize0 + LocalId0())
-#define GlobalId1() (GroupId1() * LocalSize1 + LocalId1())
-#define GlobalId2() (GroupId2() * LocalSize2 + LocalId2())
+#define GlobalId0() (GroupId0() * LocalSize0() + LocalId0())
+#define GlobalId1() (GroupId1() * LocalSize1() + LocalId1())
+#define GlobalId2() (GroupId2() * LocalSize2() + LocalId2())
 
 /**
 * @brief BatchNorm NCHW compute shader dispatch parameters
@@ -150,5 +151,101 @@
 #define SBM_TILE_K 16
 #define SBM_DISPATCH_X SBM_TILE_M
 #define SBM_DISPATCH_Y SBM_TILE_N
+
+/**
+ * half float precision type definition
+ */
+ #ifndef PRECISION
+  #define PRECISION 32
+#endif
+
+#if PRECISION == 16
+  #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+  #extension GL_EXT_shader_16bit_storage : enable
+  #define real float16_t
+  #define ZERO 0.0h
+  #define ONE 1.0h
+  #define HUNDRED 100.0h
+  #define FOURTEEN 14.0h
+  #define TEN 10.0h
+  #define EIGHT 8.0h
+  #define FIVE 5.0h
+  #define FOUR 4.0h
+  #define TWO 2.0h
+  #define HALF 0.5h
+  #define TWOP5 2.5h
+  #define SQRT8 2.82842712475h
+  #define SQRT2 1.41421356237h
+  #define SQRTHALF 0.70710678118h
+  #define SQRTEIGHTH 0.35355339059h
+  #define LOG1PEXPTHRESHOLD 20.0f
+//   #define floatToReal(_r) (convert_half(_r))
+#elif PRECISION == 32 
+  #define real float
+  #define ZERO 0.0f
+  #define ONE 1.0f
+  #define HUNDRED 100.0f
+  #define FOURTEEN 14.0f
+  #define TEN 10.0f
+  #define EIGHT 8.0f
+  #define FIVE 5.0f
+  #define FOUR 4.0f
+  #define TWO 2.0f
+  #define HALF 0.5f
+  #define TWOP5 2.5f
+  #define SQRT8 2.82842712475f
+  #define SQRT2 1.41421356237f
+  #define SQRTHALF 0.70710678118f
+  #define SQRTEIGHTH 0.35355339059f
+  #define LOG1PEXPTHRESHOLD 20.0f
+#endif
+
+#ifndef PRECISION_STORAGE
+  #define PRECISION_STORAGE PRECISION
+#endif
+
+#define ACTIVATION_TYPE_IDENTITY 0
+#define ACTIVATION_TYPE_RELU 1
+#define ACTIVATION_TYPE_MISH 2
+#define ACTIVATION_TYPE_MISH_SCALE8 12
+
+#if PRECISION_STORAGE == 16
+  #define real float16_t
+  #define realstore float16_t
+  #define real4 f16vec4
+  #if PRECISION == 16
+    #define LOAD(__buf,__x) ((__buf)[(__x)])
+    #define STORE(__buf,__x,__y) ((__buf)[(__x)] = (__y))
+    #define READ_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) readonly buffer __name##Buffer { __type __name[]; }
+    #define WRITE_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) writeonly buffer __name##Buffer { __type __name[]; }
+    #define READ_WRITE_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) buffer __name##Buffer { __type __name[]; }
+  #elif PRECISION == 32
+    #define LOAD(__buf,__x) float((__buf)[(__x)])
+    #define STORE(__buf,__x,__y) ((__buf)[(__x)] = float16_t(__y))
+    #define READ_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) readonly buffer __name##Buffer { __type __name[]; }
+    #define WRITE_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) writeonly buffer __name##Buffer { __type __name[]; }
+    #define READ_WRITE_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no, scalar) buffer __name##Buffer { __type __name[]; }
+  #endif
+#elif PRECISION_STORAGE == 32
+  #define real float
+  #define real4 vec4
+  #define realstore float
+  #define LOAD(__buf,__x) ((__buf)[(__x)])
+  #define STORE(__buf,__x,__y) ((__buf)[(__x)] = (__y))
+  #define READ_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) readonly buffer __name##Buffer { __type __name[]; }
+  #define WRITE_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) writeonly buffer __name##Buffer { __type __name[]; }
+  #define READ_WRITE_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) buffer __name##Buffer { __type __name[]; }
+#endif
+
+real soft_plus(real x) {
+  const float T = 20.0;
+  if ( x > T ) {
+    return x;
+  } else if ( x < -T ) {
+    return exp(x);
+  } else {
+    return log(exp(x) + 1.0);
+  }
+}
 
 #endif //

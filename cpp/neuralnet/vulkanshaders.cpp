@@ -14,6 +14,18 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32 = _binary_conv2d_tiled_bn_act_5x5_fp32_start;
   size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size = _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
+  // winograd_input_transform 
+  const unsigned char* spirv_winograd_input_transform = _binary_winograd_input_transform_start;
+  size_t spirv_winograd_input_transform_size = _binary_winograd_input_transform_size;
+
+  // winograd_input_transform_bnact
+  const unsigned char* spirv_winograd_input_transform_bnact = _binary_winograd_input_transform_bnact_start;
+  size_t spirv_winograd_input_transform_bnact_size = _binary_winograd_input_transform_bnact_size;
+
+  // winograd_output_transform
+  const unsigned char* spirv_winograd_output_transform = _binary_winograd_output_transform_start;
+  size_t spirv_winograd_output_transform_size = _binary_winograd_output_transform_size;
+
   // add_pointwise_fp32
   const unsigned char* spirv_add_pointwise_fp32 = _binary_add_pointwise_fp32_start;
   size_t spirv_add_pointwise_fp32_size = _binary_add_pointwise_fp32_size;
@@ -22,13 +34,17 @@ namespace VkSPIRVShaders {
   const unsigned char* spirv_matmul_fp32 = _binary_matmul_fp32_start;
   size_t spirv_matmul_fp32_size = _binary_matmul_fp32_size;
 
+  // xgemm_batched_fp32
+  const unsigned char* spirv_xgemm_batched_fp32 = _binary_xgemm_batched_fp32_start;
+  size_t spirv_xgemm_batched_fp32_size = _binary_xgemm_batched_fp32_size;
+
   // batched_xgemm_direct_fp32
   const unsigned char* spirv_batched_xgemm_direct = _binary_batched_xgemm_direct_start;
   size_t spirv_batched_xgemm_direct_size = _binary_batched_xgemm_direct_size;
 
-  // strided_batched_matmul_fp32
-  const unsigned char* spirv_strided_batched_matmul_fp32 = _binary_strided_batched_matmul_fp32_start;
-  size_t spirv_strided_batched_matmul_fp32_size = _binary_strided_batched_matmul_fp32_size;
+  // xgemm_strided_batched_nn_fp32
+  const unsigned char* spirv_xgemm_strided_batched_nn_fp32 = _binary_xgemm_strided_batched_nn_fp32_start;
+  size_t spirv_xgemm_strided_batched_nn_fp32_size = _binary_xgemm_strided_batched_nn_fp32_size;
 
   // bn_mask_fp32
   const unsigned char* spirv_bn_mask_fp32 = _binary_bn_mask_fp32_start;

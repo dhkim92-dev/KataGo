@@ -15,10 +15,11 @@ struct VulkanDeviceInfo {
   VkPhysicalDeviceType deviceType;
   std::string deviceName;
   VkPhysicalDeviceFeatures features;
-  VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memoryProperties;
+  VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
+  VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
 };
 
 struct VulkanDevice {
@@ -70,12 +71,21 @@ struct WriteDescriptorSet {
   VkWriteDescriptorSet vkWriteDescriptorSet;
 };
 
+
+struct Pipeline {
+  VkPipelineLayout layout;
+  VkPipeline pipeline;
+  VkDescriptorSetLayout descriptorSetLayout;
+};
+
 /**
  * @brief Vulkan Utility functions for instance and error handling
  */
 namespace VkHelpers {
 
   size_t roundUpToMultiple(size_t size, size_t ofThis);
+
+  int roundUpToMultipleInt(int size, int ofThis);
 
   size_t powerOf2ify(size_t size);
 
@@ -280,6 +290,25 @@ namespace VkHelpers {
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
   );
+
+  void barrierCommandBufferForBuffer(
+    VkCommandBuffer commandBuffer,
+    VulkanBuffer* buffer,
+    VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+    VkAccessFlags srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+    VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+  );
+
+  std::vector<int32_t> createSpecData(void* data, size_t dataSize);
+
+  std::vector<VkSpecializationMapEntry> createSpecMapEntries(size_t dataCount);
+
+  VkSpecializationInfo createSpecializationInfo(
+    const std::vector<int32_t>& specData,
+    const std::vector<VkSpecializationMapEntry>& specMapEntries
+  );
+
 };
 
 namespace VkDebug {

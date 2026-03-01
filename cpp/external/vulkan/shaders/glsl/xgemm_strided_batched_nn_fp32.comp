@@ -10,7 +10,6 @@ layout(constant_id = 8) const int _KWID = 1;
 layout(constant_id = 9) const int _PADA = 1;
 layout(constant_id = 10) const int _PADB = 1;
 
-
 #include "common.h"
 
 layout(set = 0, binding = 0) readonly buffer Agm {
@@ -28,13 +27,16 @@ layout(set = 0, binding = 2) writeonly buffer Cgm {
 shared real alm[_WGD * (_WGD + _PADA)];
 shared real blm[_WGD * (_WGD + _PADB)];
 
-layout(push_constant) uniform PushConsts {
+layout(push_constant) uniform PushConstants {
   int kSizeM;
   int kSizeN;
   int kSizeK;
   int a_ld;
+  int a_stride;
   int b_ld;
+  int b_stride;
   int c_ld;
+  int c_stride;
   int c_transpose;
 };
 
@@ -45,16 +47,14 @@ void main() {
   const int batch = GroupId2();
   const real arg_alpha = 1;
   const real arg_beta = 0;
-  const int a_offset = batch * kSizeM * kSizeK;
-  const int b_offset = batch * kSizeN * kSizeK;
-  const int c_offset = batch * kSizeM * kSizeN;
+  const int a_offset_batch = a_stride * batch;
+  const int b_offset_batch = b_stride * batch;
+  const int c_offset_batch = c_stride * batch;
   const int a_conjugate = 0;
   const int b_conjugate = 0;
-  XgemmDirect(kSizeM, kSizeN, kSizeK, 
-              arg_alpha, arg_beta,
-              a_offset, a_ld, 
-              b_offset, b_ld,
-              c_offset, c_ld,
-              1, 1, c_transpose, a_conjugate, b_conjugate);
-
+  XgemmDirect(kSizeM, kSizeN, kSizeK, arg_alpha, arg_beta,
+              a_offset_batch, a_ld, 
+              b_offset_batch, b_ld, 
+              c_offset_batch, c_ld,
+              0, 0, c_transpose, a_conjugate, b_conjugate);
 }

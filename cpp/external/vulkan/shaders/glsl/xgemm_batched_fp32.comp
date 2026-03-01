@@ -1,0 +1,84 @@
+/**
+* @author dhkim92.dev@gmail.com
+* @brief Batched XGEMM Shader
+* @details This shader performs batched matrix multiplication C = A * B for multiple batches.
+* This file based on cpp/external/clblas/xgemm_batched.opencl 
+* And translate version of CLBlas code. 
+* Apache License Version 2.0
+*/
+// A: [k*M + m], with 'k' ranging from 0:K and 'm' from 0:M (m,k,m)
+// B: [k*N + n], with 'k' ranging from 0:K and 'n' from 0:N (n,k,n)
+// C: [n*M + m], with 'n' ranging from 0:N and 'm' from 0:M (m,n,m)
+// Or as an image (assuming column-major)
+//       K
+//    o-------o
+//    |       |
+//  N | [B^T] |
+//    |       |
+//    o-------o
+//        K               N
+//    o-------o        o-----o
+//  M |  [A]  |      M | [C] |
+//    |       |        |     |
+//    o-------o        o-----o
+#version 450
+
+#define PRECISION 32
+#define PRECISION_STORAGE 32
+#define VWM 4 
+#define VWN 4
+#define STRM 0 
+#define STRN 0
+#define SA 1
+#define SB 1
+#define GEMMK 0
+#define KWI 1
+// layout(constant_id = 0) const uint LOCAL_SIZE_X = 8;
+// layout(constant_id = 1) const uint LOCAL_SIZE_Y = 8;
+// layout(constant_id = 2) const uint LOCAL_SIZE_Z = 1;
+layout(constant_id = 3) const int _MWG = 64; // 64, 128
+layout(constant_id = 4) const int _NWG = 64; ///
+layout(constant_id = 5) const int _KWG = 32; // 8, 16
+layout(constant_id = 6) const int _MDIMC = 16; //
+layout(constant_id = 7) const int _NDIMC = 16; //
+layout(constant_id = 8) const int _MDIMA = 16; // Re-shaped tile dimension of matrix A = KDIMA x MDIMA
+layout(constant_id = 9) const int _NDIMB = 16; // Re-shaped tile dimension of matrix B =
+
+#include "common.h"
+
+layout(push_constant) uniform BatchedXGEMMParams {
+    int kSizeM;
+    int kSizeN;
+    int kSizeK;
+    int a_one;
+    int a_two;
+    int b_one;
+    int b_two;
+    int c_one;
+    int c_two;
+}params;
+
+READ_ONLY_GLOBAL(0, 0, real4, agm);
+READ_ONLY_GLOBAL(0, 1, real4, bgm);
+READ_WRITE_GLOBAL(0, 2, real4, cgm);
+
+shared real4 alm[(_MWG * _KWG) / VWM];
+shared real4 blm[(_NWG * _KWG) / VWN];
+
+#define STRM 0
+#define STRN 0
+
+#include "xgemm.h"
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+// layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+void main() {
+  const int batch = GroupId2();
+
+  // Sets the offsets
+  const int a_offset = batch * params.a_one * params.a_two;
+  const int b_offset = batch * params.b_one * params.b_two;
+  const int c_offset = batch * params.c_one * params.c_two;
+
+  XgemmBody(params.kSizeM, params.kSizeN, params.kSizeK, a_offset, b_offset, c_offset);
+}
