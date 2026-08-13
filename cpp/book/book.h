@@ -18,25 +18,25 @@ struct BookHash {
   BookHash();
   BookHash(Hash128 historyHash, Hash128 situationHash);
 
-  bool operator<(const BookHash other) const;
-  bool operator>(const BookHash other) const;
-  bool operator<=(const BookHash other) const;
-  bool operator>=(const BookHash other) const;
-  bool operator==(const BookHash other) const;
-  bool operator!=(const BookHash other) const;
+  bool operator<(const BookHash& other) const;
+  bool operator>(const BookHash& other) const;
+  bool operator<=(const BookHash& other) const;
+  bool operator>=(const BookHash& other) const;
+  bool operator==(const BookHash& other) const;
+  bool operator!=(const BookHash& other) const;
 
-  BookHash operator^(const BookHash other) const;
-  BookHash operator|(const BookHash other) const;
-  BookHash operator&(const BookHash other) const;
-  BookHash& operator^=(const BookHash other);
-  BookHash& operator|=(const BookHash other);
-  BookHash& operator&=(const BookHash other);
+  BookHash operator^(const BookHash& other) const;
+  BookHash operator|(const BookHash& other) const;
+  BookHash operator&(const BookHash& other) const;
+  BookHash& operator^=(const BookHash& other);
+  BookHash& operator|=(const BookHash& other);
+  BookHash& operator&=(const BookHash& other);
 
   // Get book hash, and the symmetry to apply so that hist aligns with book nodes for its current position, (histspace -> nodespace)
   // and the list of symmetries such that book node is invariant under those symmetries.
   static void getHashAndSymmetry(const BoardHistory& hist, int repBound, BookHash& hashRet, int& symmetryToAlignRet, std::vector<int>& symmetriesRet, int bookVersion);
 
-  friend std::ostream& operator<<(std::ostream& out, const BookHash other);
+  friend std::ostream& operator<<(std::ostream& out, const BookHash& other);
   std::string toString() const;
   static BookHash ofString(const std::string& s);
 };
@@ -58,7 +58,7 @@ struct BookMove {
   double biggestWLCostFromRoot; // Largest single cost due to winloss during path from root
 
   BookMove();
-  BookMove(Loc move, int symmetryToAlign, BookHash hash, double rawPolicy);
+  BookMove(Loc move, int symmetryToAlign, const BookHash& hash, double rawPolicy);
 
   // Apply symmetry to this BookMove.
   BookMove getSymBookMove(int symmetry, int xSize, int ySize) const;
@@ -158,7 +158,7 @@ class BookNode {
 
   std::atomic<int> visitedFlag; // Used for multithreaded coordination
 
-  BookNode(BookHash hash, Book* book, Player pla, const std::vector<int>& symmetries);
+  BookNode(const BookHash& hash, Book* book, Player pla, const std::vector<int>& symmetries);
   ~BookNode();
   BookNode(const BookNode&) = delete;
   BookNode& operator=(const BookNode&) = delete;
@@ -187,43 +187,43 @@ class SymBookNode {
   SymBookNode(const SymBookNode& other) = default;
   SymBookNode& operator=(const SymBookNode& other) = default;
 
-  bool isNull();
-  SymBookNode applySymmetry(int symmetry);
+  bool isNull() const;
+  SymBookNode applySymmetry(int symmetry) const;
 
-  bool isMoveInBook(Loc move);
-  int numUniqueMovesInBook();
-  std::vector<BookMove> getUniqueMovesInBook();
+  bool isMoveInBook(Loc move) const;
+  int numUniqueMovesInBook() const;
+  std::vector<BookMove> getUniqueMovesInBook() const;
 
-  Player pla();
-  BookHash hash();
-  std::vector<int> getSymmetries();
+  Player pla() const;
+  BookHash hash() const;
+  std::vector<int> getSymmetries() const;
 
   BookValues& thisValuesNotInBook();
   bool& canExpand();
   bool& canReExpand();
-  const RecursiveBookValues& recursiveValues();
-  int minDepthFromRoot();
-  double minCostFromRoot();
-  double totalExpansionCost();
+  const RecursiveBookValues& recursiveValues() const;
+  int minDepthFromRoot() const;
+  double minCostFromRoot() const;
+  double totalExpansionCost() const;
 
   // For testing purposes only - allows direct access to internal node
   BookNode* getNodeForTesting() { return node; }
 
   // Returns NULL for the root or if somehow a parent is not found
-  SymBookNode canonicalParent();
+  SymBookNode canonicalParent() const;
 
-  SymBookNode follow(Loc move);
+  SymBookNode follow(Loc move) const;
 
   // Returns NULL if the move is not legal OR the move is not in the book.
-  SymBookNode playMove(Board& board, BoardHistory& hist, Loc move);
+  SymBookNode playMove(Board& board, BoardHistory& hist, Loc move) const;
   // Returns NULL if the move is not legal. The move *must* not be in the book.
   SymBookNode playAndAddMove(Board& board, BoardHistory& hist, Loc move, double rawPolicy, bool& childIsTransposing);
 
   // Returns false and does not modify ret if playing the moves in the book to reach here hit an illegal move.
   // Fills moveHistoryRet with the sequence of moves played. If there is an illegal move, includes the illegal move.
   // This should only happen if a book was loaded from disk that is corrupted, or else only astronomically rarely on hash collisions.
-  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet);
-  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet, std::vector<double>& winlossRet);
+  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet) const;
+  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet, std::vector<double>& winlossRet) const;
 
   friend class ConstSymBookNode;
   friend class Book;
@@ -244,36 +244,36 @@ class ConstSymBookNode {
   ConstSymBookNode& operator=(const SymBookNode& other);
   ConstSymBookNode& operator=(const ConstSymBookNode& other) = default;
 
-  bool isNull();
-  ConstSymBookNode applySymmetry(int symmetry);
+  bool isNull() const;
+  ConstSymBookNode applySymmetry(int symmetry) const;
 
-  Player pla();
-  BookHash hash();
-  std::vector<int> getSymmetries();
+  Player pla() const;
+  BookHash hash() const;
+  std::vector<int> getSymmetries() const;
 
-  bool isMoveInBook(Loc move);
-  int numUniqueMovesInBook();
-  std::vector<BookMove> getUniqueMovesInBook();
+  bool isMoveInBook(Loc move) const;
+  int numUniqueMovesInBook() const;
+  std::vector<BookMove> getUniqueMovesInBook() const;
 
-  const BookValues& thisValuesNotInBook();
-  bool canExpand();
-  bool canReExpand();
-  const RecursiveBookValues& recursiveValues();
-  int minDepthFromRoot();
-  double minCostFromRoot();
-  double totalExpansionCost();
+  const BookValues& thisValuesNotInBook() const;
+  bool canExpand() const;
+  bool canReExpand() const;
+  const RecursiveBookValues& recursiveValues() const;
+  int minDepthFromRoot() const;
+  double minCostFromRoot() const;
+  double totalExpansionCost() const;
 
   // Returns NULL for the root or if somehow a parent is not found
-  ConstSymBookNode canonicalParent();
+  ConstSymBookNode canonicalParent() const;
 
-  ConstSymBookNode follow(Loc move);
+  ConstSymBookNode follow(Loc move) const;
   // Returns NULL if the move is not legal OR the move is not in the book.
-  ConstSymBookNode playMove(Board& board, BoardHistory& hist, Loc move);
+  ConstSymBookNode playMove(Board& board, BoardHistory& hist, Loc move) const;
 
   // Returns false and does not modify ret if playing the moves in the book to reach here hit an illegal move.
   // This should only happen if a book was loaded from disk that is corrupted, or else only astronomically rarely on hash collisions.
-  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet);
-  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet, std::vector<double>& winlossRet);
+  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet) const;
+  bool getBoardHistoryReachingHere(BoardHistory& ret, std::vector<Loc>& moveHistoryRet, std::vector<double>& winlossRet) const;
 
   friend class Book;
 };
@@ -363,6 +363,9 @@ class Book {
   const Rules initialRules;
   const Player initialPla;
   const int repBound;
+  //Whether all histories and hashes of this book compute pass-alive area as if multi-stone suicide
+  //were legal regardless of the actual suicide rule. Recorded in the book file (absent = false).
+  const bool alwaysComputePassAliveUnderSuicideRules;
 
  private:
   BookParams params;
@@ -381,14 +384,25 @@ class Book {
   Book(
     int bookVersion,
     const Board& board,
-    Rules rules,
+    const Rules& rules,
     Player initialPla,
     int repBound,
+    bool alwaysComputePassAliveUnderSuicideRules,
     BookParams params
   );
   ~Book();
 
-  static constexpr int LATEST_BOOK_VERSION = 2;
+  //Reads just the metadata header of a saved book file to get its recorded pass-alive computation
+  //mode without loading the whole book. Absent key (older book files) = false.
+  static bool readAlwaysComputePassAliveUnderSuicideRulesOfFileHeader(const std::string& fileName);
+  static bool readAlwaysComputePassAliveUnderSuicideRulesOfHeader(std::istream& in);
+
+  //Version 3 is identical to version 2 in format and hashing, except that it may record
+  //alwaysComputePassAliveUnderSuicideRules=true. Flagged books require version >= 3 so that older
+  //binaries reject them cleanly ("Unsupported book version") instead of silently mis-hashing them
+  //into a disconnected mess. All new books are written as version 3, so new book files require
+  //this version of KataGo or later to load, whether flagged or not.
+  static constexpr int LATEST_BOOK_VERSION = 3;
 
   Book(const Book&) = delete;
   Book& operator=(const Book&) = delete;
@@ -421,8 +435,8 @@ class Book {
   // Returns a null SymBookNode if hist goes off the end of the book.
   SymBookNode get(const BoardHistory& hist);
   ConstSymBookNode get(const BoardHistory& hist) const;
-  SymBookNode getByHash(BookHash hash);
-  ConstSymBookNode getByHash(BookHash hash) const;
+  SymBookNode getByHash(const BookHash& hash);
+  ConstSymBookNode getByHash(const BookHash& hash) const;
 
   void recompute(const std::vector<SymBookNode>& newAndChangedNodes);
   void recomputeEverything();
@@ -440,7 +454,7 @@ class Book {
     std::set<BookHash> nodes;
 
     MinCostResult() : totalCost(0.0), nodes() {}
-    MinCostResult(double cost, std::set<BookHash> nodeSet) : totalCost(cost), nodes(nodeSet) {}
+    MinCostResult(double cost, const std::set<BookHash>& nodeSet) : totalCost(cost), nodes(nodeSet) {}
   };
 
   // Computes the minimum cost in PN-search-style for potentially proving a node's winLossValue
@@ -485,15 +499,18 @@ class Book {
   );
 
   void saveToFile(const std::string& fileName) const;
+  void saveToStream(std::ostream& out) const;
   static Book* loadFromFile(const std::string& fileName, int numThreadsForRecompute=1);
+  static Book* loadFromStream(std::istream& in, int numThreadsForRecompute=1);
 
  private:
-  int64_t getIdx(BookHash hash) const;
-  BookNode* get(BookHash hash);
-  const BookNode* get(BookHash hash) const;
-  BookNode* getAssertNotNull(BookHash hash);
-  const BookNode* getAssertNotNull(BookHash hash) const;
-  bool add(BookHash hash, BookNode* node);
+  static Book* loadFromStreamHelper(std::istream& in, int numThreadsForRecompute, const std::string& sourceDesc);
+  int64_t getIdx(const BookHash& hash) const;
+  BookNode* get(const BookHash& hash);
+  const BookNode* get(const BookHash& hash) const;
+  BookNode* getAssertNotNull(const BookHash& hash);
+  const BookNode* getAssertNotNull(const BookHash& hash) const;
+  bool add(const BookHash& hash, BookNode* node);
 
   enum class DFSAction {
     recurse, // Recursively search this node

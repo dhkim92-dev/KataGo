@@ -87,7 +87,7 @@ static float roundKomiWithLinearProb(float komi, Rand& rand) {
 void PlayUtils::setKomiWithoutNoise(const ExtraBlackAndKomi& extraBlackAndKomi, BoardHistory& hist) {
   float komi = extraBlackAndKomi.komiMean;
   komi = roundAndClipKomi(komi, hist.getRecentBoard(0));
-  assert(Rules::komiIsIntOrHalfInt(komi));
+  testAssert(Rules::komiIsIntOrHalfInt(komi));
   hist.setKomi(komi);
 }
 
@@ -99,7 +99,7 @@ void PlayUtils::setKomiWithNoise(const ExtraBlackAndKomi& extraBlackAndKomi, Boa
     komi = komi * (float)rand.nextDouble();
   komi = roundKomiWithLinearProb(komi,rand);
   komi = roundAndClipKomi(komi, hist.getRecentBoard(0));
-  assert(Rules::komiIsIntOrHalfInt(komi));
+  testAssert(Rules::komiIsIntOrHalfInt(komi));
   if(!extraBlackAndKomi.allowInteger && komi == (int)komi)
     komi += rand.nextBool(0.5) ? (-0.5f) : (0.5f);
   hist.setKomi(komi);
@@ -177,12 +177,17 @@ Loc PlayUtils::chooseRandomPolicyMove(
 
 
 Loc PlayUtils::getGameInitializationMove(
-  Search* botB, Search* botW, Board& board, const BoardHistory& hist, Player pla, NNResultBuf& buf,
+  Search* botB, Search* botW, const Board& board, const BoardHistory& hist, Player pla, NNResultBuf& buf,
   Rand& gameRand, double temperature
 ) {
-  NNEvaluator* nnEval = (pla == P_BLACK ? botB : botW)->nnEvaluator;
+  const Search* searcher = (pla == P_BLACK ? botB : botW);
+  NNEvaluator* nnEval = searcher->nnEvaluator;
   MiscNNInputParams nnInputParams;
-  nnInputParams.drawEquivalentWinsForWhite = (pla == P_BLACK ? botB : botW)->searchParams.drawEquivalentWinsForWhite;
+  nnInputParams.drawEquivalentWinsForWhite = searcher->searchParams.drawEquivalentWinsForWhite;
+  //Featurize for this bot's net the way that bot's own searches would, even if the game-level history
+  //carries a different pass-alive computation mode.
+  nnInputParams.passAliveSuicideRulesOverride =
+    Search::resolveAlwaysComputePassAliveUnderSuicideRules(searcher->searchParams, nnEval) ? 1 : 0;
   nnEval->evaluate(board,hist,pla,nnInputParams,buf,false,false);
   std::shared_ptr<NNOutput> nnOutput = std::move(buf.result);
 
@@ -244,7 +249,7 @@ void PlayUtils::initializeGameUsingPolicy(
     numInitialMovesToPlay = (int)floor(gameRand.nextExponential() * mean);
   }
 
-  assert(numInitialMovesToPlay >= 0);
+  testAssert(numInitialMovesToPlay >= 0);
   for(int i = 0; i<numInitialMovesToPlay; i++) {
     Loc loc = getGameInitializationMove(botB, botW, board, hist, pla, buf, gameRand, temperature);
 
@@ -276,9 +281,12 @@ void PlayUtils::playExtraBlack(
 
   if(!hist.isGameFinished) {
     NNResultBuf buf;
+    bool botPassAliveMode = Search::resolveAlwaysComputePassAliveUnderSuicideRules(bot->searchParams, bot->nnEvaluator);
     for(int i = 0; i<numExtraBlack; i++) {
       MiscNNInputParams nnInputParams;
       nnInputParams.drawEquivalentWinsForWhite = bot->searchParams.drawEquivalentWinsForWhite;
+      //Featurize the way this bot's own searches would, even if the passed history differs.
+      nnInputParams.passAliveSuicideRulesOverride = botPassAliveMode ? 1 : 0;
       bot->nnEvaluator->evaluate(board,hist,pla,nnInputParams,buf,false,false);
       std::shared_ptr<NNOutput> nnOutput = std::move(buf.result);
 
@@ -362,7 +370,7 @@ float PlayUtils::roundAndClipKomi(double unrounded, const Board& board) {
   return (float)(0.5 * round(2.0 * unrounded));
 }
 
-static SearchParams getNoiselessParams(SearchParams oldParams, int64_t numVisits) {
+static SearchParams getNoiselessParams(const SearchParams& oldParams, int64_t numVisits) {
   SearchParams newParams = oldParams;
   newParams.maxVisits = numVisits;
   newParams.maxPlayouts = numVisits;
@@ -388,7 +396,7 @@ ReportedSearchValues PlayUtils::getWhiteScoreValues(
   int64_t numVisits,
   const OtherGameProperties& otherGameProps
 ) {
-  assert(numVisits > 0);
+  testAssert(numVisits > 0);
   SearchParams oldParams = bot->searchParams;
   SearchParams newParams = getNoiselessParams(oldParams,numVisits);
 
@@ -558,7 +566,7 @@ static double getNaiveEvenKomiHelper(
     }
   }
   //Floating point math should be exact to multiples of 0.5 so this should hold *exactly*.
-  assert(upperDelta - lowerDelta == 0.5);
+  testAssert(upperDelta - lowerDelta == 0.5);
 
   double finalDelta;
   //If the winLoss are crossed, potentially due to noise, then just pick the average
@@ -616,7 +624,7 @@ float PlayUtils::computeLead(
 
   bool granularityIsCoarse = hist.rules.scoringRule == Rules::SCORING_AREA && !hist.rules.hasButton;
   if(!granularityIsCoarse) {
-    assert(hist.rules.komi == oldKomi);
+    testAssert(hist.rules.komi == oldKomi);
     return (float)(oldKomi - naiveKomi);
   }
 
@@ -630,7 +638,7 @@ float PlayUtils::computeLead(
 
   //If komi is exactly an integer, then we're good.
   if(naiveKomi == round(naiveKomi)) {
-    assert(hist.rules.komi == oldKomi);
+    testAssert(hist.rules.komi == oldKomi);
     return (float)(oldKomi - naiveKomi);
   }
 
@@ -652,7 +660,7 @@ float PlayUtils::computeLead(
     if(result < lower-0.5) result = lower-0.5;
     if(result > upper+0.5) result = upper+0.5;
   }
-  assert(hist.rules.komi == oldKomi);
+  testAssert(hist.rules.komi == oldKomi);
   return (float)(oldKomi - result);
 }
 
@@ -689,7 +697,7 @@ vector<double> PlayUtils::computeOwnership(
   Player pla,
   int64_t numVisits
 ) {
-  assert(numVisits > 0);
+  testAssert(numVisits > 0);
   bool oldAlwaysIncludeOwnerMap = bot->alwaysIncludeOwnerMap;
   bot->setAlwaysIncludeOwnerMap(true);
 
@@ -956,7 +964,7 @@ PlayUtils::BenchmarkResults PlayUtils::benchmarkSearchOnPositionsAndPrint(
   Board board;
   Player nextPla;
   BoardHistory hist;
-  sgf.setupInitialBoardAndHist(initialRules, board, nextPla, hist);
+  sgf.setupInitialBoardAndHist(initialRules, board, nextPla, hist, Search::resolveAlwaysComputePassAliveUnderSuicideRules(params, nnEval));
 
   int moveNum = 0;
 
@@ -1074,7 +1082,7 @@ Loc PlayUtils::maybeCleanupBeforePass(
   if(doCleanupBeforePass && moveLoc == Board::PASS_LOC && hist.isFinalPhase() && !hist.hasButton) {
     const Board& board = bot->getRootBoard();
     const Color* safeArea = bot->getSearch()->rootSafeArea;
-    assert(safeArea != NULL);
+    testAssert(safeArea != NULL);
     //Scan the board for any spot that is adjacent to an opponent group that is part of our pass-alive territory.
     for(int y = 0; y<board.y_size; y++) {
       for(int x = 0; x<board.x_size; x++) {
@@ -1135,7 +1143,7 @@ Loc PlayUtils::maybeFriendlyPass(
 
   const Board board = bot->getRootBoard();
   const BoardHistory hist = bot->getRootHist();
-  assert(oldPla == pla);
+  testAssert(oldPla == pla);
 
   if(!hist.isLegal(board,moveLoc,pla))
     throw StringError("PlayUtils::maybeFriendlyPass called on illegal move " + Location::toString(moveLoc,board));
@@ -1159,7 +1167,7 @@ Loc PlayUtils::maybeFriendlyPass(
     bool nonPassAliveStones = true;
     bool safeBigTerritories = true;
     bool unsafeBigTerritories = true;
-    bool isMultiStoneSuicideLegal = hist.rules.multiStoneSuicideLegal;
+    bool isMultiStoneSuicideLegal = hist.suicideLegalForPassAlive();
     cleanBoard.calculateArea(area, nonPassAliveStones, safeBigTerritories, unsafeBigTerritories, isMultiStoneSuicideLegal);
   }
   const double highOwnershipThreshold = 0.75;
@@ -1244,13 +1252,12 @@ std::shared_ptr<NNOutput> PlayUtils::getFullSymmetryNNOutput(
   const Board& board, const BoardHistory& hist, Player pla, bool includeOwnerMap, const SGFMetadata* sgfMeta, NNEvaluator* nnEval
 ) {
   vector<std::shared_ptr<NNOutput>> ptrs;
-  Board b = board;
   for(int sym = 0; sym<SymmetryHelpers::NUM_SYMMETRIES; sym++) {
     MiscNNInputParams nnInputParams;
     nnInputParams.symmetry = sym;
     NNResultBuf buf;
     bool skipCache = true; //Always ignore cache so that we use the desired symmetry
-    nnEval->evaluate(b,hist,pla,sgfMeta,nnInputParams,buf,skipCache,includeOwnerMap);
+    nnEval->evaluate(board,hist,pla,sgfMeta,nnInputParams,buf,skipCache,includeOwnerMap);
     ptrs.push_back(std::move(buf.result));
   }
   std::shared_ptr<NNOutput> result(new NNOutput(ptrs));

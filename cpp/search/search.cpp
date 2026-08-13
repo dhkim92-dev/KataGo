@@ -9,6 +9,7 @@
 #include <numeric>
 
 #include "../core/fancymath.h"
+#include "../core/test.h"
 #include "../core/timer.h"
 #include "../game/graphhash.h"
 #include "../search/distributiontable.h"
@@ -65,10 +66,10 @@ SearchThread::~SearchThread() {
 
 static const double VALUE_WEIGHT_DEGREES_OF_FREEDOM = 3.0;
 
-Search::Search(SearchParams params, NNEvaluator* nnEval, Logger* lg, const string& rSeed)
+Search::Search(const SearchParams& params, NNEvaluator* nnEval, Logger* lg, const string& rSeed)
   :Search(params,nnEval,NULL,lg,rSeed)
 {}
-Search::Search(SearchParams params, NNEvaluator* nnEval, NNEvaluator* humanEval, Logger* lg, const string& rSeed)
+Search::Search(const SearchParams& params, NNEvaluator* nnEval, NNEvaluator* humanEval, Logger* lg, const string& rSeed)
   :rootPla(P_BLACK),
    rootBoard(),
    rootHistory(),
@@ -111,11 +112,11 @@ Search::Search(SearchParams params, NNEvaluator* nnEval, NNEvaluator* humanEval,
    oldNNOutputsToCleanUpMutex(),
    oldNNOutputsToCleanUp()
 {
-  assert(logger != NULL);
+  testAssert(logger != NULL);
   nnXLen = nnEval->getNNXLen();
   nnYLen = nnEval->getNNYLen();
-  assert(nnXLen > 0 && nnXLen <= NNPos::MAX_BOARD_LEN);
-  assert(nnYLen > 0 && nnYLen <= NNPos::MAX_BOARD_LEN);
+  testAssert(nnXLen > 0 && nnXLen <= NNPos::MAX_BOARD_LEN);
+  testAssert(nnYLen > 0 && nnYLen <= NNPos::MAX_BOARD_LEN);
   policySize = NNPos::getPolicySize(nnXLen,nnYLen);
 
   if(humanEvaluator != NULL) {
@@ -140,6 +141,7 @@ Search::Search(SearchParams params, NNEvaluator* nnEval, NNEvaluator* humanEval,
   mutexPool = new MutexPool(nodeTable->mutexPool->getNumMutexes());
 
   rootHistory.clear(rootBoard,rootPla,Rules(),0);
+  applyPassAliveModeToRootHistory();
   rootKoHashTable->recompute(rootHistory);
 }
 
@@ -171,8 +173,21 @@ Player Search::getPlayoutDoublingAdvantagePla() const {
   return searchParams.playoutDoublingAdvantagePla == C_EMPTY ? plaThatSearchIsFor : searchParams.playoutDoublingAdvantagePla;
 }
 
-int Search::getPos(Loc moveLoc) const {
-  return NNPos::locToPos(moveLoc,rootBoard.x_size,nnXLen,nnYLen);
+bool Search::resolveAlwaysComputePassAliveUnderSuicideRules(const SearchParams& params, const NNEvaluator* nnEval) {
+  if(params.alwaysComputePassAliveUnderSuicideRules == enabled_t::True)
+    return true;
+  if(params.alwaysComputePassAliveUnderSuicideRules == enabled_t::False)
+    return false;
+  return nnEval != NULL && nnEval->modelPreferPassAliveUnderSuicideRules();
+}
+
+void Search::applyPassAliveModeToRootHistory() {
+  bool b = resolveAlwaysComputePassAliveUnderSuicideRules(searchParams, nnEvaluator);
+  if(rootHistory.alwaysComputePassAliveUnderSuicideRules != b) {
+    //Changing the mode changes graph hashes and in-tree adjudication, so no search state can be kept.
+    clearSearch();
+    rootHistory.setAlwaysComputePassAliveUnderSuicideRules(b);
+  }
 }
 
 void Search::setPosition(Player pla, const Board& board, const BoardHistory& history) {
@@ -181,6 +196,7 @@ void Search::setPosition(Player pla, const Board& board, const BoardHistory& his
   plaThatSearchIsFor = C_EMPTY;
   rootBoard = board;
   rootHistory = history;
+  applyPassAliveModeToRootHistory();
   rootKoHashTable->recompute(rootHistory);
   avoidMoveUntilByLocBlack.clear();
   avoidMoveUntilByLocWhite.clear();
@@ -196,6 +212,7 @@ void Search::setPlayerAndClearHistory(Player pla) {
   bool assumeMultipleStartingBlackMovesAreHandicap = rootHistory.assumeMultipleStartingBlackMovesAreHandicap;
   rootHistory.clear(rootBoard,rootPla,rules,rootHistory.encorePhase);
   rootHistory.setAssumeMultipleStartingBlackMovesAreHandicap(assumeMultipleStartingBlackMovesAreHandicap);
+  applyPassAliveModeToRootHistory();
 
   rootKoHashTable->recompute(rootHistory);
 
@@ -216,6 +233,7 @@ void Search::setKomiIfNew(float newKomi) {
     clearSearch();
     rootHistory.setKomi(newKomi);
   }
+  applyPassAliveModeToRootHistory();
 }
 
 void Search::setAvoidMoveUntilByLoc(const std::vector<int>& bVec, const std::vector<int>& wVec) {
@@ -252,13 +270,17 @@ void Search::setRootSymmetryPruningOnly(const std::vector<int>& v) {
 }
 
 
-void Search::setParams(SearchParams params) {
+void Search::setParams(const SearchParams& params) {
   clearSearch();
   searchParams = params;
+  applyPassAliveModeToRootHistory();
 }
 
-void Search::setParamsNoClearing(SearchParams params) {
+void Search::setParamsNoClearing(const SearchParams& params) {
   searchParams = params;
+  //Deliberately overrides the "no clearing" if the resolved pass-alive mode actually changes,
+  //since in that case no search state is valid to keep.
+  applyPassAliveModeToRootHistory();
 }
 
 void Search::setExternalPatternBonusTable(std::unique_ptr<PatternBonusTable>&& table) {
@@ -274,7 +296,7 @@ void Search::setCopyOfExternalPatternBonusTable(const std::unique_ptr<PatternBon
   setExternalPatternBonusTable(table == nullptr ? nullptr : std::make_unique<PatternBonusTable>(*table));
 }
 
-void Search::setExternalEvalCache(std::shared_ptr<EvalCacheTable> cache) {
+void Search::setExternalEvalCache(const std::shared_ptr<EvalCacheTable>& cache) {
   if(cache == evalCache)
     return;
   clearSearch();
@@ -286,14 +308,15 @@ void Search::setNNEval(NNEvaluator* nnEval) {
   nnEvaluator = nnEval;
   nnXLen = nnEval->getNNXLen();
   nnYLen = nnEval->getNNYLen();
-  assert(nnXLen > 0 && nnXLen <= NNPos::MAX_BOARD_LEN);
-  assert(nnYLen > 0 && nnYLen <= NNPos::MAX_BOARD_LEN);
+  testAssert(nnXLen > 0 && nnXLen <= NNPos::MAX_BOARD_LEN);
+  testAssert(nnYLen > 0 && nnYLen <= NNPos::MAX_BOARD_LEN);
   policySize = NNPos::getPolicySize(nnXLen,nnYLen);
 
   if(humanEvaluator != NULL) {
     if(humanEvaluator->getNNXLen() != nnXLen || humanEvaluator->getNNYLen() != nnYLen)
       throw StringError("Search::setNNEval - humanEval has different nnXLen or nnYLen");
   }
+  applyPassAliveModeToRootHistory();
 }
 
 void Search::clearSearch() {
@@ -448,7 +471,7 @@ void Search::runWholeSearch(Player movePla, bool pondering, std::function<bool()
 }
 
 void Search::runWholeSearch(
-  std::function<void()>* searchBegun,
+  const std::function<void()>* searchBegun,
   std::function<bool()>* shouldStopEarly,
   bool pondering,
   const TimeControls& tc,
@@ -629,6 +652,13 @@ void Search::beginSearch(bool pondering) {
     throw StringError("Search got from NNEval nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) + " but was asked to search board with larger x or y size");
 
+  //Invariant: every setter that installs or rebuilds rootHistory or changes params/nnEvaluator
+  //re-stamps this flag, so it should always be consistent by the time a search begins.
+  testAssert(
+    rootHistory.alwaysComputePassAliveUnderSuicideRules ==
+    resolveAlwaysComputePassAliveUnderSuicideRules(searchParams, nnEvaluator)
+  );
+
   rootBoard.checkConsistency();
 
   numSearchesBegun++;
@@ -718,13 +748,20 @@ void Search::beginSearch(bool pondering) {
   else
     rootGraphHash = Hash128();
 
+  //Precompute the params hash once per search (params are constant during a search) so it can be cheaply
+  //folded into every eval cache lookup, keeping cached search results from leaking across different params.
+  if(searchParams.useEvalCache && searchParams.useGraphSearch)
+    evalCacheParamsHash = searchParams.getHash();
+  else
+    evalCacheParamsHash = Hash128();
+
   if(rootNode == NULL) {
     //Avoid storing the root node in the nodeTable, guarantee that it never is part of a cycle, allocate it directly.
     //Also force that it is non-terminal.
     const bool forceNonTerminal = rootHistory.isGameFinished; // Make sure the root isn't considered terminal if game would be finished.
     rootNode = new SearchNode(rootPla, forceNonTerminal, createMutexIdxForNode(dummyThread), rootGraphHash);
     if(searchParams.useEvalCache && searchParams.useGraphSearch && evalCache != nullptr && mirroringPla == C_EMPTY)
-      rootNode->evalCacheEntry = evalCache->find(rootNode->graphHash);
+      rootNode->evalCacheEntry = evalCache->find(getEvalCacheKey(rootNode->graphHash));
   }
   else {
     //If the root node has any existing children, then prune things down if there are moves that should not be allowed at the root.
@@ -766,8 +803,7 @@ void Search::beginSearch(bool pondering) {
         }
         for(; i<childrenCapacity; i++) {
           SearchNode* child = children[i].getIfAllocated();
-          (void)child;
-          assert(child == NULL);
+          testAssert(child == NULL);
         }
       }
 
@@ -886,7 +922,7 @@ SearchNode* Search::allocateOrFindNode(SearchThread& thread, Player nextPla, Loc
       }
 
       if(searchParams.useEvalCache && searchParams.useGraphSearch && evalCache != nullptr && mirroringPla == C_EMPTY)
-        child->evalCacheEntry = evalCache->find(child->graphHash);
+        child->evalCacheEntry = evalCache->find(getEvalCacheKey(child->graphHash));
 
       if(patternBonusTable != NULL)
         child->patternBonusHash = patternBonusTable->getHash(getOpp(thread.pla), bestChildMoveLoc, thread.history.getRecentBoard(1));
@@ -929,7 +965,7 @@ void Search::removeSubtreeValueBias(SearchNode* node) {
 //Also clears subtreevaluebias for deleted nodes.
 void Search::deleteAllOldOrAllNewTableNodesAndSubtreeValueBiasMulithreaded(bool old) {
   int numAdditionalThreads = numAdditionalThreadsToUseForTasks();
-  assert(numAdditionalThreads >= 0);
+  testAssert(numAdditionalThreads >= 0);
   std::function<void(int)> g = [&](int threadIdx) {
     size_t idx0 = (size_t)((uint64_t)(threadIdx) * nodeTable->entries.size() / (numAdditionalThreads+1));
     size_t idx1 = (size_t)((uint64_t)(threadIdx+1) * nodeTable->entries.size() / (numAdditionalThreads+1));
@@ -954,7 +990,7 @@ void Search::deleteAllOldOrAllNewTableNodesAndSubtreeValueBiasMulithreaded(bool 
 //Doesn't clear subtree value bias.
 void Search::deleteAllTableNodesMulithreaded() {
   int numAdditionalThreads = numAdditionalThreadsToUseForTasks();
-  assert(numAdditionalThreads >= 0);
+  testAssert(numAdditionalThreads >= 0);
   std::function<void(int)> g = [&](int threadIdx) noexcept {
     size_t idx0 = (size_t)((uint64_t)(threadIdx) * nodeTable->entries.size() / (numAdditionalThreads+1));
     size_t idx1 = (size_t)((uint64_t)(threadIdx+1) * nodeTable->entries.size() / (numAdditionalThreads+1));
@@ -1027,8 +1063,8 @@ void Search::recursivelyRecomputeStats(SearchNode& n) {
       //and has 0 visits because we began a search and then stopped it before any playouts happened.
       //In that case, there's not much to recompute.
       if(weightSum <= 0.0) {
-        assert(numVisits == 0);
-        assert(isRoot);
+        testAssert(numVisits == 0);
+        testAssert(isRoot);
       }
       else {
         double resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg);
@@ -1058,12 +1094,12 @@ void Search::recursivelyRecomputeStats(SearchNode& n) {
 }
 
 void Search::recursivelyRecordEvalCache(SearchNode& n) {
-  std::function<void(SearchNode*,int)> f = [&](SearchNode* node, int threadIdx) {
+  std::function<void(SearchNode*,int)> f = [&](const SearchNode* node, int threadIdx) {
     (void)threadIdx;
     int64_t numVisits = node->stats.visits.load(std::memory_order_acquire);
     if(numVisits >= searchParams.evalCacheMinVisits && !node->forceNonTerminal) {
       bool isRootNode = (node==rootNode);
-      evalCache->update(node->graphHash, node, searchParams.evalCacheMinVisits, isRootNode);
+      evalCache->update(getEvalCacheKey(node->graphHash), node, searchParams.evalCacheMinVisits, isRootNode);
     }
   };
   vector<SearchNode*> nodes;
@@ -1077,7 +1113,7 @@ void Search::computeRootValues() {
   bool nonPassAliveStones = false;
   bool safeBigTerritories = false;
   bool unsafeBigTerritories = false;
-  bool isMultiStoneSuicideLegal = rootHistory.rules.multiStoneSuicideLegal;
+  bool isMultiStoneSuicideLegal = rootHistory.suicideLegalForPassAlive();
   rootBoard.calculateArea(
     rootSafeArea,
     nonPassAliveStones,
@@ -1432,7 +1468,7 @@ bool Search::playoutDescend(
 bool Search::maybeCatchUpEdgeVisits(
   SearchThread& thread,
   SearchNode& node,
-  SearchNode* child,
+  const SearchNode* child,
   const SearchNodeState& nodeState,
   const int bestChildIdx
 ) {

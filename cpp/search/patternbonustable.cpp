@@ -118,7 +118,8 @@ void PatternBonusTable::addBonusForGameMoves(const BoardHistory& game, double bo
 void PatternBonusTable::addBonusForGameMoves(const BoardHistory& game, double bonus, Player onlyPla) {
   std::set<Hash128> hashesThisGame;
   Board board = game.initialBoard;
-  BoardHistory hist(board, game.initialPla, game.rules, game.initialEncorePhase);
+  //Replay under the same pass-alive computation mode as the history we're replaying.
+  BoardHistory hist(board, game.initialPla, game.rules, game.initialEncorePhase, game.alwaysComputePassAliveUnderSuicideRules);
   for(size_t i = 0; i<game.moveHistory.size(); i++) {
     Player pla = game.moveHistory[i].pla;
     Loc loc = game.moveHistory[i].loc;
@@ -171,7 +172,7 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
     std::set<Hash128> hashesThisGame;
 
     std::function<void(Sgf::PositionSample&, const BoardHistory&, const string&)> posHandler = [&](
-      Sgf::PositionSample& posSample, const BoardHistory& hist, const string& comments
+      const Sgf::PositionSample& posSample, const BoardHistory& hist, const string& comments
     ) {
       (void)posSample;
       if(comments.size() > 0 && comments.find("%SKIP%") != string::npos)

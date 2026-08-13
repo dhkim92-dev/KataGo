@@ -1,6 +1,7 @@
 #include "../program/setup.h"
 
 #include "../core/datetime.h"
+#include "../core/test.h"
 #include "../core/makedir.h"
 #include "../core/fileutils.h"
 #include "../neuralnet/nninterface.h"
@@ -55,7 +56,7 @@ NNEvaluator* Setup::initializeNNEvaluator(
       disableFP16,
       setupFor
     );
-  assert(nnEvals.size() == 1);
+  testAssert(nnEvals.size() == 1);
   return nnEvals[0];
 }
 
@@ -75,8 +76,8 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
   setup_for_t setupFor
 ) {
   vector<NNEvaluator*> nnEvals;
-  assert(nnModelNames.size() == nnModelFiles.size());
-  assert(expectedSha256s.size() == 0 || expectedSha256s.size() == nnModelFiles.size());
+  testAssert(nnModelNames.size() == nnModelFiles.size());
+  testAssert(expectedSha256s.size() == 0 || expectedSha256s.size() == nnModelFiles.size());
 
   #if defined(USE_CUDA_BACKEND)
   string backendPrefix = "cuda";
@@ -222,12 +223,10 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
 
     string homeDataDirOverride = loadHomeDataDirOverride(cfg);
 
-    string openCLTunerFile;
-    if(cfg.contains("openclTunerFile"))
-      openCLTunerFile = cfg.getString("openclTunerFile");
-    bool openCLReTunePerBoardSize = false;
-    if(cfg.contains("openclReTunePerBoardSize"))
-      openCLReTunePerBoardSize = cfg.getBool("openclReTunePerBoardSize");
+    // Backend-specific options (e.g. openclTunerFile, cudaDisableGraphSDPA) are read directly by the
+    // relevant compute backend off of cfg (see createComputeContext). Because they follow the backend
+    // prefix convention, the getBackendPrefixes() loop above already marks them used for the backends
+    // that don't read them, so no explicit mark-used is needed here.
 
     enabled_t useFP16Mode = enabled_t::Auto;
     if(cfg.contains(backendPrefix+"UseFP16-"+idxStr))
@@ -239,16 +238,6 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     else if(cfg.contains("useFP16"))
       useFP16Mode = cfg.getEnabled("useFP16");
 
-    enabled_t useNHWCMode = enabled_t::Auto;
-    if(cfg.contains(backendPrefix+"UseNHWC"+idxStr))
-      useNHWCMode = cfg.getEnabled(backendPrefix+"UseNHWC"+idxStr);
-    else if(cfg.contains("useNHWC"+idxStr))
-      useNHWCMode = cfg.getEnabled("useNHWC"+idxStr);
-    else if(cfg.contains(backendPrefix+"UseNHWC"))
-      useNHWCMode = cfg.getEnabled(backendPrefix+"UseNHWC");
-    else if(cfg.contains("useNHWC"))
-      useNHWCMode = cfg.getEnabled("useNHWC");
-
     int forcedSymmetry = -1;
     if(setupFor != SETUP_FOR_DISTRIBUTED && cfg.contains("nnForcedSymmetry"))
       forcedSymmetry = cfg.getInt("nnForcedSymmetry",0,SymmetryHelpers::NUM_SYMMETRIES-1);
@@ -256,7 +245,6 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     logger.write(
       "After dedups: nnModelFile" + idxStr + " = " + nnModelFile
       + " useFP16 " + useFP16Mode.toString()
-      + " useNHWC " + useNHWCMode.toString()
     );
 
     int nnCacheSizePowerOfTwo =
@@ -304,6 +292,11 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     if(disableFP16)
       useFP16Mode = enabled_t::False;
 
+    //Pre-warm lazily-compiled backend graphs (e.g. cuDNN SDPA plans for transformer models) when each
+    //server thread's handle is created, so the first searches aren't stalled. On by default.
+    bool disableWarmup =
+      cfg.contains("cudaDisableWarmup") ? cfg.getBool("cudaDisableWarmup") : false;
+
     NNEvaluator* nnEval = new NNEvaluator(
       nnModelName,
       nnModelFile,
@@ -317,16 +310,15 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
       nnCacheSizePowerOfTwo,
       nnMutexPoolSizePowerOfTwo,
       debugSkipNeuralNet,
-      openCLTunerFile,
       homeDataDirOverride,
-      openCLReTunePerBoardSize,
       useFP16Mode,
-      useNHWCMode,
       numNNServerThreadsPerModel,
       gpuIdxByServerThread,
       nnRandSeed,
       (forcedSymmetry >= 0 ? false : nnRandomize),
-      defaultSymmetry
+      defaultSymmetry,
+      disableWarmup,
+      cfg
     );
 
     nnEval->spawnServerThreads();
@@ -491,8 +483,8 @@ vector<SearchParams> Setup::loadParams(
     else if(cfg.contains("cpuctExplorationBase"))   params.cpuctExplorationBase = cfg.getDouble("cpuctExplorationBase",        10.0, 100000.0);
     else                                            params.cpuctExplorationBase = 500.0;
 
-    if(cfg.contains("cpuctUtilityStdevPrior"+idxStr)) params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior"+idxStr, 0.0, 10.0);
-    else if(cfg.contains("cpuctUtilityStdevPrior"))   params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior",        0.0, 10.0);
+    if(cfg.contains("cpuctUtilityStdevPrior"+idxStr)) params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior"+idxStr, 1e-8, 10.0);
+    else if(cfg.contains("cpuctUtilityStdevPrior"))   params.cpuctUtilityStdevPrior = cfg.getDouble("cpuctUtilityStdevPrior",        1e-8, 10.0);
     else                                              params.cpuctUtilityStdevPrior = 0.40;
     if(cfg.contains("cpuctUtilityStdevPriorWeight"+idxStr)) params.cpuctUtilityStdevPriorWeight = cfg.getDouble("cpuctUtilityStdevPriorWeight"+idxStr, 0.0, 100.0);
     else if(cfg.contains("cpuctUtilityStdevPriorWeight"))   params.cpuctUtilityStdevPriorWeight = cfg.getDouble("cpuctUtilityStdevPriorWeight",        0.0, 100.0);
@@ -658,6 +650,9 @@ vector<SearchParams> Setup::loadParams(
     if(cfg.contains("fillDameBeforePass"+idxStr)) params.fillDameBeforePass = cfg.getBool("fillDameBeforePass"+idxStr);
     else if(cfg.contains("fillDameBeforePass"))   params.fillDameBeforePass = cfg.getBool("fillDameBeforePass");
     else                                          params.fillDameBeforePass = false;
+    if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"+idxStr)) params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules"+idxStr);
+    else if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"))   params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules");
+    else                                                               params.alwaysComputePassAliveUnderSuicideRules = enabled_t::Auto;
     //Controlled by GTP directly, not used in any other mode
     params.avoidMYTDaggerHackPla = C_EMPTY;
     if(cfg.contains("wideRootNoise"+idxStr)) params.wideRootNoise = cfg.getDouble("wideRootNoise"+idxStr, 0.0, 5.0);
@@ -1134,7 +1129,7 @@ std::unique_ptr<PatternBonusTable> Setup::loadAndPruneAutoPatternBonusTables(Con
       int maxTurnNumber = getAutoPatternIntParam(cfg,"autoAvoidRepeatMaxTurnNumber",boardXSize,boardYSize,0,1000000);
       size_t maxPoses = getAutoPatternInt64Param(cfg,"autoAvoidRepeatMaxPoses",boardXSize,boardYSize,0,(int64_t)1000000000000LL);
 
-      string logSource = dirPath;
+      const string& logSource = dirPath;
       patternBonusTable->avoidRepeatedPosMovesAndDeleteExcessFiles({baseDir + "/" + dirName},penalty,lambda,minTurnNumber,maxTurnNumber,maxPoses,logger,logSource);
     }
 

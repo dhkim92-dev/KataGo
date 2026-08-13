@@ -387,8 +387,8 @@ struct GTPEngine {
 
   GTPEngine(
     const string& modelFile, const string& hModelFile,
-    SearchParams initialGenmoveParams, SearchParams initialAnalysisParams,
-    Rules initialRules,
+    const SearchParams& initialGenmoveParams, const SearchParams& initialAnalysisParams,
+    const Rules& initialRules,
     bool assumeMultiBlackHandicap, bool prevtEncore, bool autoPattern,
     double dynamicPDACapPerOppLead, bool staticPDAPrecedence,
     double normAvoidRepeatedPatternUtility, double hcapAvoidRepeatedPatternUtility,
@@ -556,7 +556,7 @@ struct GTPEngine {
 
       Board board(boardXSize,boardYSize);
       Player pla = P_BLACK;
-      BoardHistory hist(board,pla,currentRules,0);
+      BoardHistory hist(board,pla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
       vector<Move> newMoveHistory;
       setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
       clearStatsForNewGame();
@@ -569,7 +569,7 @@ struct GTPEngine {
       bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
   }
 
-  void setPositionAndRules(Player pla, const Board& board, const BoardHistory& h, const Board& newInitialBoard, Player newInitialPla, const vector<Move> newMoveHistory) {
+  void setPositionAndRules(Player pla, const Board& board, const BoardHistory& h, const Board& newInitialBoard, Player newInitialPla, const vector<Move>& newMoveHistory) {
     BoardHistory hist(h);
     //Ensure we always have this value correct
     hist.setAssumeMultipleStartingBlackMovesAreHandicap(assumeMultipleStartingBlackMovesAreHandicap);
@@ -584,19 +584,19 @@ struct GTPEngine {
   }
 
   void clearBoard() {
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
     Board board(newXSize,newYSize);
     Player pla = P_BLACK;
-    BoardHistory hist(board,pla,currentRules,0);
+    BoardHistory hist(board,pla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
     clearStatsForNewGame();
   }
 
   bool setPosition(const vector<Move>& initialStones) {
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
     Board board(newXSize,newYSize);
@@ -607,12 +607,11 @@ struct GTPEngine {
     //Sanity check
     for(int i = 0; i<initialStones.size(); i++) {
       if(board.colors[initialStones[i].loc] != initialStones[i].pla) {
-        assert(false);
         return false;
       }
     }
     Player pla = P_BLACK;
-    BoardHistory hist(board,pla,currentRules,0);
+    BoardHistory hist(board,pla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
     hist.setInitialTurnNumber(board.numStonesOnBoard()); //Heuristic to guess at what turn this is
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
@@ -635,22 +634,22 @@ struct GTPEngine {
   }
 
   bool play(Loc loc, Player pla) {
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
     bool suc = bot->makeMove(loc,pla,preventEncore);
     if(suc)
-      moveHistory.push_back(Move(loc,pla));
+      moveHistory.emplace_back(loc,pla);
     return suc;
   }
 
   bool undo() {
     if(moveHistory.size() <= 0)
       return false;
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
 
     vector<Move> moveHistoryCopy = moveHistory;
 
     Board undoneBoard = initialBoard;
-    BoardHistory undoneHist(undoneBoard,initialPla,currentRules,0);
+    BoardHistory undoneHist(undoneBoard,initialPla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
     undoneHist.setInitialTurnNumber(bot->getRootHist().initialTurnNumber);
     vector<Move> emptyMoveHistory;
     setPositionAndRules(initialPla,undoneBoard,undoneHist,initialBoard,initialPla,emptyMoveHistory);
@@ -659,15 +658,14 @@ struct GTPEngine {
       Loc moveLoc = moveHistoryCopy[i].loc;
       Player movePla = moveHistoryCopy[i].pla;
       bool suc = play(moveLoc,movePla);
-      assert(suc);
-      (void)suc; //Avoid warning when asserts are off
+      testAssert(suc);
     }
     return true;
   }
 
   bool setRulesNotIncludingKomi(Rules newRules, string& error) {
-    assert(nnEval != NULL);
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(nnEval != NULL);
+    testAssert(bot->getRootHist().rules == currentRules);
     newRules.komi = currentRules.komi;
 
     bool rulesWereSupported;
@@ -680,7 +678,7 @@ struct GTPEngine {
     vector<Move> moveHistoryCopy = moveHistory;
 
     Board board = initialBoard;
-    BoardHistory hist(board,initialPla,newRules,0);
+    BoardHistory hist(board,initialPla,newRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
     hist.setInitialTurnNumber(bot->getRootHist().initialTurnNumber);
     vector<Move> emptyMoveHistory;
     setPositionAndRules(initialPla,board,hist,initialBoard,initialPla,emptyMoveHistory);
@@ -699,6 +697,30 @@ struct GTPEngine {
       }
     }
     return true;
+  }
+
+  //Re-replay the current game from the beginning under the currently resolved
+  //alwaysComputePassAliveUnderSuicideRules mode. Used when a runtime params change (kata-set-param)
+  //flips that mode - the bot's own rootHistory gets re-stamped by setParams, but re-stamping
+  //deliberately does not re-adjudicate game state recorded under the old mode (e.g. an
+  //automatically detected game end), whereas replaying recomputes everything as if the engine had
+  //been using the new mode all along. This also keeps the state consistent with what a later
+  //rebuild-and-replay (undo, kata-set-rules) would produce.
+  void rereplayGameForPassAliveModeChange() {
+    testAssert(bot->getRootHist().rules == currentRules);
+    vector<Move> moveHistoryCopy = moveHistory;
+
+    Board board = initialBoard;
+    BoardHistory hist(board,initialPla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
+    hist.setInitialTurnNumber(bot->getRootHist().initialTurnNumber);
+    vector<Move> emptyMoveHistory;
+    setPositionAndRules(initialPla,board,hist,initialBoard,initialPla,emptyMoveHistory);
+
+    for(int i = 0; i<moveHistoryCopy.size(); i++) {
+      //Tolerant internal replay, same as undo() - the mode never affects move legality.
+      bool suc = play(moveHistoryCopy[i].loc,moveHistoryCopy[i].pla);
+      testAssert(suc);
+    }
   }
 
   void ponder() {
@@ -751,7 +773,7 @@ struct GTPEngine {
     buf.resize(keptMoves);
   }
 
-  std::function<void(const Search* search)> getAnalyzeCallback(Player pla, AnalyzeArgs args) {
+  std::function<void(const Search* search)> getAnalyzeCallback(Player pla, const AnalyzeArgs& args) {
     std::function<void(const Search* search)> callback;
     //lz-analyze
     if(args.lz && !args.kata) {
@@ -1012,12 +1034,12 @@ struct GTPEngine {
     const GenmoveArgs& gargs,
     const AnalyzeArgs& args,
     bool playChosenMove,
-    std::function<void(const string&, bool)> printGTPResponse,
+    const std::function<void(const string&, bool)>& printGTPResponse,
     bool& maybeStartPondering
   ) {
     bool onMoveWasCalled = false;
     Loc genmoveMoveLoc = Board::NULL_LOC;
-    auto onMove = [&genmoveMoveLoc,&onMoveWasCalled,this](Loc moveLoc, int searchId, Search* search) noexcept {
+    auto onMove = [&genmoveMoveLoc,&onMoveWasCalled](Loc moveLoc, int searchId, Search* search) noexcept {
       (void)searchId;
       (void)search;
       onMoveWasCalled = true;
@@ -1034,9 +1056,16 @@ struct GTPEngine {
     if(moveLocToPlay != Board::NULL_LOC && playChosenMove) {
       bool suc = bot->makeMove(moveLocToPlay,pla,preventEncore);
       if(suc)
-        moveHistory.push_back(Move(moveLocToPlay,pla));
-      assert(suc);
-      (void)suc; //Avoid warning when asserts are off
+        moveHistory.emplace_back(moveLocToPlay,pla);
+      if(!suc) {
+        ostringstream sout;
+        sout << "Engine chose move but makeMove failed" << "\n";
+        sout << bot->getRootBoard() << "\n";
+        sout << "Pla: " << PlayerIO::playerToString(pla) << "\n";
+        sout << "MoveLoc: " << Location::toString(moveLocToPlay,bot->getRootBoard()) << "\n";
+        logger.write(sout.str());
+        Global::fatalError(sout.str());
+      }
 
       maybeStartPondering = true;
     }
@@ -1047,7 +1076,7 @@ struct GTPEngine {
     Logger& logger,
     const GenmoveArgs& gargs,
     const AnalyzeArgs& args,
-    std::function<void(const string&, bool)> printGTPResponse
+    const std::function<void(const string&, bool)>& printGTPResponse
   ) {
     // Make sure to capture things by value unless they're long-lived, since the callback needs to survive past the current scope.
     auto onMove = [pla,&logger,gargs,args,printGTPResponse,this](Loc moveLoc, int searchId, Search* search) {
@@ -1072,9 +1101,9 @@ struct GTPEngine {
 
   void launchGenMove(
     Player pla,
-    GenmoveArgs gargs,
-    AnalyzeArgs args,
-    std::function<void(Loc, int, Search*)> onMove
+    const GenmoveArgs& gargs,
+    const AnalyzeArgs& args,
+    const std::function<void(Loc, int, Search*)>& onMove
   ) {
     genmoveTimer.reset();
 
@@ -1099,7 +1128,8 @@ struct GTPEngine {
         (paramsToUse.playoutDoublingAdvantagePla == P_BLACK) ? -desiredDynamicPDAForWhite :
         (paramsToUse.playoutDoublingAdvantagePla == C_EMPTY && pla == P_WHITE) ? desiredDynamicPDAForWhite :
         (paramsToUse.playoutDoublingAdvantagePla == C_EMPTY && pla == P_BLACK) ? -desiredDynamicPDAForWhite :
-        (assert(false),0.0);
+        NAN;
+      testAssert(!std::isnan(desiredDynamicPDA));
 
       paramsToUse.playoutDoublingAdvantage = desiredDynamicPDA;
     }
@@ -1316,10 +1346,10 @@ struct GTPEngine {
       response = string(e.what()) + ", try place_free_handicap";
       return;
     }
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
 
     Player pla = P_BLACK;
-    BoardHistory hist(board,pla,currentRules,0);
+    BoardHistory hist(board,pla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
 
     //Also switch the initial player, expecting white should be next.
     hist.clear(board,P_WHITE,currentRules,0);
@@ -1356,11 +1386,11 @@ struct GTPEngine {
     if(n > maxHandicap)
       n = maxHandicap;
 
-    assert(bot->getRootHist().rules == currentRules);
+    testAssert(bot->getRootHist().rules == currentRules);
 
     Board board(xSize,ySize);
     Player pla = P_BLACK;
-    BoardHistory hist(board,pla,currentRules,0);
+    BoardHistory hist(board,pla,currentRules,0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(genmoveParams,nnEval));
     double extraBlackTemperature = 0.25;
     PlayUtils::playExtraBlack(bot->getSearchStopAndWait(), n, board, hist, extraBlackTemperature, rand);
     //Also switch the initial player, expecting white should be next.
@@ -1386,8 +1416,8 @@ struct GTPEngine {
     clearStatsForNewGame();
   }
 
-  void analyze(Player pla, AnalyzeArgs args) {
-    assert(args.analyzing);
+  void analyze(Player pla, const AnalyzeArgs& args) {
+    testAssert(args.analyzing);
     if(isGenmoveParams) {
       bot->setParams(analysisParams);
       isGenmoveParams = false;
@@ -1519,7 +1549,7 @@ struct GTPEngine {
     return isAlive;
   }
 
-  string rawNNBrief(std::vector<Loc> branch, int whichSymmetry) {
+  string rawNNBrief(const std::vector<Loc>& branch, int whichSymmetry) {
     if(nnEval == NULL)
       return "";
     ostringstream out;
@@ -1587,7 +1617,7 @@ struct GTPEngine {
     return Global::trim(policyStr + "\n" + wlStr + "\n" + leadStr);
   }
 
-  string rawNN(int whichSymmetry, double policyOptimism, bool useHumanModel) {
+  string rawNN(int whichSymmetry, double policyOptimism, bool useHumanModel, Player nextPla) {
     NNEvaluator* nnEvalToUse = useHumanModel ? humanEval : nnEval;
     if(nnEvalToUse == NULL)
       return "";
@@ -1597,7 +1627,13 @@ struct GTPEngine {
       if(whichSymmetry == NNInputs::SYMMETRY_ALL || whichSymmetry == symmetry) {
         Board board = bot->getRootBoard();
         BoardHistory hist = bot->getRootHist();
-        Player nextPla = bot->getRootPla();
+        //If evaluating from a player other than the one naturally to move, rebuild the history so that player
+        //is to move (mirrors how the analysis engine handles a player switch). The NN evaluator asserts that
+        //nextPla matches the history's presumed next mover. This resets ko/pass history for the position.
+        if(nextPla != hist.presumedNextMovePla) {
+          board.clearSimpleKoLoc();
+          hist.clear(board,nextPla,hist.rules,hist.encorePhase);
+        }
 
         MiscNNInputParams nnInputParams;
         nnInputParams.playoutDoublingAdvantage =
@@ -1605,6 +1641,11 @@ struct GTPEngine {
           analysisParams.playoutDoublingAdvantage : -analysisParams.playoutDoublingAdvantage;
         nnInputParams.symmetry = symmetry;
         nnInputParams.policyOptimism = policyOptimism;
+        //When evaluating the human model, featurize per its own resolution (which may differ from the
+        //main search's mode carried by the history), matching how in-search human evals featurize.
+        if(useHumanModel)
+          nnInputParams.passAliveSuicideRulesOverride =
+            Search::resolveAlwaysComputePassAliveUnderSuicideRules(analysisParams, humanEval) ? 1 : 0;
         NNResultBuf buf;
         bool skipCache = true;
         bool includeOwnerMap = true;
@@ -1885,6 +1926,71 @@ static GTPEngine::AnalyzeArgs parseAnalyzeCommand(
   return args;
 }
 
+//Parse args for kata-raw-nn / kata-raw-human-nn: an optional leading player color ("b"/"w"/"black"/"white"),
+//a required symmetry ("all" or an index 0-7), and (if allowOptimism) an optional trailing policy optimism value
+//in [0,1]. This is positional and mirrors the optional-player convention used by the analyze commands (see
+//parseAnalyzeCommand): a color, if present, must come first, and the optimism, if present, must come last.
+//'pla' and 'policyOptimism' should be pre-filled with defaults; each is overwritten only if its argument is given.
+//Returns false and fills 'error' on any missing, extra, or unparseable argument.
+//Note: only "b"/"w"/"black"/"white" parse as a player (see PlayerIO::tryParsePlayer). An integer never parses as a
+//player, so a bare symmetry index such as "kata-raw-nn 3" is unambiguously the symmetry, exactly as before.
+static bool parseRawNNArgs(
+  const vector<string>& pieces,
+  bool allowOptimism,
+  Player& pla,
+  int& whichSymmetry,
+  double& policyOptimism,
+  string& error
+) {
+  size_t idx = 0;
+
+  //Optional leading player color.
+  Player parsedPla;
+  if(idx < pieces.size() && PlayerIO::tryParsePlayer(Global::trim(Global::toLower(pieces[idx])),parsedPla)) {
+    pla = parsedPla;
+    idx += 1;
+  }
+
+  //Required symmetry.
+  if(idx >= pieces.size()) {
+    error = "Expected a symmetry argument 'all' or index [0-7]";
+    return false;
+  }
+  {
+    string s = Global::trim(Global::toLower(pieces[idx]));
+    int parsedSym;
+    if(s == "all")
+      whichSymmetry = NNInputs::SYMMETRY_ALL;
+    else if(Global::tryStringToInt(s,parsedSym) && parsedSym >= 0 && parsedSym <= SymmetryHelpers::NUM_SYMMETRIES-1)
+      whichSymmetry = parsedSym;
+    else {
+      error = "Expected a symmetry argument 'all' or index [0-7] but got '" + pieces[idx] + "'";
+      return false;
+    }
+    idx += 1;
+  }
+
+  //Optional trailing policy optimism in [0,1].
+  if(allowOptimism && idx < pieces.size()) {
+    double parsedOpt;
+    if(Global::tryStringToDouble(pieces[idx],parsedOpt) && !isnan(parsedOpt) && parsedOpt >= 0.0 && parsedOpt <= 1.0) {
+      policyOptimism = parsedOpt;
+      idx += 1;
+    }
+    else {
+      error = "Expected an optimism value in [0,1] but got '" + pieces[idx] + "'";
+      return false;
+    }
+  }
+
+  //No further arguments allowed.
+  if(idx < pieces.size()) {
+    error = "Unexpected extra argument '" + pieces[idx] + "'";
+    return false;
+  }
+  return true;
+}
+
 
 int MainCmds::gtp(const vector<string>& args) {
   Board::initHash();
@@ -1961,7 +2067,7 @@ int MainCmds::gtp(const vector<string>& args) {
 
     const double analysisWideRootNoise =
       config.contains("analysisWideRootNoise") ? config.getDouble("analysisWideRootNoise",0.0,5.0) : Setup::DEFAULT_ANALYSIS_WIDE_ROOT_NOISE;
-    const double analysisIgnorePreRootHistory =
+    const bool analysisIgnorePreRootHistory =
       config.contains("analysisIgnorePreRootHistory") ? config.getBool("analysisIgnorePreRootHistory") : Setup::DEFAULT_ANALYSIS_IGNORE_PRE_ROOT_HISTORY;
     const bool genmoveAntiMirror =
       config.contains("genmoveAntiMirror") ? config.getBool("genmoveAntiMirror") : config.contains("antiMirror") ? config.getBool("antiMirror") : true;
@@ -2023,7 +2129,7 @@ int MainCmds::gtp(const vector<string>& args) {
   std::unique_ptr<PatternBonusTable> patternBonusTable = nullptr;
   {
     std::vector<std::unique_ptr<PatternBonusTable>> tables = Setup::loadAvoidSgfPatternBonusTables(cfg,logger);
-    assert(tables.size() == 1);
+    testAssert(tables.size() == 1);
     patternBonusTable = std::move(tables[0]);
   }
 
@@ -2169,7 +2275,7 @@ int MainCmds::gtp(const vector<string>& args) {
       pieces = Global::split(line,' ');
       for(size_t i = 0; i<pieces.size(); i++)
         pieces[i] = Global::trim(pieces[i]);
-      assert(pieces.size() > 0);
+      testAssert(pieces.size() > 0);
 
       command = pieces[0];
       pieces.erase(pieces.begin());
@@ -2207,7 +2313,7 @@ int MainCmds::gtp(const vector<string>& args) {
       }
     };
 
-    auto printGTPResponseNoHeader = [hasId,id,&logger,logAllGTPCommunication](const string& response, bool responseIsError) {
+    auto printGTPResponseNoHeader = [&logger,logAllGTPCommunication](const string& response, bool responseIsError) {
       //Postprocessing of response in the case where we already printed the "=" and a newline ahead of time via printGTPResponseHeader.
       if(!responseIsError) {
         cout << response << endl;
@@ -2466,15 +2572,15 @@ int MainCmds::gtp(const vector<string>& args) {
 
     else if(command == "kata-list-params") {
       std::vector<string> paramsList;
-      paramsList.push_back("analysisWideRootNoise");
-      paramsList.push_back("analysisIgnorePreRootHistory");
-      paramsList.push_back("genmoveAntiMirror");
-      paramsList.push_back("antiMirror");
-      paramsList.push_back("humanSLProfile");
-      paramsList.push_back("allowResignation");
-      paramsList.push_back("ponderingEnabled");
-      paramsList.push_back("delayMoveScale");
-      paramsList.push_back("delayMoveMax");
+      paramsList.emplace_back("analysisWideRootNoise");
+      paramsList.emplace_back("analysisIgnorePreRootHistory");
+      paramsList.emplace_back("genmoveAntiMirror");
+      paramsList.emplace_back("antiMirror");
+      paramsList.emplace_back("humanSLProfile");
+      paramsList.emplace_back("allowResignation");
+      paramsList.emplace_back("ponderingEnabled");
+      paramsList.emplace_back("delayMoveScale");
+      paramsList.emplace_back("delayMoveMax");
       nlohmann::json params = engine->getGenmoveParams().changeableParametersToJson();
       for(auto& elt : params.items()) {
         paramsList.push_back(elt.key());
@@ -2643,8 +2749,15 @@ int MainCmds::gtp(const vector<string>& args) {
 
           SearchParams::failIfParamsDifferOnUnchangeableParameter(initialGenmoveParams,genmoveParams);
           SearchParams::failIfParamsDifferOnUnchangeableParameter(initialAnalysisParams,analysisParams);
+          bool oldPassAliveMode = Search::resolveAlwaysComputePassAliveUnderSuicideRules(engine->getGenmoveParams(),engine->nnEval);
           engine->setGenmoveParamsIfChanged(genmoveParams);
           engine->setAnalysisParamsIfChanged(analysisParams);
+          //If the params change flipped the resolved pass-alive computation mode, re-replay the game
+          //so all recorded game state is recomputed under the new mode (re-stamping alone does not
+          //re-adjudicate). Done after both param sets are updated so the replay runs under the new mode.
+          bool newPassAliveMode = Search::resolveAlwaysComputePassAliveUnderSuicideRules(engine->getGenmoveParams(),engine->nnEval);
+          if(newPassAliveMode != oldPassAliveMode)
+            engine->rereplayGameForPassAliveModeChange();
           staticPDATakesPrecedence = cfg.contains("playoutDoublingAdvantage") && !cfg.contains("dynamicPlayoutDoublingAdvantageCapPerOppLead");
           engine->staticPDATakesPrecedence = staticPDATakesPrecedence;
           allowResignation = desiredAllowResignation;
@@ -2970,7 +3083,7 @@ int MainCmds::gtp(const vector<string>& args) {
             response += "could not parse vertex: '" + pieces[i+1] + "'";
             break;
           }
-          initialStones.push_back(Move(loc,pla));
+          initialStones.emplace_back(loc,pla);
         }
         if(!responseIsError) {
           maybeSaveAvoidPatterns(false);
@@ -3188,7 +3301,7 @@ int MainCmds::gtp(const vector<string>& args) {
             responseIsError = true;
             response = "Invalid handicap location: " + pieces[i];
           }
-          locs.push_back(Move(loc,P_BLACK));
+          locs.emplace_back(loc,P_BLACK);
         }
         bool suc = board.setStonesFailIfNoLibs(locs);
         if(!suc) {
@@ -3198,7 +3311,7 @@ int MainCmds::gtp(const vector<string>& args) {
         else {
           maybeSaveAvoidPatterns(false);
           Player pla = P_WHITE;
-          BoardHistory hist(board,pla,engine->getCurrentRules(),0);
+          BoardHistory hist(board,pla,engine->getCurrentRules(),0,Search::resolveAlwaysComputePassAliveUnderSuicideRules(engine->getGenmoveParams(),engine->nnEval));
           hist.setInitialTurnNumber(board.numStonesOnBoard()); //Should give more accurate temperaure and time control behavior
           vector<Move> newMoveHistory;
           engine->setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
@@ -3353,7 +3466,13 @@ int MainCmds::gtp(const vector<string>& args) {
               }
             }
 
-            sgf->setupInitialBoardAndHist(sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist);
+            //Set up with the pass-alive computation mode the bot will be using BEFORE replaying the
+            //moves, so that any game-end adjudication happening during the replay matches what the
+            //same moves would give if entered via play commands on the bot's own history.
+            sgf->setupInitialBoardAndHist(
+              sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist,
+              Search::resolveAlwaysComputePassAliveUnderSuicideRules(engine->getGenmoveParams(), engine->nnEval)
+            );
             sgfInitialHist.setInitialTurnNumber(sgfInitialBoard.numStonesOnBoard()); //Should give more accurate temperaure and time control behavior
             sgfBoard = sgfInitialBoard;
             sgfNextPla = sgfInitialNextPla;
@@ -3450,50 +3569,29 @@ int MainCmds::gtp(const vector<string>& args) {
 
     else if(command == "kata-raw-nn") {
       int whichSymmetry = NNInputs::SYMMETRY_ALL;
-      bool parsed = false;
-      if(pieces.size() == 1 || pieces.size() == 2) {
-        string s = Global::trim(Global::toLower(pieces[0]));
-        if(s == "all")
-          parsed = true;
-        else if(Global::tryStringToInt(s,whichSymmetry) && whichSymmetry >= 0 && whichSymmetry <= SymmetryHelpers::NUM_SYMMETRIES-1)
-          parsed = true;
-      }
+      Player pla = engine->bot->getRootPla();
+      double policyOptimism = engine->getGenmoveParams().rootPolicyOptimism;
+      string error;
+      bool parsed = parseRawNNArgs(pieces, true, pla, whichSymmetry, policyOptimism, error);
       if(!parsed) {
         responseIsError = true;
-        response = "Expected one argument 'all' or symmetry index [0-7] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
+        response = error + " for kata-raw-nn (expected an optional color, a symmetry 'all' or index [0-7], and an optional optimism [0-1])";
       }
       else {
-        double policyOptimism = engine->getGenmoveParams().rootPolicyOptimism;
-        if(pieces.size() == 2) {
-          parsed = false;
-          if(Global::tryStringToDouble(pieces[0],policyOptimism) && isnan(policyOptimism) && policyOptimism >= 0.0 && policyOptimism <= 1.0) {
-            parsed = true;
-          }
-        }
-        if(!parsed) {
-          responseIsError = true;
-          response = "Expected double from 0 to 1 for optimism but got '" + Global::concat(pieces," ") + "'";
-        }
-        else {
-          const bool useHumanModel = false;
-          response = engine->rawNN(whichSymmetry, policyOptimism, useHumanModel);
-        }
+        const bool useHumanModel = false;
+        response = engine->rawNN(whichSymmetry, policyOptimism, useHumanModel, pla);
       }
     }
 
     else if(command == "kata-raw-human-nn") {
       int whichSymmetry = NNInputs::SYMMETRY_ALL;
-      bool parsed = false;
-      if(pieces.size() == 1) {
-        string s = Global::trim(Global::toLower(pieces[0]));
-        if(s == "all")
-          parsed = true;
-        else if(Global::tryStringToInt(s,whichSymmetry) && whichSymmetry >= 0 && whichSymmetry <= SymmetryHelpers::NUM_SYMMETRIES-1)
-          parsed = true;
-      }
+      Player pla = engine->bot->getRootPla();
+      double policyOptimism = engine->getGenmoveParams().rootPolicyOptimism;
+      string error;
+      bool parsed = parseRawNNArgs(pieces, false, pla, whichSymmetry, policyOptimism, error);
       if(!parsed) {
         responseIsError = true;
-        response = "Expected one argument 'all' or symmetry index [0-7] for kata-raw-human-nn but got '" + Global::concat(pieces," ") + "'";
+        response = error + " for kata-raw-human-nn (expected an optional color followed by a symmetry 'all' or index [0-7])";
       }
       else {
         if(engine->humanEval == NULL) {
@@ -3505,9 +3603,8 @@ int MainCmds::gtp(const vector<string>& args) {
           response = "Cannot run kata-raw-human-nn, humanSLProfile parameter was not set";
         }
         else {
-          double policyOptimism = engine->getGenmoveParams().rootPolicyOptimism;
           const bool useHumanModel = true;
-          response = engine->rawNN(whichSymmetry, policyOptimism, useHumanModel);
+          response = engine->rawNN(whichSymmetry, policyOptimism, useHumanModel, pla);
         }
       }
     }

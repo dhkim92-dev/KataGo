@@ -184,8 +184,11 @@ int MainCmds::evalsgf(const vector<string>& args) {
   Player nextPla;
   BoardHistory hist;
 
-  auto setUpBoardUsingRules = [&board,&nextPla,&hist,overrideKomi,&sgf,&extraMoves](const Rules& initialRules, int moveNum) {
-    sgf->setupInitialBoardAndHist(initialRules, board, nextPla, hist);
+  //Set for real after the neural net is loaded, from the params and the model's declaration.
+  bool alwaysComputePassAliveUnderSuicideRules = false;
+  auto setUpBoardUsingRules = [&board,&nextPla,&hist,overrideKomi,&sgf,&extraMoves,&alwaysComputePassAliveUnderSuicideRules](const Rules& initialRules, int moveNum) {
+    //Set up before replaying moves so any adjudication during replay is consistent with the searches.
+    sgf->setupInitialBoardAndHist(initialRules, board, nextPla, hist, alwaysComputePassAliveUnderSuicideRules);
     vector<Move>& moves = sgf->moves;
 
     if(!isnan(overrideKomi)) {
@@ -287,6 +290,8 @@ int MainCmds::evalsgf(const vector<string>& args) {
   }
   logger.write("Loaded neural net");
 
+  alwaysComputePassAliveUnderSuicideRules = Search::resolveAlwaysComputePassAliveUnderSuicideRules(params, nnEval);
+
   {
     bool rulesWereSupported;
     Rules supportedRules = nnEval->getSupportedRules(initialRules,rulesWereSupported);
@@ -373,7 +378,11 @@ int MainCmds::evalsgf(const vector<string>& args) {
       buf.result->debugPrint(cout,board);
 
       if(humanEval != NULL) {
-        humanEval->evaluate(board,hist,nextPla,nnInputParams,buf,skipCache,includeOwnerMap);
+        //Featurize per the human model's own resolution, which may differ from the main model's.
+        MiscNNInputParams humanNNInputParams = nnInputParams;
+        humanNNInputParams.passAliveSuicideRulesOverride =
+          Search::resolveAlwaysComputePassAliveUnderSuicideRules(params, humanEval) ? 1 : 0;
+        humanEval->evaluate(board,hist,nextPla,humanNNInputParams,buf,skipCache,includeOwnerMap);
         buf.result->debugPrint(cout,board);
       }
       continue;
@@ -473,8 +482,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
     if(printSharpScore) {
       double ret = 0.0;
       bool suc = search->getSharpScore(NULL,ret);
-      assert(suc);
-      (void)suc;
+      testAssert(suc);
       cout << "White sharp score " << ret << endl;
     }
 
@@ -565,14 +573,13 @@ int MainCmds::evalsgf(const vector<string>& args) {
 
     if(printScoreNow) {
       sout << "Score now (ROOT position):\n";
-      Board copy(board);
       BoardHistory copyHist(hist);
       Color area[Board::MAX_ARR_SIZE];
-      copyHist.endAndScoreGameNow(copy,area);
+      copyHist.endAndScoreGameNow(board,area);
 
-      for(int y = 0; y<copy.y_size; y++) {
-        for(int x = 0; x<copy.x_size; x++) {
-          Loc l = Location::getLoc(x,y,copy.x_size);
+      for(int y = 0; y<board.y_size; y++) {
+        for(int x = 0; x<board.x_size; x++) {
+          Loc l = Location::getLoc(x,y,board.x_size);
           sout << PlayerIO::colorToChar(area[l]);
         }
         sout << endl;

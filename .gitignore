@@ -65,6 +65,7 @@ CMakeCache.txt
 CMakeFiles/
 Makefile
 cmake_install.cmake
+cpp/builds/
 
 .DS_Store
 GPATH
@@ -90,3 +91,4 @@ cpp/.ninja_log
 cpp/build.ninja
 cpp/KataGoSwift.*
 cpp/include/KataGoSwift/KataGoSwift-swift.h
+cpp/external/katagocoreml/proto/
