@@ -88,7 +88,13 @@ std::vector<float> convWeightsToWinogradDomain(
         for ( int subY = 0 ; subY < convY ; ++subY ) {
           winogradFilterTransform5x5_2x2(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3], tmp[subY][4], tmp[subY][5]);
         }
-        for ( int subX = 0 ; subX < 4 ; ++subX ) {
+        // Legacy implementation kept for easy rollback.
+        // for ( int subX = 0 ; subX < 4 ; ++subX ) {
+        //   winogradFilterTransform5x5_2x2(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
+        // }
+
+        // Corrected implementation: transform all six columns of the 6x6 Winograd tile.
+        for ( int subX = 0 ; subX < inTileXSize ; ++subX ) {
           winogradFilterTransform5x5_2x2(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
         }
       } else {

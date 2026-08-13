@@ -2884,7 +2884,8 @@ struct PolicyHead {
   std::unique_ptr<MatmulLayer> gpoolToPassMul;
   std::unique_ptr<MatBiasLayer> gpoolToPassBias;
   std::unique_ptr<MatmulLayer> gpoolToPassMul2;
-  VkDescriptorSet gpoolDS, addChannelBiasDS;
+  VkDescriptorSet gpoolDS = VK_NULL_HANDLE;
+  VkDescriptorSet addChannelBiasDS = VK_NULL_HANDLE;
 
   PolicyHead() = delete;
   PolicyHead(const PolicyHead&) = delete;
@@ -3029,7 +3030,7 @@ struct ValueHead {
   std::unique_ptr<MatmulLayer> sv3Mul;
   std::unique_ptr<MatBiasLayer> sv3Bias;
   std::unique_ptr<ConvLayer> vOwnershipConv;
-  VkDescriptorSet gpoolDS;
+  VkDescriptorSet gpoolDS = VK_NULL_HANDLE;
 
   ValueHead() = delete;
   ValueHead(const ValueHead&) = delete;
