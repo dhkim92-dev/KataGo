@@ -60,6 +60,10 @@ int MainCmds::runtests(const vector<string>& args) {
 
   Tests::runInlineConfigTests();
 
+#ifdef USE_VULKAN_BACKEND
+  Tests::runVulkanTunerPersistenceTests();
+#endif
+
   // Pick an arbitrary file that the test uses
   if(FileUtils::exists("tests/data/configs/folded/test-parent.cfg"))
     Tests::runConfigTests({});
@@ -775,4 +779,3 @@ int MainCmds::runconfigtests(const vector<string>& args) {
   Tests::runParseAllConfigsTest();
   return 0;
 }
-

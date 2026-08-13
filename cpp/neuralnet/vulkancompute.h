@@ -45,6 +45,14 @@ struct VulkanTuneParams {
   XgemmDirectTuneParams xgemmDirect;
 
   VulkanTuneParams(const VulkanTuneParams& other) = default;
+  VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
+
+  bool isValid() const;
+  bool operator==(const VulkanTuneParams& other) const;
+  bool operator!=(const VulkanTuneParams& other) const { return !(*this == other); }
+
+  static void save(const std::string& filename, const VulkanTuneParams& config);
+  static VulkanTuneParams load(const std::string& filename);
 
   VulkanTuneParams() {
     // conv3x3 = ConvTuneParams{

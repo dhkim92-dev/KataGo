@@ -64,7 +64,7 @@ struct ShaderExecutionInfo {
 struct ComputeHandleInternal {
   const ComputeContext* context;
   const VulkanDevice* vulkanDevice;
-  VulkanTuneParams tuneParams;
+  const VulkanTuneParams& tuneParams;
   VkDevice device;
   VkQueue queue;
   bool usingFP16Storage = false;
@@ -456,6 +456,8 @@ namespace KatagoVulkan {
     uint32_t KWG=32;
     uint32_t MDIMC=16;
     uint32_t NDIMC=16;
+    uint32_t MDIMA=16;
+    uint32_t NDIMB=16;
    };
 
 

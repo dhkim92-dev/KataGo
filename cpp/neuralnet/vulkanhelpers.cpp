@@ -16,23 +16,25 @@
 VulkanDevice::~VulkanDevice() {
     // std::cout << "[VulkanDevice::~VulkanDevice] Destroying Vulkan device " << this->info.deviceName << std::endl;
   if (this->device != VK_NULL_HANDLE) {
-    vkQueueWaitIdle(this->queue);
-    vkDeviceWaitIdle(this->device);
-    vmaDestroyAllocator(this->allocator);
-    // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed allocator for device " << this->info.deviceName << std::endl;
+    if(!skipWaitOnDestruction) {
+      vkQueueWaitIdle(this->queue);
+      vkDeviceWaitIdle(this->device);
+      vmaDestroyAllocator(this->allocator);
+      // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed allocator for device " << this->info.deviceName << std::endl;
 
-    if (this->descriptorPool != VK_NULL_HANDLE) {
-      vkResetDescriptorPool(this->device, this->descriptorPool, 0);
-      vkDestroyDescriptorPool(this->device, this->descriptorPool, nullptr);
-      // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed descriptor pool for device " << this->info.deviceName << std::endl;
-      this->descriptorPool = VK_NULL_HANDLE;
-    }
+      if (this->descriptorPool != VK_NULL_HANDLE) {
+        vkResetDescriptorPool(this->device, this->descriptorPool, 0);
+        vkDestroyDescriptorPool(this->device, this->descriptorPool, nullptr);
+        // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed descriptor pool for device " << this->info.deviceName << std::endl;
+        this->descriptorPool = VK_NULL_HANDLE;
+      }
 
-    if (this->commandPool != VK_NULL_HANDLE) {
-      vkResetCommandPool(this->device, this->commandPool, 0);
-      vkDestroyCommandPool(this->device, this->commandPool, nullptr);
-      // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed command pool for device " << this->info.deviceName << std::endl;
-      this->commandPool = VK_NULL_HANDLE;
+      if (this->commandPool != VK_NULL_HANDLE) {
+        vkResetCommandPool(this->device, this->commandPool, 0);
+        vkDestroyCommandPool(this->device, this->commandPool, nullptr);
+        // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed command pool for device " << this->info.deviceName << std::endl;
+        this->commandPool = VK_NULL_HANDLE;
+      }
     }
     vkDestroyDevice(this->device, nullptr);
     // std::cout << "[VulkanDevice::~VulkanDevice] Destroyed device " << this->info.deviceName << std::endl;
@@ -270,7 +272,7 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
       logger->write("Found Vulkan Physical Device[" + Global::uint32ToString(i) + "]");
     }
     VkPhysicalDevice physicalDevice = physicalDevices[i];
-    VulkanDeviceInfo deviceInfo;
+    VulkanDeviceInfo deviceInfo = {};
     deviceInfo.deviceId = i;
     deviceInfo.physicalDevice = physicalDevice;
 
@@ -307,6 +309,7 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
     cooperativeMatrixFeatures.pNext = &maintenance4Features;
     features2.pNext = &shaderFloat16Int8Features;
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+    deviceInfo.features = features2.features;
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
     if ( logger != nullptr ) {
       logger->write("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No"));
@@ -645,7 +648,8 @@ VkCommandPool VkHelpers::createCommandPool(
 }
 
 VkCommandBuffer VkHelpers::allocateCommandBuffer(
-  const VulkanDevice *device
+  const VulkanDevice *device,
+  VkResult* result
 ) {
   VkCommandBufferAllocateInfo allocInfo = {};
   allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -653,8 +657,10 @@ VkCommandBuffer VkHelpers::allocateCommandBuffer(
   allocInfo.commandPool = device->commandPool;
   allocInfo.commandBufferCount = 1;
 
-  VkCommandBuffer commandBuffer;
-  vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  VkResult allocationResult = vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+  if(result != nullptr)
+    *result = allocationResult;
   return commandBuffer;
 }
 
@@ -755,6 +761,10 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
   );
   *result = res;
   buffer->requestedSize = static_cast<VkDeviceSize>(size);
+  if(res != VK_SUCCESS) {
+    delete buffer;
+    return nullptr;
+  }
   return buffer;
 }
 
@@ -844,6 +854,10 @@ VulkanBuffer* VkHelpers::createStagingBuffer(
   );
   *result = res;
   buffer->requestedSize = static_cast<VkDeviceSize>(size);
+  if(res != VK_SUCCESS) {
+    delete buffer;
+    return nullptr;
+  }
   return buffer;
 }
 
@@ -871,6 +885,10 @@ VulkanBuffer* VkHelpers::createReadbackBuffer(
   );
   *result = res;
   buffer->requestedSize = static_cast<VkDeviceSize>(size);
+  if(res != VK_SUCCESS) {
+    delete buffer;
+    return nullptr;
+  }
   return buffer;
 }
 

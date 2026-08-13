@@ -113,6 +113,11 @@ namespace Tests {
   void runCollectFilesTests();
   void runLoadModelTests();
 
+#ifdef USE_VULKAN_BACKEND
+  //testvulkantuner.cpp
+  void runVulkanTunerPersistenceTests();
+#endif
+
   //testbook.cpp
   void runBookTests();
 }

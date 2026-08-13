@@ -171,6 +171,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     neuralnet/vulkanhelpers.cpp
     neuralnet/vulkanshaders.cpp
     neuralnet/vulkancompute.cpp
+    neuralnet/vulkantuner.cpp
   )
 
   #--------------------------- VULKAN SHADER COMPILATION ---------------------------------------------------------------
@@ -461,6 +462,7 @@ add_executable(katago
   tests/testtime.cpp
   tests/testtrainingwrite.cpp
   tests/testnn.cpp
+  tests/testvulkantuner.cpp
   tests/tinymodel.cpp
   tests/tinymodeldata.cpp
   distributed/client.cpp
@@ -835,4 +837,3 @@ if(USE_BACKEND STREQUAL "VULKAN" AND DEFINED VULKAN_SHADER_OBJECTS)
   target_sources(katago PRIVATE ${VULKAN_SHADER_OBJECTS})
   message(STATUS "Linking Vulkan shader objects with katago")
 endif()
-

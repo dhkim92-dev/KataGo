@@ -22,6 +22,7 @@
 #include "../neuralnet/vulkanbackend.h"
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
+#include "../neuralnet/vulkantuner.h"
 
 int globalBatchCount = 4;
 
@@ -187,7 +188,12 @@ struct ComputeContext {
     enabled_t useFP16Mode_,
     enabled_t useNHWCMode_,
     const std::vector<uint32_t>& gpuIdxsToUse,
-    Logger* logger_)
+    Logger* logger_,
+    const std::string& tunerFile,
+    const std::string& homeDataDirOverride,
+    const VulkanTuner::ModelInfoForTuning* modelInfo,
+    bool fullTuning,
+    bool forceRetune)
   : nnXLen(nnXLen),
     nnYLen(nnYLen),
     usingFP16Mode(useFP16Mode_),
@@ -246,9 +252,25 @@ struct ComputeContext {
           requiredExtensions,
           logger
         );
+        KatagoVulkan::ComputePipelines* pipelines = nullptr;
+        try {
+          VulkanTuneParams tuneParams;
+          if(modelInfo != nullptr) {
+            const auto recreateDevice = [&]() {
+              return VkHelpers::createVulkanDevice(instance,deviceInfo,requiredExtensions,logger);
+            };
+            tuneParams = VulkanTuner::loadOrAutoTune(
+              tunerFile,homeDataDirOverride,vulkanDevice,recreateDevice,
+              nnXLen,nnYLen,*modelInfo,logger,fullTuning,forceRetune
+            );
+          }
+          pipelines = new KatagoVulkan::ComputePipelines(vulkanDevice->device,tuneParams);
+        }
+        catch(...) {
+          delete vulkanDevice;
+          throw;
+        }
         vulkanDevices.push_back(vulkanDevice);
-        VulkanTuneParams tuneParams;
-        KatagoVulkan::ComputePipelines* pipelines = new KatagoVulkan::ComputePipelines(vulkanDevice->device, tuneParams);
         if ( logger ) {
           logger->write("Created Vulkan Compute Pipelines for device: " + deviceInfo.deviceName);
         }
@@ -3391,26 +3413,44 @@ ComputeContext* NeuralNet::createComputeContext(
   Logger *logger,
   int nnXLen,
   int nnYLen,
-  const std::string& openCLTunerFile,
   const std::string& homeDataDirOverride,
-  bool openCLTunePerBoardSize,
   enabled_t useFP16Mode,
-  enabled_t useNHWCMode,
-  const LoadedModel* loadedModel
+  const LoadedModel* loadedModel,
+  ConfigParser& cfg
 ) {
-  // VkDeviceSize requiredMemorySize = getRequiredMemorySize(loadedModel);
-  logger->write("Create Vulkan Compute Context with GPUs: ");
-  for(size_t i = 0; i<gpuIdxs.size(); i++) {
-    logger->write("  GPU Index " + Global::intToString(gpuIdxs[i]));
+  if(gpuIdxs.empty())
+    throw StringError("NeuralNet::createComputeContext - specified no GPUs to use");
+  if(loadedModel == nullptr)
+    throw StringError("NeuralNet::createComputeContext - loaded model was null");
+  if(loadedModel->modelDesc.modelVersion > 16)
+    throw StringError("Vulkan backend currently supports model versions through 16");
+
+  std::string tunerFile;
+  if(cfg.contains("vulkanTunerFile"))
+    tunerFile = cfg.getString("vulkanTunerFile");
+  bool fullTuning = cfg.contains("vulkanTunerFull") && cfg.getBool("vulkanTunerFull");
+  bool forceRetune = cfg.contains("vulkanForceRetune") && cfg.getBool("vulkanForceRetune");
+  VulkanTuner::ModelInfoForTuning modelInfo = VulkanTuner::ModelInfoForTuning::ofDesc(loadedModel->modelDesc);
+
+  if(logger != nullptr) {
+    logger->write("Create Vulkan Compute Context with GPUs: ");
+    for(size_t i = 0; i<gpuIdxs.size(); i++) {
+      logger->write("  GPU Index " + Global::intToString(gpuIdxs[i]));
+    }
   }
 
   return new ComputeContext(
     nnXLen,
     nnYLen,
     useFP16Mode,
-    useNHWCMode,
+    enabled_t::False,
     std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
-    logger
+    logger,
+    tunerFile,
+    homeDataDirOverride,
+    &modelInfo,
+    fullTuning,
+    forceRetune
   );
 }
 
@@ -3433,7 +3473,12 @@ static ComputeContext* createComputeContextForTesting(
     useFP16 ? enabled_t::True : enabled_t::False,
     useNHWC ? enabled_t::True : enabled_t::False,
     std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
-    logger
+    logger,
+    "",
+    "",
+    nullptr,
+    false,
+    false
   );
 }
 
@@ -3623,13 +3668,12 @@ struct ComputeHandle {
 };
 
 ComputeHandleInternal::ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC):
-  tuneParams()
+  context(ctx),
+  vulkanDevice(ctx->vulkanContext->findGpuExn(gpuIdx)),
+  tuneParams(ctx->pipelinesPerDev.at(vulkanDevice->info.deviceId)->tuneParams)
 {
-  this->context = ctx;
-  this->vulkanDevice = ctx->vulkanContext->findGpuExn(gpuIdx);
   this->queue = this->vulkanDevice->queue;
   this->device = this->vulkanDevice->device;
-  this->tuneParams = VulkanTuneParams();
 
   #ifdef SHADER_PROFILE 
   VkQueryPoolCreateInfo qpCI = {};
@@ -3710,6 +3754,12 @@ void NeuralNet::freeComputeHandle(ComputeHandle* handle) {
 }
 
 bool NeuralNet::isUsingFP16(const ComputeHandle *handle) {
+  return false;
+}
+
+bool NeuralNet::setIsWarmup(const ComputeHandle* handle, bool isWarmup) {
+  (void)handle;
+  (void)isWarmup;
   return false;
 }
 
@@ -4713,8 +4763,17 @@ namespace KatagoVulkan {
   ): device(device_), tuneParams(params) {
     VkResult res = VK_ERROR_UNKNOWN;
     cache = VkHelpers::createPipelineCache(device, &res);
-    CHECK_VK(res);
-    createPipelines();
+    if(res != VK_SUCCESS)
+      throw StringError("Failed to create Vulkan pipeline cache: " + VkHelpers::vkErrorToString(res));
+    try {
+      createPipelines();
+    }
+    catch(...) {
+      destroyPipelines();
+      vkDestroyPipelineCache(device,cache,nullptr);
+      cache = VK_NULL_HANDLE;
+      throw;
+    }
   }
 
   ComputePipelines::~ComputePipelines() {
@@ -4842,13 +4901,28 @@ namespace KatagoVulkan {
     memcpy(spirvWords.data(), spirvBytes, spirvSize);
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const auto fail = [&](const string& operation, VkResult result) {
+      if(pipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(device,pipeline,nullptr);
+      if(layout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(device,layout,nullptr);
+      if(descriptorSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device,descriptorSetLayout,nullptr);
+      if(shaderModule != VK_NULL_HANDLE)
+        vkDestroyShaderModule(device,shaderModule,nullptr);
+      throw StringError(pipelineName + " " + operation + " failed: " + VkHelpers::vkErrorToString(result));
+    };
     VkShaderModuleCreateInfo shaderModuleCI = {};
     shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shaderModuleCI.codeSize = spirvSize;
     shaderModuleCI.pCode = spirvWords.data();
     // std::cout << "Creating Compute Pipeline: " << pipelineName <<  " code size : " << shaderModuleCI.codeSize << std::endl;
     res = vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule);
-    CHECK_VK_MSG(pipelineName + "ShaderModule", res);
+    if(res != VK_SUCCESS)
+      fail("shader module creation",res);
     std::vector<VkDescriptorSetLayoutBinding> bindings;
     for ( size_t i = 0 ; i < bindingSize ; i++ ) {
       bindings.push_back(
@@ -4859,8 +4933,9 @@ namespace KatagoVulkan {
       );
     }
 
-    outPipeline.descriptorSetLayout = VkHelpers::createDescriptorSetLayout(device,bindings,&res);
-    CHECK_VK_MSG(pipelineName + "DescriptorSetLayout",res);
+    descriptorSetLayout = VkHelpers::createDescriptorSetLayout(device,bindings,&res);
+    if(res != VK_SUCCESS)
+      fail("descriptor set layout creation",res);
 
     std::vector<VkPushConstantRange> pushConstants;
     VkPushConstantRange pushConstant = {};
@@ -4871,12 +4946,17 @@ namespace KatagoVulkan {
       pushConstant.size = static_cast<uint32_t>(pushConstantSize);
       pushConstants.push_back(pushConstant);
     }
-    outPipeline.layout = VkHelpers::createPipelineLayout(device,{ outPipeline.descriptorSetLayout }, pushConstants, &res);
-    CHECK_VK_MSG(pipelineName + "PipelineLayout",res);
+    layout = VkHelpers::createPipelineLayout(device,{ descriptorSetLayout }, pushConstants, &res);
+    if(res != VK_SUCCESS)
+      fail("pipeline layout creation",res);
 
-    outPipeline.pipeline = VkHelpers::createComputePipeline(device, outPipeline.layout, cache, shaderModule, &res, specializationInfo);
+    pipeline = VkHelpers::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
 
-    CHECK_VK_MSG(pipelineName + " ComputePipeline",res);
+    if(res != VK_SUCCESS)
+      fail("compute pipeline creation",res);
+    outPipeline.descriptorSetLayout = descriptorSetLayout;
+    outPipeline.layout = layout;
+    outPipeline.pipeline = pipeline;
     // std::cout << "Created Compute Pipeline: " << pipelineName << " result : " << res << std::endl;
     vkDestroyShaderModule(device, shaderModule, nullptr);
   }
@@ -4922,6 +5002,8 @@ namespace KatagoVulkan {
     spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
     spec.inTileYOffset= -2;
     spec.inTileXOffset= -2;
+    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
+    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
     std::vector<int32_t> specData_5544 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
     VkSpecializationInfo si5544 = VkHelpers::createSpecializationInfo(specData_5544, specEntry);
     createPipeline("WinogradInputTransform for 5x5 kernels", VkSPIRVShaders::spirv_winograd_input_transform, VkSPIRVShaders::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
@@ -4970,6 +5052,8 @@ namespace KatagoVulkan {
     spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
     spec.inTileXOffset= -2;
     spec.inTileYOffset= -2;
+    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
+    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
     spec.activation = ACTIVATION_IDENTITY;
     std::vector<int32_t> specData_55_identity = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_identity = VkHelpers::createSpecializationInfo(specData_55_identity, specEntry);
@@ -5102,6 +5186,8 @@ namespace KatagoVulkan {
     spec.KWG = tuneParams.xgemm.KWG;
     spec.MDIMC = tuneParams.xgemm.MDIMC;
     spec.NDIMC = tuneParams.xgemm.NDIMC;
+    spec.MDIMA = tuneParams.xgemm.MDIMA;
+    spec.NDIMB = tuneParams.xgemm.NDIMB;
     std::vector<VkSpecializationMapEntry> mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = VkHelpers::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);

@@ -9,14 +9,124 @@
 #ifdef USE_OPENCL_BACKEND
 #include "../program/setup.h"
 #include "../neuralnet/opencltuner.h"
+#elif defined(USE_VULKAN_BACKEND)
+#include "../program/setup.h"
+#include "../neuralnet/nninputs.h"
+#include "../neuralnet/vulkantuner.h"
 #endif
 
 using namespace std;
 
 int MainCmds::tuner(const vector<string>& args) {
-#ifndef USE_OPENCL_BACKEND
+#if !defined(USE_OPENCL_BACKEND) && !defined(USE_VULKAN_BACKEND)
   cout << "Currently this command only does anything for the OpenCL version of KataGo" << endl;
   (void)args;
+  return 0;
+#elif defined(USE_VULKAN_BACKEND)
+  ConfigParser cfg;
+  string modelFile;
+  string outputFileFromArg;
+  string gpuIdxsStr;
+  vector<int> gpuIdxs;
+  int nnXLen;
+  int nnYLen;
+  bool full;
+  try {
+    KataGoCommandLine cmd("Perform GPU tuning for Vulkan.");
+    cmd.addConfigFileArg(KataGoCommandLine::defaultGtpConfigFileName(),"gtp_example.cfg");
+    cmd.addModelFileArg();
+    TCLAP::ValueArg<string> outputFileArg("","output","Filename to output tuning configuration to",false,string(),"FILE");
+    TCLAP::ValueArg<string> gpuIdxsArg("","gpus","Specific GPU/device number(s) to tune, comma-separated (default all)",false,string(),"GPUS");
+    TCLAP::ValueArg<int> nnXLenArg("","xsize","Width of board to tune for",false,NNPos::MAX_BOARD_LEN,"INT");
+    TCLAP::ValueArg<int> nnYLenArg("","ysize","Height of board to tune for",false,NNPos::MAX_BOARD_LEN,"INT");
+    TCLAP::SwitchArg fullArg("","full","Test more possible configurations");
+    cmd.setShortUsageArgLimit();
+    cmd.addOverrideConfigArg();
+    cmd.add(outputFileArg);
+    cmd.add(gpuIdxsArg);
+    cmd.add(nnXLenArg);
+    cmd.add(nnYLenArg);
+    cmd.add(fullArg);
+    cmd.parseArgs(args);
+    modelFile = cmd.getModelFile();
+    outputFileFromArg = outputFileArg.getValue();
+    gpuIdxsStr = gpuIdxsArg.getValue();
+    nnXLen = nnXLenArg.getValue();
+    nnYLen = nnYLenArg.getValue();
+    full = fullArg.getValue();
+    if(!gpuIdxsStr.empty()) {
+      vector<string> pieces = Global::split(gpuIdxsStr,',');
+      for(const string& piece: pieces) {
+        int parsed;
+        if(!Global::tryStringToInt(Global::trim(piece),parsed) || parsed < 0) {
+          cerr << "Error: Could not parse -gpus as a comma-separated list of nonnegative integers" << endl;
+          return 1;
+        }
+        if(contains(gpuIdxs,parsed)) {
+          cerr << "Error: Duplicate GPU index: " << parsed << endl;
+          return 1;
+        }
+        gpuIdxs.push_back(parsed);
+      }
+    }
+    cmd.getConfigAllowEmpty(cfg);
+  }
+  catch(TCLAP::ArgException& e) {
+    cerr << "Error: " << e.error() << " for argument " << e.argId() << endl;
+    return 1;
+  }
+
+  const string homeDataDirOverride = Setup::loadHomeDataDirOverride(cfg);
+  Logger logger(&cfg,true);
+  ModelDesc modelDesc;
+  ModelDesc::loadFromFileMaybeGZipped(modelFile,modelDesc,"");
+  if(modelDesc.modelVersion > 16)
+    throw StringError("Vulkan tuner currently supports model versions through 16");
+  VulkanTuner::ModelInfoForTuning modelInfo = VulkanTuner::ModelInfoForTuning::ofDesc(modelDesc);
+
+  VkInstance instance = VkHelpers::createVulkanInstance();
+  vector<VulkanDeviceInfo> deviceInfos = VkHelpers::enumerateVulkanDevices(instance,&logger);
+  if(gpuIdxs.empty()) {
+    for(size_t i = 0; i < deviceInfos.size(); i++)
+      gpuIdxs.push_back(static_cast<int>(i));
+  }
+  for(int gpuIdx: gpuIdxs) {
+    if(gpuIdx < 0 || static_cast<size_t>(gpuIdx) >= deviceInfos.size())
+      throw StringError("Requested Vulkan GPU index is out of range: " + Global::intToString(gpuIdx));
+    VulkanDeviceInfo deviceInfo = deviceInfos[gpuIdx];
+    vector<const char*> requiredExtensions;
+    const auto recreateDevice = [&]() {
+      return VkHelpers::createVulkanDevice(instance,deviceInfo,requiredExtensions,&logger);
+    };
+    VulkanDevice* device = recreateDevice();
+    try {
+      string outputFile = outputFileFromArg;
+      if(outputFile.empty()) {
+        outputFile = VulkanTuner::defaultDirectory(true,homeDataDirOverride) + "/" +
+          VulkanTuner::defaultFileName(deviceInfo.deviceName,nnXLen,nnYLen,modelInfo);
+      }
+      VulkanTuneParams initialParams;
+      try {
+        initialParams = VulkanTuneParams::load(outputFile);
+        logger.write("Starting from existing Vulkan parameters in: " + outputFile);
+      }
+      catch(const StringError&) {
+        logger.write("Starting fresh Vulkan tuning, saving to: " + outputFile);
+      }
+      VulkanTuneParams tuned = VulkanTuner::tune(
+        device,recreateDevice,initialParams,nnXLen,nnYLen,modelInfo,&logger,full
+      );
+      VulkanTuneParams::save(outputFile,tuned);
+      logger.write("Vulkan tuning complete, saved results to: " + outputFile);
+    }
+    catch(...) {
+      delete device;
+      vkDestroyInstance(instance,nullptr);
+      throw;
+    }
+    delete device;
+  }
+  vkDestroyInstance(instance,nullptr);
   return 0;
 #else
 

@@ -29,6 +29,7 @@ struct VulkanDevice {
   VkDescriptorPool descriptorPool;
   VkCommandPool commandPool;
   VmaAllocator allocator;
+  bool skipWaitOnDestruction = false;
   ~VulkanDevice();
 };
 
@@ -73,9 +74,9 @@ struct WriteDescriptorSet {
 
 
 struct Pipeline {
-  VkPipelineLayout layout;
-  VkPipeline pipeline;
-  VkDescriptorSetLayout descriptorSetLayout;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 };
 
 /**
@@ -201,7 +202,8 @@ namespace VkHelpers {
   );
 
   VkCommandBuffer allocateCommandBuffer(
-    const VulkanDevice *device
+    const VulkanDevice *device,
+    VkResult* result = nullptr
   );
 
   VkResult beginCommandBuffer(
