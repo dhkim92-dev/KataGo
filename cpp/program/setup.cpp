@@ -20,7 +20,9 @@ std::vector<std::string> Setup::getBackendPrefixes() {
   prefixes.push_back("trt");
   prefixes.push_back("metal");
   prefixes.push_back("opencl");
+  prefixes.push_back("rocm");
   prefixes.push_back("eigen");
+  prefixes.push_back("onnx");
   prefixes.push_back("dummybackend");
   return prefixes;
 }
@@ -87,12 +89,27 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
   string backendPrefix = "metal";
   #elif defined(USE_OPENCL_BACKEND)
   string backendPrefix = "opencl";
+  #elif defined(USE_ROCM_BACKEND)
+  string backendPrefix = "rocm";
   #elif defined(USE_EIGEN_BACKEND)
   string backendPrefix = "eigen";
   #elif defined(USE_VULKAN_BACKEND)
   string backendPrefix = "vulkan";
+  #elif defined(USE_ONNX_BACKEND)
+  string backendPrefix = "onnx";
   #else
   string backendPrefix = "dummybackend";
+  #endif
+
+  #if defined(USE_ONNX_BACKEND)
+  // Distributed selfplay (contribute) uploads training data, which must never contain
+  // FP16-overflow NaN rows, so always apply the scale8 workaround regardless of onnxSkipScale8.
+  if(setupFor == SETUP_FOR_DISTRIBUTED && cfg.contains("onnxSkipScale8") && cfg.getBool("onnxSkipScale8")) {
+    cfg.overrideKey("onnxSkipScale8", "false");
+    logger.write(
+      "WARNING: onnxSkipScale8 = true is not allowed for contribute (distributed selfplay); "
+      "forcing it to false so FP16-overflow NaNs cannot poison contributed training data.");
+  }
   #endif
 
   //Automatically flag keys that are for other backends as used so that we don't warn about unused keys
@@ -144,7 +161,14 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
         requireExactNNLen = cfg.getBool("requireMaxBoardSize");
     }
 
+<<<<<<< HEAD
     bool inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "vulkan" ? false : true;
+=======
+    //ROCm defaults to NHWC inputs like CUDA: its compute layout is NHWC in the default FP16 path
+    //(transformers always, convnets on the archs where NHWC is faster), and unlike cuDNN, MIOpen
+    //cannot consume mismatched input/compute layouts for free - it costs a device transpose.
+    bool inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "onnx" ? false : true;
+>>>>>>> master
     if(cfg.contains(backendPrefix+"InputsUseNHWC"+idxStr))
       inputsUseNHWC = cfg.getBool(backendPrefix+"InputsUseNHWC"+idxStr);
     else if(cfg.contains("inputsUseNHWC"+idxStr))
@@ -251,6 +275,7 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
       cfg.contains("nnCacheSizePowerOfTwo") ? cfg.getInt("nnCacheSizePowerOfTwo", -1, 48) :
       setupFor == SETUP_FOR_GTP ? 20 :
       setupFor == SETUP_FOR_BENCHMARK ? 20 :
+      setupFor == SETUP_FOR_BENCHMARKNN ? 16 :
       setupFor == SETUP_FOR_DISTRIBUTED ? 19 :
       setupFor == SETUP_FOR_MATCH ? 21 :
       setupFor == SETUP_FOR_ANALYSIS ? 23 :
@@ -260,6 +285,7 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
       cfg.contains("nnMutexPoolSizePowerOfTwo") ? cfg.getInt("nnMutexPoolSizePowerOfTwo", -1, 24) :
       setupFor == SETUP_FOR_GTP ? 16 :
       setupFor == SETUP_FOR_BENCHMARK ? 16 :
+      setupFor == SETUP_FOR_BENCHMARKNN ? 12 :
       setupFor == SETUP_FOR_DISTRIBUTED ? 16 :
       setupFor == SETUP_FOR_MATCH ? 17 :
       setupFor == SETUP_FOR_ANALYSIS ? 17 :
@@ -267,7 +293,7 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
 
 #ifndef USE_EIGEN_BACKEND
     int nnMaxBatchSize;
-    if(setupFor == SETUP_FOR_BENCHMARK || setupFor == SETUP_FOR_DISTRIBUTED) {
+    if(setupFor == SETUP_FOR_BENCHMARK || setupFor == SETUP_FOR_BENCHMARKNN || setupFor == SETUP_FOR_DISTRIBUTED) {
       nnMaxBatchSize = defaultMaxBatchSize;
     }
     else if(defaultMaxBatchSize > 0) {
@@ -292,11 +318,6 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     if(disableFP16)
       useFP16Mode = enabled_t::False;
 
-    //Pre-warm lazily-compiled backend graphs (e.g. cuDNN SDPA plans for transformer models) when each
-    //server thread's handle is created, so the first searches aren't stalled. On by default.
-    bool disableWarmup =
-      cfg.contains("cudaDisableWarmup") ? cfg.getBool("cudaDisableWarmup") : false;
-
     NNEvaluator* nnEval = new NNEvaluator(
       nnModelName,
       nnModelFile,
@@ -317,11 +338,12 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
       nnRandSeed,
       (forcedSymmetry >= 0 ? false : nnRandomize),
       defaultSymmetry,
-      disableWarmup,
       cfg
     );
 
-    nnEval->spawnServerThreads();
+    // benchmarkPureForward drives compute handles itself, without server threads.
+    if(setupFor != SETUP_FOR_BENCHMARKNN)
+      nnEval->spawnServerThreads();
 
     nnEvals.push_back(nnEval);
   }
@@ -653,6 +675,9 @@ vector<SearchParams> Setup::loadParams(
     if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"+idxStr)) params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules"+idxStr);
     else if(cfg.contains("alwaysComputePassAliveUnderSuicideRules"))   params.alwaysComputePassAliveUnderSuicideRules = cfg.getEnabled("alwaysComputePassAliveUnderSuicideRules");
     else                                                               params.alwaysComputePassAliveUnderSuicideRules = enabled_t::Auto;
+    if(cfg.contains("excludeTerritoryAdjacentToAtari"+idxStr)) params.excludeTerritoryAdjacentToAtari = cfg.getEnabled("excludeTerritoryAdjacentToAtari"+idxStr);
+    else if(cfg.contains("excludeTerritoryAdjacentToAtari"))   params.excludeTerritoryAdjacentToAtari = cfg.getEnabled("excludeTerritoryAdjacentToAtari");
+    else                                                       params.excludeTerritoryAdjacentToAtari = enabled_t::Auto;
     //Controlled by GTP directly, not used in any other mode
     params.avoidMYTDaggerHackPla = C_EMPTY;
     if(cfg.contains("wideRootNoise"+idxStr)) params.wideRootNoise = cfg.getDouble("wideRootNoise"+idxStr, 0.0, 5.0);
