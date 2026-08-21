@@ -23,6 +23,7 @@ std::vector<std::string> Setup::getBackendPrefixes() {
   prefixes.push_back("rocm");
   prefixes.push_back("eigen");
   prefixes.push_back("onnx");
+  prefixes.push_back("vulkan");
   prefixes.push_back("dummybackend");
   return prefixes;
 }
@@ -161,14 +162,10 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
         requireExactNNLen = cfg.getBool("requireMaxBoardSize");
     }
 
-<<<<<<< HEAD
-    bool inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "vulkan" ? false : true;
-=======
     //ROCm defaults to NHWC inputs like CUDA: its compute layout is NHWC in the default FP16 path
     //(transformers always, convnets on the archs where NHWC is faster), and unlike cuDNN, MIOpen
     //cannot consume mismatched input/compute layouts for free - it costs a device transpose.
-    bool inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "onnx" ? false : true;
->>>>>>> master
+    bool inputsUseNHWC = backendPrefix == "opencl" || backendPrefix == "trt" || backendPrefix == "metal" || backendPrefix == "vulkan" || backendPrefix == "onnx" ? false : true;
     if(cfg.contains(backendPrefix+"InputsUseNHWC"+idxStr))
       inputsUseNHWC = cfg.getBool(backendPrefix+"InputsUseNHWC"+idxStr);
     else if(cfg.contains("inputsUseNHWC"+idxStr))

@@ -1,3 +1,8 @@
+/**
+ * @file vulkanshaders.cpp
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @details connect external symbols data to cpp variables
+ */
 #include "../neuralnet/vulkanshaders.h"
 
 namespace VkSPIRVShaders {

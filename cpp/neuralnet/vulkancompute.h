@@ -1,3 +1,8 @@
+/**
+ * @file vulkancompute.h
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @brief define tune params for each shaders and host/device side operations
+ */
 #ifdef USE_VULKAN_BACKEND
 #ifndef __VULKAN_COMPUTE_H__
 #define __VULKAN_COMPUTE_H__

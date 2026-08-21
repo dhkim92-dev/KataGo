@@ -1,14 +1,16 @@
+/**
+ * @file vulkanshaders.h
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @details External symbols generated from SPIR-V shader binaries. 
+ * These are produced by cmake/GenerateShaderSource.cmake during build. 
+ * Symbol naming convention: _binary_<shader_name>_start, _binary_<shader_name>_end, _binary_<shader_name>_size
+ */
 #ifdef USE_VULKAN_BACKEND
 #pragma once
 
 #include <vector>
 #include <cstddef>
 
-/**
- * External symbols generated from SPIR-V shader binaries.
- * These are produced by cmake/GenerateShaderSource.cmake during build.
- * Symbol naming convention: _binary_<shader_name>_start, _binary_<shader_name>_end, _binary_<shader_name>_size
- */
 extern "C" {
   // conv2d_fp32.glsl
   extern const unsigned char _binary_conv2d_fp32_start[];

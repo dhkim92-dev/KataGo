@@ -1,3 +1,8 @@
+/**
+ * @file vulkancompute.cpp
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @brief set of kernel calls or host side operations that used frequently on vulkanbackend.cpp
+ */
 #ifdef USE_VULKAN_BACKEND
 #include <cassert>
 #include <vector>

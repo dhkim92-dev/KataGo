@@ -1,6 +1,6 @@
 /**
  * @file vulkanbackend.cpp
- * @author Dohoon Kim(https://github.com/dhkim92-dev, dhkim92.dev@gmail.com, https://www.dohoon-kim.kr)
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
  * @brief Vulkan backend for Neural Net evaluation
  */
 #ifdef USE_VULKAN_BACKEND
