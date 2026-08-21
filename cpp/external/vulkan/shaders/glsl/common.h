@@ -179,7 +179,7 @@
   #define SQRTHALF 0.70710678118h
   #define SQRTEIGHTH 0.35355339059h
   #define LOG1PEXPTHRESHOLD 20.0f
-//   #define floatToReal(_r) (convert_half(_r))
+  #define floatToReal(_r) float16_t(_r)
 #elif PRECISION == 32 
   #define real float
   #define ZERO 0.0f
@@ -198,6 +198,7 @@
   #define SQRTHALF 0.70710678118f
   #define SQRTEIGHTH 0.35355339059f
   #define LOG1PEXPTHRESHOLD 20.0f
+  #define floatToReal(_r) _r
 #endif
 
 #ifndef PRECISION_STORAGE
@@ -210,6 +211,7 @@
 #define ACTIVATION_TYPE_MISH_SCALE8 12
 
 #if PRECISION_STORAGE == 16
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
   #define real float16_t
   #define realstore float16_t
   #define real4 f16vec4

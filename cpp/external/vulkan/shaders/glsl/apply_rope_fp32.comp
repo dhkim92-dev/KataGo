@@ -1,0 +1,59 @@
+
+#version 450
+#include "common.h"
+
+layout(set=0, binding=0) buffer input_buffer{
+    realstore data[]; // N, numBufHeads, headDim, HW - modified in place
+};
+
+layout(set=0, binding=1) readonly buffer cosine {
+    float cosTable[]; //numKVHeads, numPairs, HW (learnable) or numPairs, HW (fixed)
+};
+
+layout(set=0, binding=2) readonly buffer sine {
+    float sinTable[]; //numKVHeads, numPairs, HW (learnable) or numPairs, HW (fixed)
+};
+
+layout(push_constant) uniform RoPEParams {
+    int nSize;
+    int numBufHeads;
+    int numKVHeads;
+    int headDim;
+    int xySize;
+    int numPairs;
+    int learnableRope; // 1 = per-head tables, 0 = shared tables
+};
+
+void main() {
+    const int xy = int(gl_GlobalInvocationID.x);
+    const int pairIdx = int(gl_GlobalInvocationID.y);
+    const int nh = int(gl_GlobalInvocationID.z);
+
+    int n = nh / numBufHeads;
+    int h = nh % numBufHeads;
+
+    if(n < nSize && pairIdx < numPairs && xy < xySize) {
+        int idx0 = ((n * numBufHeads + h) * headDim + pairIdx * 2) * xySize + xy;
+        int idx1 = ((n * numBufHeads + h) * headDim + pairIdx * 2 + 1) * xySize + xy;
+
+        float x0 = LOAD(data, idx0);
+        float x1 = LOAD(data, idx1);
+
+        int tableIdx;
+        if(learnableRope!=0) {
+            int kvh = h * numKVHeads / numBufHeads;
+            tableIdx = (kvh * numPairs + pairIdx) * xySize + xy;
+        } else {
+            tableIdx = pairIdx * xySize + xy;
+        }
+
+        float cosVal = cosTable[tableIdx];
+        float sinVal = sinTable[tableIdx];
+
+        float out0 = x0 * cosVal - x1 * sinVal;
+        float out1 = x0 * sinVal + x1 * cosVal;
+
+        STORE(data, idx0, floatToReal(out0));
+        STORE(data, idx1, floatToReal(out1));
+    }
+}
