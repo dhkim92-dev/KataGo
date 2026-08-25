@@ -1,6 +1,6 @@
 /**
  * @file vulkanhelpers.h
- * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @author dhkim92-dev
  * @brief Vulkan Helper headers
  */
 #ifdef USE_VULKAN_BACKEND
@@ -9,9 +9,12 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vector>
+#include "../external/half-2.2.0/include/half.hpp"
 #include "../external/vulkan/vk_mem_alloc.h"
 #include "../core/global.h"
 #include "../core/logger.h"
+
+using half_t = half_float::half;
 
 struct VulkanDeviceInfo {
   uint32_t deviceId;
@@ -77,6 +80,11 @@ struct WriteDescriptorSet {
   VkWriteDescriptorSet vkWriteDescriptorSet;
 };
 
+struct WGCount {
+  uint32_t x;
+  uint32_t y;
+  uint32_t z;
+};
 
 struct Pipeline {
   VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -87,7 +95,7 @@ struct Pipeline {
 /**
  * @brief Vulkan Utility functions for instance and error handling
  */
-namespace VkHelpers {
+namespace vk_helper {
 
   size_t roundUpToMultiple(size_t size, size_t ofThis);
 
@@ -234,30 +242,56 @@ namespace VkHelpers {
     VkCommandBuffer commandBuffer
   );
 
+  // VulkanBuffer* createHalfFloatBuffer(
+  //   const VulkanDevice* device,
+  //   size_t numElts,
+  //   bool readOnly
+  // );
+
+
+  // VulkanBuffer* createFloatBuffer(
+  //   const VulkanDevice* device,
+  //   size_t numElts,
+  // )
+
+  VulkanBuffer* createReadOnlyBuffer(
+    const VulkanDevice* device,
+    const std::vector<float>& data,
+    const bool useFP16,
+    VkResult* result
+  );
+
+  VulkanBuffer* createReadWriteBuffer(
+    const VulkanDevice* device,
+    const std::vector<float>& data,
+    const bool useFP16,
+    VkResult* result
+  );
+
   VulkanBuffer* createDeviceBuffer(
     const VulkanDevice* device,
-    size_t size,
-    bool readOnly,
+    const size_t size,
+    const bool readOnly,
     VkResult *result
   );
 
   VulkanBuffer* createDeviceBufferWithData(
     const VulkanDevice* device,
-    size_t size,
+    const size_t size,
     const void* data,
-    bool readOnly,
+    const bool readOnly,
     VkResult *result
   );
 
   VulkanBuffer* createStagingBuffer(
     const VulkanDevice* device,
-    size_t size,
+    const size_t size,
     VkResult *result
   );
 
   VulkanBuffer* createReadbackBuffer(
     const VulkanDevice* device,
-    size_t size,
+    const size_t size,
     VkResult *result
   );
 
@@ -329,14 +363,14 @@ namespace VkDebug {
 
 #define CHECK_VK(res) { \
   if(res != VK_SUCCESS) { \
-    std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+    std::cerr << "[Vulkan error] " << vk_helper::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
     exit(EXIT_FAILURE); \
   } \
 }
 
 #define CHECK_VK_MSG(msg, res) { \
   if(res != VK_SUCCESS) { \
-    std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl; \
+    std::cerr << "[Vulkan error] " << vk_helper::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl; \
     exit(EXIT_FAILURE); \
   } \
 }

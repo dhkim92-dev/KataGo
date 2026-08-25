@@ -1,39 +1,4 @@
 #version 450
-
-/**
-* @author dhkim92.dev@gmail.com
-* @brief Add Channel Bias NCHW FP32 compute shader (Identity activation)
-* Adds bias to each channel: accum[nc, xy] += bias[nc]
-* Matches OpenCL addChannelBiasesNCHW kernel behavior
-*
-* Binding 0: accum (RW) - input/output tensor [NC, HW]
-* Binding 1: bias       - bias vector [NC]
-*/
-
-#include "common.h"
-#include "functions.h"
-
-layout(push_constant) uniform AddChannelBiasNCHWParams {
-    uint ncSize;
-    uint xySize;
-} params;
-
-layout(set = 0, binding = 0) buffer g_accum_block {
-    float g_accum[];
-};
-
-layout(set = 0, binding = 1) readonly buffer g_bias_block {
-    float g_bias[];
-};
-
-layout(local_size_x = ADD_CHANNELS_DISPATCH_X, local_size_y = ADD_CHANNELS_DISPATCH_Y, local_size_z = 1) in;
-
-void main() {
-    uvec3 gid = gl_GlobalInvocationID;
-    uint xy = gid.x;
-    uint nc = gid.y;
-    if (nc < params.ncSize && xy < params.xySize) {
-        uint idx = nc * params.xySize + xy;
-        g_accum[idx] = g_accum[idx] + g_bias[nc];
-    }
-}
+#define PRECISION_STORAGE 32
+#define PRECISION 32
+#include "add_channel_bias_nchw.h"

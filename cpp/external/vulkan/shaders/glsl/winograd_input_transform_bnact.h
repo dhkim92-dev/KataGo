@@ -2,15 +2,8 @@
 * @author dhkim92.dev@gmail.com
 * transform input to winograd domain
 */
-#version 450
-#define PRECISION 32
-#define PRECISION_STORAGE 32
 #include "common.h"
-// #include "functions.h"
 
-// SPECIALIZATION_CONSTANT(0, uint, LOCAL_SIZE_X, 1);
-// SPECIALIZATION_CONSTANT(1, uint, LOCAL_SIZE_Y, 1);
-// SPECIALIZATION_CONSTANT(2, uint, LOCAL_SIZE_Z, 1);
 layout(constant_id = 3) const int INTILE_YSIZE = 4;
 layout(constant_id = 4) const int INTILE_XSIZE = 4;
 layout(constant_id = 5) const int OUTTILE_YSIZE = 2;
@@ -21,31 +14,32 @@ layout(constant_id = 9) const int CONV_YSIZE = 3;
 layout(constant_id = 10) const int CONV_XSIZE = 3;
 layout(constant_id = 11) const int ACTIVATION_TYPE = 0; // 0: identity, 1: relu 2. mish, 12. mish-scale8
     
-layout(push_constant) uniform WinogradInputTransformParams {
+layout(push_constant) uniform WinogradInputTransform{
   int nSize;
-  int ySize;
   int xSize;
-  int numTilesY;
+  int ySize;
   int numTilesX;
+  int numTilesY;
   int icSize;
   int icSizePadded;
   int ntxtySizePadded;
-} params;
+  int xyStride;
+};
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer {
-    real _input[];
+  realstore _input[];
 };
 layout(set = 0, binding = 1) writeonly buffer TransformedBuffer {
-    real _transformed[];
+  realstore _transformed[];
 };
 layout(set = 0, binding = 2) readonly buffer ScaleBuffer {
-  real scale[];
+  realstore scale[];
 };
 layout(set = 0, binding = 3) readonly buffer BiasBuffer {
-  real bias[];
+  realstore bias[];
 };
 layout(set = 0, binding = 4) readonly buffer MaskBuffer {
-  real mask[];
+  realstore mask[];
 };
 
 
@@ -53,18 +47,17 @@ layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 // each work item process a tile in channel
 void main()
 {
-  int id0 = GlobalId0();
+  int id0 = int(gl_GlobalInvocationID.x);
   const int ntxty = id0;
-  const int tileX = id0 % params.numTilesX;
-  id0 = int(id0 / params.numTilesX);
-  const int tileY = id0 % params.numTilesY;
-  id0 = int(id0 / params.numTilesY);
+  const int tileX = id0 % numTilesX;
+  id0 = id0 / numTilesX;
+  const int tileY = id0 % numTilesY;
+  id0 = id0 / numTilesY;
   const int n = id0;
-  const int ic = GlobalId1();
-  const int nic = n * params.icSize + ic;
-  const int xySize = params.xSize * params.ySize;
+  const int ic = int(gl_GlobalInvocationID.y);
+  const int nic = n * icSize + ic;
 
-  #define INPUT(_nic,_xy) LOAD(_input,((_nic) * xySize) + (_xy))
+  #define INPUT(_nic,_xy) LOAD(_input,((_nic) * xyStride) + (_xy))
   #define WTILE(_y,_x) wTile[(_y)*INTILE_XSIZE + (_x)]
 
   real wTile[INTILE_XSIZE * INTILE_YSIZE];
@@ -75,26 +68,25 @@ void main()
     for(int subX = 0; subX < INTILE_XSIZE; subX++) {
       int x = tileX * OUTTILE_XSIZE + subX + INTILE_XOFFSET;
       real value = ZERO;
-      if(y >= 0 && y < params.ySize && x >= 0 && x < params.xSize && n < params.nSize && ic < params.icSize) {
-        int xy = y * params.xSize + x;
+      if(y >= 0 && y < ySize && x >= 0 && x < xSize && n < nSize && ic < icSize) {
+        int xy = y * xSize + x;
 
         if ( ACTIVATION_TYPE == 0 ) {
           // IDENTITY
-          // value = (INPUT(nic,xy) * LOAD(scale, ic) + LOAD(bias,ic)) * LOAD(mask, n * xySize + xy) ;
-          // value = fma(INPUT(nic,xy), LOAD(scale, ic), LOAD(bias,ic) * LOAD(mask, n * xySize + xy)) ;
-          value = (INPUT(nic,xy) * LOAD(scale, ic) + LOAD(bias,ic)) * LOAD(mask, n * xySize + xy);
+          value = (INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic)) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION_TYPE == 1) {
           //RELU
-          value = max(INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic), ZERO) * LOAD(mask, n * xySize + xy);
+          value = fmax(INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic), ZERO) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION_TYPE == 2) {
           float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
-          realstore tmp = realstore(a * tanh(a < LOG1PEXPTHRESHOLD ? log(1.0 + exp(a)) : a));
-          value = tmp * LOAD(mask, n * xySize + xy);
+          value = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION_TYPE == 12) {
           // MISH_SCALE8
           float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
-          realstore tmp = realstore(a < (LOG1PEXPTHRESHOLD * 0.125) ? a * tanh(log(1.0 + exp(a * 8.0))) : a);
-          value = tmp * LOAD(mask, n * xySize + xy);
+          value = floatToReal(a < (LOG1PEXPTHRESHOLD*0.125f) ? a * tanh(log1p(exp(a*8.0f))) : a) * LOAD(mask, n * xyStride + xy);
+        } else if ( ACTIVATION_TYPE == 3 ) {
+          float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
+          value = floatToReal(a / (1.0f + exp(-a))) * LOAD(mask, n * xyStride + xy);
         }
       }
       WTILE(subY,subX) = value;
@@ -197,9 +189,9 @@ void main()
   } else {
     // 
   }
-  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*params.icSizePadded + (_ic))*params.ntxtySizePadded + (_ntile),_value)
+  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*icSizePadded + (_ic))*ntxtySizePadded + (_ntile),_value)
 
-  if(ntxty < params.ntxtySizePadded && ic < params.icSizePadded) {
+  if(ntxty < ntxtySizePadded && ic < icSizePadded) {
     //Copy private tile out to transformed output
     for(int subY = 0; subY < INTILE_YSIZE; subY++) {
       for(int subX = 0; subX < INTILE_XSIZE; subX++) {

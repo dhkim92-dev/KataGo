@@ -1,6 +1,6 @@
 /**
  * @file vulkancompute.h
- * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @author dhkim92-dev
  * @brief define tune params for each shaders and host/device side operations
  */
 #ifdef USE_VULKAN_BACKEND
@@ -8,7 +8,45 @@
 #define __VULKAN_COMPUTE_H__
 
 #include <cstdint>
-#include "vulkanhelpers.h"
+#include <algorithm>
+#include <functional>
+#include <unordered_set>
+#include "../neuralnet/vulkanhelpers.h"
+
+struct ModelDesc;
+
+struct AttnDims {
+  int qHeadDim;
+  int vHeadDim;
+
+  bool operator==(const AttnDims& other) const {
+    return qHeadDim == other.qHeadDim && vHeadDim == other.vHeadDim;
+  }
+};
+
+struct AttnDimsHash {
+  size_t operator()(const AttnDims& dims) const {
+    size_t h1 = std::hash<int>{}(dims.qHeadDim);
+    size_t h2 = std::hash<int>{}(dims.vHeadDim);
+    return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+  }
+};
+
+struct GPoolTuneParams {
+  uint32_t XYSTRIDE;
+  uint32_t CHANNELSTRIDE;
+  uint32_t BATCHSTRIDE;
+};
+
+struct AddPointwiseTuneParams {
+  uint32_t ELTS_PER_THREAD=16;
+  uint32_t LOCAL_SIZE=256;
+};
+
+struct AddChannelBiasesNCHWTuneParams {
+  int XY_ELTS_PER_THREAD = 1;
+  int NC_ELTS_PER_THREAD = 1;
+};
 
 struct ConvTuneParams {
   uint32_t inTileYSize;
@@ -43,11 +81,53 @@ struct XgemmDirectTuneParams {
   uint32_t PADB;
 };
 
+struct RMSNormTuneParams {
+  uint32_t WG_C_SIZE;
+  uint32_t WG_XY_SIZE;
+  uint32_t C_PER_THREAD;
+};
+
+struct SpatialRMSNormSumSqTuneParams {
+  uint32_t TILE_SIZE;
+};
+
+struct SpatialRMSNormReduceTuneParams {
+  uint32_t TILE_SIZE;
+};
+
+struct SpatialRMSNormApplyTuneParams {
+  uint32_t APPLY_ELTS_PER_THREAD;
+};
+
+struct TransformerTuneParams {
+  uint32_t USE_TILED_ATTN;
+};
+
+struct ScaleDotProductAttentionTuneParams {
+  uint32_t ATTN_BLOCK_Q;
+  uint32_t ATTN_BLOCK_KV;
+  uint32_t Q_PER_THREAD;
+};
+
+struct ScaleDotProductAttentionNaiveTuneParams {
+
+};
+
 struct VulkanTuneParams {
+  AddPointwiseTuneParams pointwise;
+  GPoolTuneParams gPool;
   ConvTuneParams conv3x3;
   ConvTuneParams conv5x5;
   XgemmTuneParams xgemm;
   XgemmDirectTuneParams xgemmDirect;
+  RMSNormTuneParams rmsNorm;
+  TransformerTuneParams transformer;
+  SpatialRMSNormSumSqTuneParams spatialRMSNormSumSq;
+  SpatialRMSNormReduceTuneParams spatialRMSNormReduce;
+  SpatialRMSNormApplyTuneParams spatialRMSNormApply;
+  ScaleDotProductAttentionTuneParams scaleDotProductAttention;
+  ScaleDotProductAttentionNaiveTuneParams scaleDotProductAttentionNaive;
+  AddChannelBiasesNCHWTuneParams addChannelBiasesNCHW;
 
   VulkanTuneParams(const VulkanTuneParams& other) = default;
   VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
@@ -59,95 +139,13 @@ struct VulkanTuneParams {
   static void save(const std::string& filename, const VulkanTuneParams& config);
   static VulkanTuneParams load(const std::string& filename);
 
-  VulkanTuneParams() {
-    // conv3x3 = ConvTuneParams{
-    //   .inTileYSize = 6,
-    //   .inTileXSize = 6,
-    //   .outTileYSize = 4,
-    //   .outTileXSize = 4,
-    //   .inputTransformLocalXSize = 4,
-    //   .inputTransformLocalYSize = 2,
-    //   .outputTransformLocalXSize = 8,
-    //   .outputTransformLocalYSize = 2,
-    //   .outputTransformLocalZSize = 2
-    // };
-    // conv5x5 = ConvTuneParams{
-    //   .inTileYSize = 6,
-    //   .inTileXSize = 6,
-    //   .outTileYSize = 2,
-    //   .outTileXSize = 2,
-    //   .inputTransformLocalXSize = 4,
-    //   .inputTransformLocalYSize = 2,
-    //   .outputTransformLocalXSize = 8,
-    //   .outputTransformLocalYSize = 2,
-    //   .outputTransformLocalZSize = 2
-    // };
-    // xgemm = XgemmTuneParams{
-    //   .MDIMC = 16,
-    //   .NDIMC = 16,
-    //   .MWG = 64,
-    //   .NWG = 64,
-    //   .KWG = 16,
-    //   .MDIMA = 16,
-    //   .NDIMB = 16
-    // };
-
-    // xgemmDirect = XgemmDirectTuneParams{
-    //   .WGD = 32,
-    //   .MDIMCD = 8,
-    //   .NDIMCD = 8,
-    //   .MDIMAD = 8,
-    //   .NDIMBD = 8,
-    //   .KWID = 2,
-    //   .PADA = 1,
-    //   .PADB = 1
-    // };
-
-    conv3x3 = ConvTuneParams();
-    conv3x3.inTileYSize = 6;
-    conv3x3.inTileXSize = 6;
-    conv3x3.outTileYSize = 4;
-    conv3x3.outTileXSize = 4;
-    conv3x3.inputTransformLocalXSize = 128;
-    conv3x3.inputTransformLocalYSize = 2;
-    conv3x3.outputTransformLocalXSize = 8;
-    conv3x3.outputTransformLocalYSize = 4;
-    conv3x3.outputTransformLocalZSize = 8;
-
-    conv5x5 = ConvTuneParams();
-    conv5x5.inTileYSize = 6;
-    conv5x5.inTileXSize = 6;
-    conv5x5.outTileYSize = 2;
-    conv5x5.outTileXSize = 2;
-    conv5x5.inputTransformLocalXSize = 128;
-    conv5x5.inputTransformLocalYSize = 2;
-    conv5x5.outputTransformLocalXSize = 8;
-    conv5x5.outputTransformLocalYSize = 2;
-    conv5x5.outputTransformLocalZSize = 2;
-
-    xgemm = XgemmTuneParams();
-    xgemm.MDIMC = 16;
-    xgemm.NDIMC = 16;
-    xgemm.MWG = 64;
-    xgemm.NWG = 64;
-    xgemm.KWG = 16;
-    xgemm.MDIMA = 16;
-    xgemm.NDIMB = 16;
-
-    xgemmDirect = XgemmDirectTuneParams();
-    xgemmDirect.WGD = 32;
-    xgemmDirect.MDIMCD = 8;
-    xgemmDirect.NDIMCD = 8;
-    xgemmDirect.MDIMAD = 8;
-    xgemmDirect.NDIMBD = 8;
-    xgemmDirect.KWID = 2;
-    xgemmDirect.PADA = 1;
-    xgemmDirect.PADB = 1;
-  }
+  VulkanTuneParams();
 };
 
 
 namespace vkcompute {
+
+  std::unordered_set<AttnDims, AttnDimsHash> getAttentionDims(const ModelDesc& modelDesc);
 
   void winogradFilterTransform3x3_2x2(float& a0, float& a1, float& a2, float& a3);
 

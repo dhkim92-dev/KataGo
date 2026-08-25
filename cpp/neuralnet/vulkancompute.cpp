@@ -1,16 +1,121 @@
 /**
  * @file vulkancompute.cpp
- * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @author dhkim92-dev
  * @brief set of kernel calls or host side operations that used frequently on vulkanbackend.cpp
  */
 #ifdef USE_VULKAN_BACKEND
 #include <cassert>
 #include <vector>
 #include <iostream>
-#include "vulkanbackend.h"
-#include "vulkancompute.h"
+#include "desc.h"
+#include "../neuralnet/vulkanbackend.h"
+#include "../neuralnet/vulkancompute.h"
+
+VulkanTuneParams::VulkanTuneParams() {
+
+  // NOTE: "pointwise tuned process required"
+  pointwise = AddPointwiseTuneParams();
+  pointwise.ELTS_PER_THREAD = 1;
+  pointwise.LOCAL_SIZE = 32;
+
+  // NOTE: "gPool tunning process required."
+  gPool = GPoolTuneParams();
+  gPool.XYSTRIDE = 32;
+  gPool.CHANNELSTRIDE = 1;
+  gPool.BATCHSTRIDE = 1;
+
+  // NOTE: "AddChannelBiasesNCHW tunning process required"
+  addChannelBiasesNCHW.NC_ELTS_PER_THREAD = 1;
+  addChannelBiasesNCHW.XY_ELTS_PER_THREAD = 1;
+
+  conv3x3 = ConvTuneParams();
+  conv3x3.inTileYSize = 6;
+  conv3x3.inTileXSize = 6;
+  conv3x3.outTileYSize = 4;
+  conv3x3.outTileXSize = 4;
+  conv3x3.inputTransformLocalXSize = 128;
+  conv3x3.inputTransformLocalYSize = 2;
+  conv3x3.outputTransformLocalXSize = 8;
+  conv3x3.outputTransformLocalYSize = 4;
+  conv3x3.outputTransformLocalZSize = 8;
+
+  conv5x5 = ConvTuneParams();
+  conv5x5.inTileYSize = 6;
+  conv5x5.inTileXSize = 6;
+  conv5x5.outTileYSize = 2;
+  conv5x5.outTileXSize = 2;
+  conv5x5.inputTransformLocalXSize = 128;
+  conv5x5.inputTransformLocalYSize = 2;
+  conv5x5.outputTransformLocalXSize = 8;
+  conv5x5.outputTransformLocalYSize = 2;
+  conv5x5.outputTransformLocalZSize = 2;
+
+  xgemm = XgemmTuneParams();
+  xgemm.MDIMC = 16;
+  xgemm.NDIMC = 16;
+  xgemm.MWG = 64;
+  xgemm.NWG = 64;
+  xgemm.KWG = 16;
+  xgemm.MDIMA = 16;
+  xgemm.NDIMB = 16;
+
+  xgemmDirect = XgemmDirectTuneParams();
+  xgemmDirect.WGD = 32;
+  xgemmDirect.MDIMCD = 8;
+  xgemmDirect.NDIMCD = 8;
+  xgemmDirect.MDIMAD = 8;
+  xgemmDirect.NDIMBD = 8;
+  xgemmDirect.KWID = 2;
+  xgemmDirect.PADA = 1;
+  xgemmDirect.PADB = 1;
+
+  transformer = TransformerTuneParams();
+  transformer.USE_TILED_ATTN=1;
+
+  rmsNorm = RMSNormTuneParams();
+  rmsNorm.WG_C_SIZE = 64;
+  rmsNorm.WG_XY_SIZE = 1;
+  rmsNorm.C_PER_THREAD = 4;
+
+  spatialRMSNormSumSq = SpatialRMSNormSumSqTuneParams();
+  spatialRMSNormSumSq.TILE_SIZE = 32;
+
+  spatialRMSNormReduce = SpatialRMSNormReduceTuneParams();
+  spatialRMSNormReduce.TILE_SIZE = 32;
+
+  spatialRMSNormApply = SpatialRMSNormApplyTuneParams();
+  spatialRMSNormApply.APPLY_ELTS_PER_THREAD = 1;
+
+  scaleDotProductAttention = ScaleDotProductAttentionTuneParams();
+  scaleDotProductAttention.ATTN_BLOCK_Q = 32;
+  scaleDotProductAttention.ATTN_BLOCK_KV = 32;
+  scaleDotProductAttention.Q_PER_THREAD = 1;
+
+  scaleDotProductAttentionNaive = ScaleDotProductAttentionNaiveTuneParams();
+}
 
 namespace vkcompute {
+
+std::unordered_set<AttnDims, AttnDimsHash> getAttentionDims(const ModelDesc& modelDesc) {
+  std::unordered_set<AttnDims, AttnDimsHash> attnDims;
+  std::function<void(const std::vector<std::pair<int, unique_ptr_void>>&)> collect =
+    [&](const std::vector<std::pair<int, unique_ptr_void>>& blocks) {
+      for(const auto& block: blocks) {
+        if(block.first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+          const TransformerAttentionDesc* attention =
+            static_cast<const TransformerAttentionDesc*>(block.second.get());
+          attnDims.insert({attention->qHeadDim, attention->vHeadDim});
+        }
+        else if(block.first == NESTED_BOTTLENECK_BLOCK_KIND) {
+          const NestedBottleneckResidualBlockDesc* nested =
+            static_cast<const NestedBottleneckResidualBlockDesc*>(block.second.get());
+          collect(nested->blocks);
+        }
+      }
+    };
+  collect(modelDesc.trunk.blocks);
+  return attnDims;
+}
 
 void winogradFilterTransform3x3_2x2(
   float& a0, float& a1, float& a2, float& a3
@@ -132,10 +237,10 @@ void convInputsToWinogradDomain(
   VkResult *result
 ) {
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace)
   };
-  *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Input Transform", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
@@ -151,10 +256,10 @@ void convInputsToWinogradDomain(
     outTileXSize = tuneParams.conv5x5.outTileXSize;
   }
 
-  const int batchNumTilesPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
-  const int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
+  const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
+  const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams();
+  auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
   params.nnYLen = nnYLen;
   params.nnXLen = nnXLen;
@@ -183,8 +288,8 @@ void convInputsToWinogradDomain(
   }
 
   uint32_t global[dim] = {
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(batchNumTilesPadded, local[0])),
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(inChannelsPadded, local[1])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, local[0])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, local[1])),
   };
 
   uint32_t groupCountX = global[0] / local[0];
@@ -200,7 +305,7 @@ void convInputsToWinogradDomain(
   //   groupCountX, groupCountY
   // );
   vkCmdDispatch(cb, groupCountX, groupCountY, 1);
-  VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace);
+  vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
 
@@ -223,13 +328,13 @@ void convInputToWinogradDomainBnActMask(
   VkResult *result
 ) {
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, bnScale),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, bnBias),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 4, mask)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, bnScale),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, bnBias),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask)
   };
-  *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Input Transform", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
@@ -247,10 +352,10 @@ void convInputToWinogradDomainBnActMask(
     outTileXSize = tuneParams.conv5x5.outTileXSize;
   }
 
-  const int batchNumTilesPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
-  const int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
+  const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
+  const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams();
+  auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
   params.nnYLen = nnYLen;
   params.nnXLen = nnXLen;
@@ -273,8 +378,8 @@ void convInputToWinogradDomainBnActMask(
     local[2] = 1;
   }
   uint32_t global[dim] = {
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(batchNumTilesPadded, local[0])),
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(inChannelsPadded, local[1])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, local[0])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, local[1])),
   };
 
   uint32_t groupCountX = global[0] / local[0];
@@ -284,7 +389,7 @@ void convInputToWinogradDomainBnActMask(
   groupCountY = (groupCountY == 0) ? 1 : groupCountY;
 
   vkCmdDispatch(cb, groupCountX, groupCountY, 1);
-  VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace);
+  vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
 void winogradOutputToSpatialDomain(
@@ -303,22 +408,22 @@ void winogradOutputToSpatialDomain(
 ) {
   const uint32_t nKernelDims = 3;
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, convWorkspace2),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, output)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, convWorkspace2),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
   };
-  *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Output Transform", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::WinogradOutputTransformParams();
+  auto params = vk_shader::push::WinogradOutputTransformParams();
   params.batchSize = static_cast<int>(batchSize);
   params.ySize = static_cast<int>(nnYLen);
   params.xSize = static_cast<int>(nnXLen);
   params.numTilesY = static_cast<int>(numTilesY);
   params.numTilesX = static_cast<int>(numTilesX);
   params.outChannels = static_cast<int>(outChannels);
-  params.outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
-  params.ntxtySizePadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
+  params.outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
+  params.ntxtySizePadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
 
   // std::printf(
   //   "winogradOutputToSpatialDomain: batchSize=%d ySize=%d xSize=%d numTilesY=%d numTilesX=%d outChannels=%d outChannelsPadded=%d ntxtySizePadded=%d\n",
@@ -338,9 +443,9 @@ void winogradOutputToSpatialDomain(
     local[2] = tuneParams.conv5x5.outputTransformLocalZSize;
   }
   uint32_t global[nKernelDims] = {
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(static_cast<uint32_t>(VkHelpers::powerOf2ify(numTilesX)), local[0])),
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(static_cast<uint32_t>(VkHelpers::powerOf2ify(numTilesY)), local[1])),
-    static_cast<uint32_t>(VkHelpers::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), local[2]))
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesX)), local[0])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesY)), local[1])),
+    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), local[2]))
   };
   uint32_t groupCountX = global[0] / local[0];
   uint32_t groupCountY = global[1] / local[1];
@@ -354,7 +459,7 @@ void winogradOutputToSpatialDomain(
   // std::printf("[VK WINOGRAD OUT] local=%u,%u,%u global=%u,%u,%u groups=%u,%u,%u\\n",
   //   (unsigned)local[0], (unsigned)local[1], (unsigned)local[2], (unsigned)global[0], (unsigned)global[1], (unsigned)global[2], (unsigned)groupCountX, (unsigned)groupCountY, (unsigned)groupCountZ);
   vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
-  VkHelpers::barrierCommandBufferForBuffer(cb, output);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 void xgemmBatched(
@@ -371,16 +476,16 @@ void xgemmBatched(
   VkResult *result
 ) {
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, A),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, B),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, C)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
   };
-  *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Batched GEMM", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
 
-  auto params = KatagoVulkan::XGEMMBatchedParams();
+  auto params = vk_shader::push::XGEMMBatchedParams();
   params.M = M;
   params.N = N;
   params.K = K;
@@ -418,7 +523,7 @@ void xgemmBatched(
   //   (unsigned)groupCountX, (unsigned)groupCountY, (unsigned)groupCountZ
   // );
   vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
-  VkHelpers::barrierCommandBufferForBuffer(cb, C);
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 
@@ -440,16 +545,16 @@ void xgemmStridedBatchedNN(
   assert( descriptorSet != VK_NULL_HANDLE );
 
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, A),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, B),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, C)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
   };
-  *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Strided Batched GEMM", *result);
 
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::XgemmStridedBatchedFp32Params();
+  auto params = vk_shader::push::XgemmStridedBatchedFp32Params();
   params.kSizeM = kSizeM;
   params.kSizeN = kSizeN;
   params.kSizeK = kSizeK;
@@ -462,8 +567,8 @@ void xgemmStridedBatchedNN(
   params.cTranspose = 0;
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
-  size_t mCeiled = VkHelpers::roundUpToMultiple(kSizeM, tuneParams.xgemmDirect.WGD);
-  size_t nCeiled = VkHelpers::roundUpToMultiple(kSizeN, tuneParams.xgemmDirect.WGD);
+  size_t mCeiled = vk_helper::roundUpToMultiple(kSizeM, tuneParams.xgemmDirect.WGD);
+  size_t nCeiled = vk_helper::roundUpToMultiple(kSizeN, tuneParams.xgemmDirect.WGD);
   uint32_t global[3] = {
     static_cast<uint32_t>(mCeiled * tuneParams.xgemmDirect.MDIMCD / tuneParams.xgemmDirect.WGD),
     static_cast<uint32_t>(nCeiled * tuneParams.xgemmDirect.NDIMCD / tuneParams.xgemmDirect.WGD),
@@ -477,7 +582,7 @@ void xgemmStridedBatchedNN(
   groupCountY = (groupCountY == 0) ? 1 : groupCountY;
   groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
   vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
-  VkHelpers::barrierCommandBufferForBuffer(cb, C);
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
   // Debug: print push-constant params and dispatch sizes for strided batched gemm
   #ifdef VULKAN_API_DEBUG
   uint32_t localDbg[3] = { (uint32_t)tuneParams.xgemmDirect.MDIMCD, (uint32_t)tuneParams.xgemmDirect.NDIMCD, 1 };
@@ -509,17 +614,17 @@ void batchedXGemmDirect_MK_NK_MN(
   VkResult* result
 ) {
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, A),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, B),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, C)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
     };
-    *result = VkHelpers::updateDescriptorSets(device, writeDescriptorSets);
+    *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
     CHECK_VK_MSG("Update Descriptor Sets for BatchedXGemmDirect_MK_NK_MN", *result);
   
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
     
-    auto params = KatagoVulkan::BatchedXgemmDirectFp32Params();
+    auto params = vk_shader::push::BatchedXgemmDirectFp32Params();
     params.kSizeM = static_cast<uint32_t>(M);
     params.kSizeN = static_cast<uint32_t>(N);
     params.kSizeK = static_cast<uint32_t>(K);
@@ -533,8 +638,8 @@ void batchedXGemmDirect_MK_NK_MN(
     const uint32_t MDIMCD = tuneParams.xgemmDirect.MDIMCD;
     const uint32_t NDIMCD = tuneParams.xgemmDirect.NDIMCD;
 
-    size_t mCeiled = VkHelpers::roundUpToMultiple(M, WGD);
-    size_t nCeiled = VkHelpers::roundUpToMultiple(N, WGD);
+    size_t mCeiled = vk_helper::roundUpToMultiple(M, WGD);
+    size_t nCeiled = vk_helper::roundUpToMultiple(N, WGD);
     uint32_t global[3] = {
       static_cast<uint32_t>(mCeiled * MDIMCD / WGD),
       static_cast<uint32_t>(nCeiled * NDIMCD / WGD),
@@ -548,7 +653,7 @@ void batchedXGemmDirect_MK_NK_MN(
     groupCountY = (groupCountY == 0) ? 1 : groupCountY;
     groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
     vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
-    VkHelpers::barrierCommandBufferForBuffer(cb, C);
+    vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 };

@@ -1,3 +1,7 @@
+/**
+ * Vulkan tuner for pipelines.
+ * @author dhkim92-dev
+ */
 #ifdef USE_VULKAN_BACKEND
 #ifndef NEURALNET_VULKANTUNER_H_
 #define NEURALNET_VULKANTUNER_H_
@@ -8,14 +12,16 @@
 
 #include <functional>
 
+struct LoadedModel;
+
 namespace VulkanTuner {
   constexpr int TUNER_VERSION = 1;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
+
   struct ModelInfoForTuning {
     int trunkNumChannels;
     int modelVersion;
-
     static ModelInfoForTuning ofDesc(const ModelDesc& desc);
   };
 
@@ -41,7 +47,7 @@ namespace VulkanTuner {
     const std::function<VulkanDevice*()>& recreateDevice,
     int nnXLen,
     int nnYLen,
-    const ModelInfoForTuning& modelInfo,
+    const LoadedModel* loadedModel,
     Logger* logger,
     bool full,
     bool forceRetune);

@@ -2,4 +2,4 @@
 #define PRECISION 32
 #define PRECISION_STORAGE 32
 
-#include "extract_channel0_nchw.h"
+#include "winograd_input_transform_bnact.h"

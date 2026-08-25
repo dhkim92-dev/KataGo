@@ -29,9 +29,6 @@
 *   z -> batch
 * This ensures threads in a warp access contiguous memory locations.
 */
-#define BN_DISPATCH_X 32
-#define BN_DISPATCH_Y 8
-#define BN_DISPATCH_Z 1
 
 /**
 * @brief Add Channel Bias NC compute shader dispatch parameters
@@ -61,13 +58,6 @@
 #define EXTRACT_CHANNEL0_NSTRIDE 1
 #define EXTRACT_CHANNEL0_DISPATCH_X EXTRACT_CHANNEL0_XYSTRIDE
 #define EXTRACT_CHANNEL0_DISPATCH_Y EXTRACT_CHANNEL0_NSTRIDE
-
-/**
-* @brief Add Point Wise NCHW compute shader dispatch parameters
-*/
-#define ADD_POINTWISE_DISPATCH_X 256
-#define ADD_POINTWISE_DISPATCH_Y 1
-#define ADD_POINTWISE_DISPATCH_Z 1
 
 /**
 * Matmul parameters - Optimized with register tiling
@@ -132,16 +122,6 @@
 #define POOLING_NSTRIDE 1
 #define POOLING_DISPATCH_X POOLING_XYSTRIDE
 #define POOLING_DISPATCH_Y POOLING_NSTRIDE
-
-/**
- * Sum Channels params
- * SUM_CHANNELS_XYSTRIDE: number of threads for parallel reduction over spatial dimension
- * Increased from 64 to 128 for better GPU occupancy while maintaining power-of-2 for reduction
- */
-#define SUM_CHANNELS_XYSTRIDE 128
-#define SUM_CHANNELS_DISPATCH_X SUM_CHANNELS_XYSTRIDE
-#define SUM_CHANNELS_DISPATCH_Y 1
-#define SUM_CHANNELS_DISPATCH_Z 1
 
 /**
  * Strided Batched Matmul params (for 1x1 conv)
@@ -209,6 +189,7 @@
 #define ACTIVATION_TYPE_RELU 1
 #define ACTIVATION_TYPE_MISH 2
 #define ACTIVATION_TYPE_MISH_SCALE8 12
+#define ACTIVATION_TYPE_SILU 3
 
 #if PRECISION_STORAGE == 16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -238,6 +219,9 @@
   #define WRITE_ONLY_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) writeonly buffer __name##Buffer { __type __name[]; }
   #define READ_WRITE_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) buffer __name##Buffer { __type __name[]; }
 #endif
+
+#define log1p(x) log(1.0 + exp(x))
+#define fmax(a, b) max(a, b)
 
 real soft_plus(real x) {
   const float T = 20.0;

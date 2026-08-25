@@ -46,6 +46,7 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     float scale; // 1/sqrt(headDim)
 };
 
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 void main() {
   const int qPos = int(gl_GlobalInvocationID.x);
   const int bh = int(gl_GlobalInvocationID.y);  // batch * numHeads + head

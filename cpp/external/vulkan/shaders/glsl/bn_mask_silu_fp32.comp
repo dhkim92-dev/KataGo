@@ -1,6 +1,6 @@
 #version 450
 #define PRICISION 32
 #define PRECISION_STORAGE 32
-#define ACTIVATION 2
+#define ACTIVATION 3
 
 #include "bn_mask_act.h"

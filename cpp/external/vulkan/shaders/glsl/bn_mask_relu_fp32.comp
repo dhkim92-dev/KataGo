@@ -1,62 +1,6 @@
 #version 450
+#define PRICISION 32
+#define PRECISION_STORAGE 32
+#define ACTIVATION 1
 
-/**
-* @author dhkim92.dev@gmail.com
-* @brief BatchNorm (Mask) + ReLU Activation FP32 compute shader
-* Format: NCHW
-* Thread mapping optimized for memory coalescing:
-*   x -> spatial (contiguous in NCHW memory layout)
-*   y -> channel
-*   z -> batch
-*/
-
-#include "common.h"
-#include "functions.h"
-
-layout(push_constant) uniform BatchNormMaskFp32Params {
-    uint batchSize;
-    uint numChannels;
-    uint nnXYLen;
-} params;
-
-layout(set = 0, binding = 0) readonly buffer g_input_block {
-    float g_input[];
-};
-
-layout(set = 0, binding = 1) readonly buffer g_mask_block {
-    float g_mask[];
-};
-
-layout(set = 0, binding = 2) readonly buffer g_scale_block {
-    float g_scale[];
-};
-
-layout(set = 0, binding = 3) readonly buffer g_bias_block {
-    float g_bias[];
-};
-
-layout(set = 0, binding = 4) buffer g_output_block {
-    float g_output[];
-};
-
-layout(local_size_x = BN_DISPATCH_X, local_size_y = BN_DISPATCH_Y, local_size_z = BN_DISPATCH_Z) in;
-
-void main() {
-    uvec3 gid = gl_GlobalInvocationID;
-    uint spatialIdx = gid.x;   // x -> spatial (contiguous memory access)
-    uint channelIdx = gid.y;   // y -> channel
-    uint batchIdx = gid.z;     // z -> batch
-
-    if (batchIdx >= params.batchSize || channelIdx >= params.numChannels || spatialIdx >= params.nnXYLen) {
-        return;
-    }
-    uint idx = (batchIdx * params.numChannels + channelIdx) * params.nnXYLen + spatialIdx;
-    uint maskIdx = batchIdx * params.nnXYLen + spatialIdx;
-    float x = g_input[idx];
-    float m = g_mask[maskIdx];
-    float s = g_scale[channelIdx];
-    float b = g_bias[channelIdx];
-    float outv = m * (x * s + b);
-    // ReLU activation
-    g_output[idx] = RELU(outv);
-}
+#include "bn_mask_act.h"

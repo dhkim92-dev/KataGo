@@ -6,76 +6,69 @@
 * Sums all spatial elements for each (batch, channel) pair
 * Input: N, C, HW (NCHW format)
 * Output: N, C (sum over spatial dimensions)
+* SpecializationInfo
+*  - XYSTRIDE
+*  - CHANNELSTRIDE
+*  - LOCALSIZE_TOTAL
 */
-
 #include "common.h"
-#include "functions.h"
 
-// Workgroup configuration
-// SUM_CHANNELS_XYSTRIDE: number of threads for parallel reduction over spatial dimension
-// Must match local_size_x
-layout(push_constant) uniform SumChannelsParams {
-    uint batchSize;
-    uint numChannels;
-    uint nnXYLen;
-} params;
+layout(constant_id = 3) const int XYSTRIDE = 32;
+layout(constant_id = 4) const int CHANNELSTRIDE = 1;
+layout(constant_id = 5) const int LOCALSIZE_TOTAL = 1;
 
-layout(set = 0, binding = 0) readonly buffer g_input_block {
-    float g_input[];   // N, C, HW
+layout(set = 0, binding = 0) readonly buffer InputBlock {
+    realstore d_input[];   // N, C, HW
 };
-layout(set = 0, binding = 1) buffer g_output_block {
-    float g_output[]; // N, C
+layout(set = 0, binding = 1) buffer OutputBlock {
+    float d_output[]; // N, C
+};
+
+layout(push_constant) uniform SumChannelsParams {
+    int nSize;
+    int cSize;
+    int xySize;
 };
 
 // Shared memory for parallel reduction
-shared float partialSums[SUM_CHANNELS_XYSTRIDE];
+shared float partialSums[LOCALSIZE_TOTAL];
 
-layout(local_size_x = SUM_CHANNELS_DISPATCH_X, local_size_y = 1, local_size_z = 1) in;
-
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main()
 {
-    uvec3 groupThreadId = gl_LocalInvocationID;
-    uvec3 groupId = gl_WorkGroupID;
-    uvec3 dispatchThreadId = gl_GlobalInvocationID;
+  const int xyBase = int(gl_LocalInvocationID.x);
+  const int c = int(gl_GlobalInvocationID.y);
+  const int n = int(gl_GlobalInvocationID.z);
+  const int localId1 = int(gl_LocalInvocationID.y);
+  const int localId2 = int(gl_LocalInvocationID.z);
 
-    uint xyBase = groupThreadId.x;  // Local thread index for reduction
-    uint c = groupId.y;             // Channel index
-    uint n = groupId.z;             // Batch index
-
-    uint nSize = params.batchSize;
-    uint cSize = params.numChannels;
-    uint xySize = params.nnXYLen;
-
-    float sum = 0.0;
-    
-    if (n < nSize && c < cSize) {
-        // Sum up the elements that this thread is responsible for
-        // Each thread handles elements spaced XYSTRIDE apart
-        for (uint xy = xyBase; xy < xySize; xy += SUM_CHANNELS_XYSTRIDE) {
-            uint idx = (n * cSize + c) * xySize + xy;
-            sum += g_input[idx];
-        }
+  float sum = 0.0f;
+  if(n < nSize && c < cSize) {
+    //Sum up the elements that this group member is responsible for
+    for(int xy = xyBase; xy < xySize; xy += XYSTRIDE) {
+        int idx = (n * cSize + c) * xySize + xy;
+        float v = LOAD(d_input,idx);
+        sum += v;
     }
+  }
 
-    // Write to shared memory for performing the reduction
-    partialSums[xyBase] = sum;
+  //Write to local memory for performing the reduction
+  int localIdx = (localId2 * CHANNELSTRIDE + localId1) * XYSTRIDE + xyBase;
+  partialSums[localIdx] = sum;
 
-    // Parallel folding downward
-    for (uint span = SUM_CHANNELS_XYSTRIDE / 2; span > 0; span /= 2) {
-        // memoryBarrierShared();
-        barrier();
-
-        if (xyBase < span) {
-            partialSums[xyBase] += partialSums[xyBase + span];
-        }
-    }
-    // memoryBarrierShared();
+  //Parallel folding downward
+  for(int span = XYSTRIDE / 2; span > 0; span /= 2) {
     barrier();
 
-    // Write final result
-    if (n < nSize && c < cSize && xyBase == 0) {
-        float finalSum = partialSums[0];
-        uint outIdx = n * cSize + c;
-        g_output[outIdx] = finalSum;
+    if(xyBase < span) {
+      partialSums[localIdx] += partialSums[localIdx + span];
     }
+  }
+  barrier();
+
+  if(n < nSize && c < cSize && xyBase == 0) {
+    float finalSum = partialSums[localIdx];
+    int outBase = n * cSize + c;
+    d_output[outBase] = finalSum;
+  }
 }
