@@ -3048,7 +3048,7 @@ struct TransformerAttentionBlock {
 
     }
 
-    ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
       ConvWorkspaceEltsNeeded maxElts;
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, qProj->requiredConvWorkspaceElts(handle, maxBatchSize));
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, kProj->requiredConvWorkspaceElts(handle, maxBatchSize));
@@ -3059,7 +3059,13 @@ struct TransformerAttentionBlock {
 };
 
 struct TransformerFFNBlock {
-
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    // Transformer FFN projections use TransformerMatMulLayer, which does not
+    // require either convolution workspace buffer.
+    (void)handle;
+    (void)maxBatchSize;
+    return ConvWorkspaceEltsNeeded();
+  }
 };
 
 BlockStack::BlockStack(
@@ -3146,6 +3152,14 @@ ConvWorkspaceEltsNeeded BlockStack::requiredConvWorkspaceElts(ComputeHandleInter
     }
     else if(blocks[i].first == NESTED_BOTTLENECK_BLOCK_KIND) {
       NestedResidualBlock* block = (NestedResidualBlock*)blocks[i].second.get();
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+    }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
     }
     else {
