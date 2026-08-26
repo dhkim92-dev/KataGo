@@ -5,8 +5,12 @@
 #include "../core/logger.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/vulkancompute.h"
+#include "../neuralnet/vulkanshaders.h"
 
 #include <functional>
+
+using namespace vk_shader;
+using namespace vk_shader::tune;
 
 namespace VulkanTuner {
   constexpr int TUNER_VERSION = 1;

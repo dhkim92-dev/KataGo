@@ -25,6 +25,9 @@
 #include "../neuralnet/vulkantuner.h"
 
 int globalBatchCount = 4;
+using namespace vk_shader;
+using namespace vk_shader::tune;
+using namespace vk_shader::push;
 
 std::vector<float> makeInputDataFromFile(const std::string& filePath)
 {
@@ -179,7 +182,7 @@ struct ComputeContext {
   const enabled_t usingFP16Mode;
   const enabled_t usingNHWCMode;
   VulkanContext* vulkanContext;
-  std::unordered_map<uint32_t, KatagoVulkan::ComputePipelines *> pipelinesPerDev;
+  std::unordered_map<uint32_t, vk_shader::ComputePipelines *> pipelinesPerDev;
   Logger* logger;
 
   ComputeContext(
@@ -252,7 +255,7 @@ struct ComputeContext {
           requiredExtensions,
           logger
         );
-        KatagoVulkan::ComputePipelines* pipelines = nullptr;
+        vk_shader::ComputePipelines* pipelines = nullptr;
         try {
           VulkanTuneParams tuneParams;
           if(modelInfo != nullptr) {
@@ -264,7 +267,7 @@ struct ComputeContext {
               nnXLen,nnYLen,*modelInfo,logger,fullTuning,forceRetune
             );
           }
-          pipelines = new KatagoVulkan::ComputePipelines(vulkanDevice->device,tuneParams);
+          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device,tuneParams);
         }
         catch(...) {
           delete vulkanDevice;
@@ -286,7 +289,7 @@ struct ComputeContext {
 
   ~ComputeContext() {
     for ( auto& kv : pipelinesPerDev ) {
-      KatagoVulkan::ComputePipelines* pipelines = kv.second;
+      vk_shader::ComputePipelines* pipelines = kv.second;
       delete pipelines;
     }
 
@@ -503,7 +506,7 @@ private:
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    auto pushConstants = KatagoVulkan::MatmulFp32Params();
+    auto pushConstants = MatmulFp32Params();
     pushConstants.M = static_cast<uint32_t>(batchSize);
     pushConstants.K = static_cast<uint32_t>(inChannels);
     pushConstants.N = static_cast<uint32_t>(outChannels);
@@ -515,7 +518,7 @@ private:
       pipelines->matmulFp32.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
-      sizeof(KatagoVulkan::MatmulFp32Params),
+      sizeof(MatmulFp32Params),
       &pushConstants
     );
     vkCmdBindPipeline(
@@ -686,7 +689,7 @@ struct BatchNormLayer {
   ) {
     assert(cb != VK_NULL_HANDLE);
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
     Pipeline targetPipeline;
     VkResult res = VK_ERROR_UNKNOWN;
 
@@ -725,13 +728,13 @@ struct BatchNormLayer {
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    KatagoVulkan::BatchNormMaskParams pushConstants = {};
+    BatchNormMaskParams pushConstants = {};
     pushConstants.batchSize = static_cast<uint32_t>(batchSize);
     pushConstants.numChannels = static_cast<uint32_t>(numChannels);
     pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::BatchNormMaskParams), &pushConstants);
+    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BatchNormMaskParams), &pushConstants);
     // Dispatch: x=spatial, y=channels, z=batch (optimized for memory coalescing in NCHW layout)
     // Shader uses numthreads(BN_DISPATCH_X=32, BN_DISPATCH_Y=8, BN_DISPATCH_Z=1)
     uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
@@ -977,7 +980,7 @@ struct ConvLayer {
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
     std::string shaderName = (convXSize == 3 && convYSize == 3) ? "Conv2DTiledBnAct3x3Fp32" :
                              (convXSize == 5 && convYSize == 5) ? "Conv2DTiledBnAct5x5Fp32" :
                              "Unsupported";
@@ -1018,7 +1021,7 @@ struct ConvLayer {
       0,
       nullptr
     );
-    auto pushConstants = KatagoVulkan::Conv2DTiledBnActParams();
+    auto pushConstants = Conv2DTiledBnActParams();
     pushConstants.batchSize = static_cast<uint32_t>(batchSize);
     pushConstants.inChannels = static_cast<uint32_t>(inChannels);
     pushConstants.outChannels = static_cast<uint32_t>(outChannels);
@@ -1028,7 +1031,7 @@ struct ConvLayer {
     pushConstants.filterW = static_cast<uint32_t>(convXSize);
     pushConstants.activation = activation;
 
-    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::Conv2DTiledBnActParams), &pushConstants);
+    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Conv2DTiledBnActParams), &pushConstants);
 
     // Compute dispatch dimensions using macros from common.h
     // CONV_BNACT_TILE_X: output X positions per workgroup
@@ -1055,7 +1058,7 @@ struct ConvLayer {
     // Implement convolution logic here if needed
     VkResult res;
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
       descriptorSet = vk_helper::allocateDescriptorSet(
@@ -1084,7 +1087,7 @@ struct ConvLayer {
       0,
       nullptr
     );
-    auto pushConstants = KatagoVulkan::Conv2DPushConstantParams();
+    auto pushConstants = Conv2DPushConstantParams();
     pushConstants.batchSize = static_cast<uint32_t>(batchSize);
     pushConstants.inChannels = static_cast<uint32_t>(inChannels);
     pushConstants.outChannels = static_cast<uint32_t>(outChannels);
@@ -1097,7 +1100,7 @@ struct ConvLayer {
       pipelines->conv2dFp32.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
-      sizeof(KatagoVulkan::Conv2DPushConstantParams),
+      sizeof(Conv2DPushConstantParams),
       &pushConstants
     );
 
@@ -1314,7 +1317,7 @@ struct ConvLayer {
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
     const VulkanDevice* device = handle->vulkanDevice;
-    const KatagoVulkan::ComputePipelines *pipelines = handle->context->pipelinesPerDev.at(device->info.deviceId);
+    const vk_shader::ComputePipelines *pipelines = handle->context->pipelinesPerDev.at(device->info.deviceId);
 
     Pipeline inputTransformPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradInputTransform3x3
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5
@@ -1596,7 +1599,7 @@ struct MatBiasLayer {
     assert(cb != VK_NULL_HANDLE);
     VkResult res = VK_ERROR_UNKNOWN;
     uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
     Pipeline targetPipeline;
 
     switch ( activation ) {
@@ -1621,7 +1624,7 @@ struct MatBiasLayer {
       CHECK_VK_MSG("Allocate descriptor set for MatBiasLayer: " + name, res);
     }
     // CHECK_VK_MSG("Begin command buffer for MatBiasLayer: " + name, res);
-    auto pushConstants = KatagoVulkan::AddChannelBiasNCParams();
+    auto pushConstants = AddChannelBiasNCParams();
     pushConstants.nSize = batchSize;  // No spatial dimension for NC tensor
     pushConstants.cSize = numChannels;
     // update descriptor set
@@ -1638,7 +1641,7 @@ struct MatBiasLayer {
       targetPipeline.layout,
       VK_SHADER_STAGE_COMPUTE_BIT,
       0,
-      sizeof(KatagoVulkan::AddChannelBiasNCParams),
+      sizeof(AddChannelBiasNCParams),
       &pushConstants
     );
     vkCmdBindDescriptorSets(
@@ -1793,7 +1796,7 @@ void performExtractChannel0NCHW(
 ) {
   static constexpr int nKernelDims = 2;
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
@@ -1827,7 +1830,7 @@ void performExtractChannel0NCHW(
     0,
     nullptr
   );
-  KatagoVulkan::ExtractChannel0NCHWParams pushConstants = {};
+  ExtractChannel0NCHWParams pushConstants = {};
   pushConstants.numInputChannels = static_cast<uint32_t>(numInputChannels);
   pushConstants.batchSize = static_cast<uint32_t>(batchSIze);
   pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
@@ -1836,7 +1839,7 @@ void performExtractChannel0NCHW(
     targetPipeline.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::ExtractChannel0NCHWParams),
+    sizeof(ExtractChannel0NCHWParams),
     &pushConstants
   );
   // ExtractChannel0 uses numthreads(EXTRACT_CHANNEL0_DISPATCH_X=64, EXTRACT_CHANNEL0_DISPATCH_Y=1)
@@ -1870,7 +1873,7 @@ void performAddChannelBiases(
     vk_helper::powerOf2ify(static_cast<size_t>(ncSize))
   };
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->addChannelBiasNCHWFp32;
 
   if( commandBuffer == VK_NULL_HANDLE ) {
@@ -1907,7 +1910,7 @@ void performAddChannelBiases(
     0,
     nullptr
   );
-  KatagoVulkan::AddChannelBiasNCHWParams pushConstants = {};
+  AddChannelBiasNCHWParams pushConstants = {};
   pushConstants.ncSize = static_cast<uint32_t>(ncSize);
   pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
   vkCmdPushConstants(
@@ -1915,7 +1918,7 @@ void performAddChannelBiases(
     targetPipeline.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::AddChannelBiasNCHWParams),
+    sizeof(AddChannelBiasNCHWParams),
     &pushConstants
   );
   // Dispatch count = ceil(size / workgroupSize)
@@ -1955,7 +1958,7 @@ void performAddPointWise(
     CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
   }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = vk_helper::allocateDescriptorSet(
@@ -1982,14 +1985,14 @@ void performAddPointWise(
     0,
     nullptr
   );
-  KatagoVulkan::AddPointWiseParams pushConstants = {};
+  AddPointWiseParams pushConstants = {};
   pushConstants.totalSize = static_cast<uint32_t>(totalSize);
   vkCmdPushConstants(
     commandBuffer,
     pipelines->addPointWiseFp32.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::AddPointWiseParams),
+    sizeof(AddPointWiseParams),
     &pushConstants
   );
   // AddPointWise shader uses numthreads(ADD_POINTWISE_DISPATCH_X=256, 1, 1)
@@ -2021,7 +2024,7 @@ void performGpoolMask(
   static constexpr int nKernelDims = 3;
   static constexpr int localSizes[nKernelDims] = {1, 1, 1};
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
@@ -2058,7 +2061,7 @@ void performGpoolMask(
     0,
     nullptr
   );
-  KatagoVulkan::GlobalPoolingChannelsParams pushConstants = {};
+  GlobalPoolingChannelsParams pushConstants = {};
   pushConstants.batchSize = static_cast<uint32_t>(batchSize);
   pushConstants.gpoolChannels = static_cast<uint32_t>(gpoolChannels);
   pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
@@ -2067,7 +2070,7 @@ void performGpoolMask(
     pipelines->globalPoolingChannelsFp32.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::GlobalPoolingChannelsParams),
+    sizeof(GlobalPoolingChannelsParams),
     &pushConstants
   );
 
@@ -2115,7 +2118,7 @@ void performValueHeadPool(
     CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
   }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = vk_helper::allocateDescriptorSet(
@@ -2143,7 +2146,7 @@ void performValueHeadPool(
     0,
     nullptr
   );
-  KatagoVulkan::ValueHeadPoolingChannelsParams pushConstants = {};
+  ValueHeadPoolingChannelsParams pushConstants = {};
   pushConstants.batchSize = static_cast<uint32_t>(batchSize);
   pushConstants.gpoolChannels = static_cast<uint32_t>(valueHeadChannels);
   pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
@@ -2152,7 +2155,7 @@ void performValueHeadPool(
     pipelines->valueHeadPoolingChannelsFp32.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
-    sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams),
+    sizeof(ValueHeadPoolingChannelsParams),
     &pushConstants
   );
   // ValueHeadPool shader uses numthreads(POOLING_DISPATCH_X=128, 1, 1)
@@ -3185,7 +3188,7 @@ void computeMaskSums(
   int nnXYLen = nnXLen * nnYLen;
   // Determine GPU and select appropriate compute pipeline
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->sumChannelsFp32;
 
   VkResult res = VK_SUCCESS;
@@ -3209,11 +3212,11 @@ void computeMaskSums(
   CHECK_VK_MSG("Begin compute mask sum command buffer", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-  KatagoVulkan::SumChannelsParams pushConstants;
+  SumChannelsParams pushConstants;
   pushConstants.batchSize = batchSize;
   pushConstants.numChannels = numChannels;
   pushConstants.nnXYLen = nnXYLen;
-  vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::SumChannelsParams), &pushConstants);
+  vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SumChannelsParams), &pushConstants);
   // Dispatch: X=1 (reduction), Y=numChannels(=1 for mask sum), Z=batchSize
   vkCmdDispatch(commandBuffer, 1u, static_cast<uint32_t>(numChannels), static_cast<uint32_t>(batchSize));
   vk_helper::barrierCommandBuffer(commandBuffer);
@@ -4766,519 +4769,8 @@ bool NeuralNet::testEvaluateBatchNorm(
     return true;
   }
 
-namespace KatagoVulkan {
-
-// ########################### Compute Pipelines #########################
-  ComputePipelines::ComputePipelines(
-    VkDevice device_,
-    const VulkanTuneParams& params
-  ): device(device_), tuneParams(params) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    cache = vk_helper::createPipelineCache(device, &res);
-    if(res != VK_SUCCESS)
-      throw StringError("Failed to create Vulkan pipeline cache: " + vk_helper::vkErrorToString(res));
-    try {
-      createPipelines();
-    }
-    catch(...) {
-      destroyPipelines();
-      vkDestroyPipelineCache(device,cache,nullptr);
-      cache = VK_NULL_HANDLE;
-      throw;
-    }
-  }
-
-  ComputePipelines::~ComputePipelines() {
-    vkDeviceWaitIdle(device);
-    destroyPipelines();
-    if( cache != VK_NULL_HANDLE ) {
-      vkDestroyPipelineCache(device, cache, nullptr);
-      cache = VK_NULL_HANDLE;
-    }
-  }
-
-  void ComputePipelines::createPipelines() {
-    createConv2dFp32();
-    createConv2dTiledBnAct3x3Fp32();
-    createConv2dTiledBnAct5x5Fp32();
-    createWinogradInputTransform();
-    createWinogradInputTransformBnAct();
-    createWinogradOutputTransform();
-    // createConv2d3x3BnFp32();
-    // createConv2d3x3BnReluFp32();
-    // createConv2d5x5BnFp32();
-    // createConv2d5x5BnReluFp32();
-    // createConv2d5x5BnMishFp32();
-    createAddPointWiseFp32();
-    createMatmulFp32();
-    createBatchedXgemmDirect();
-    createXGEMMBatchedFp32();
-    createXGEMMStridedBatchedFp32();
-    // createMatmulTiled4x4x32Fp32();
-    createBatchNormMaskFp32();
-    createBatchNormMaskReluFp32();
-    createBatchNormMaskMishFp32();
-    createBatchNormMaskMishScale8Fp32();
-    createGlobalPoolingChannelsFp32();
-    createValueHeadPoolingChannelsFp32();
-    createSumChannelsFp32();
-    createAddChannelBiasNCHWFp32();
-    createAddChannelBiasNCIdentityFp32();
-    createAddChannelBiasNCReluFp32();
-    createAddChannelBiasNCMishFp32();
-    createAddChannelBiasNCMishScale8Fp32();
-    createExtractChannel0NCHWFp32();
-  }
-
-  void ComputePipelines::destroyPipelines() {
-    destroyPipeline(conv2dFp32);
-    destroyPipeline(conv2dTiledBnAct3x3Fp32);
-    destroyPipeline(conv2dTiledBnAct5x5Fp32);
-    // destroyPipeline(conv2d3x3BnFp32);
-    // destroyPipeline(conv2d3x3BnReluFp32);
-    // destroyPipeline(conv2d5x5BnFp32);
-    // destroyPipeline(conv2d5x5BnReluFp32);
-    // destroyPipeline(conv2d5x5BnMishFp32);
-    destroyPipeline(addPointWiseFp32);
-    destroyPipeline(winogradInputTransform3x3);
-    destroyPipeline(winogradInputTransform5x5);
-    destroyPipeline(winogradInputTransform3x3_bnact_identity);
-    destroyPipeline(winogradInputTransform3x3_bnact_relu);
-    destroyPipeline(winogradInputTransform3x3_bnact_mish);
-    destroyPipeline(winogradInputTransform3x3_bnact_mish_scale8);
-    destroyPipeline(winogradInputTransform5x5_bnact_identity);
-    destroyPipeline(winogradInputTransform5x5_bnact_relu);
-    destroyPipeline(winogradInputTransform5x5_bnact_mish);
-    destroyPipeline(winogradInputTransform5x5_bnact_mish_scale8);
-    destroyPipeline(winogradOutputTransform3x3);
-    destroyPipeline(winogradOutputTransform5x5);
-    destroyPipeline(matmulFp32);
-    destroyPipeline(batchedXgemmDirect);
-    destroyPipeline(xgemmStridedBatchedFp32);
-    destroyPipeline(xgemmBatchedFp32);
-    // destroyPipeline(matmulTiledChw4x4x32Fp32);
-    destroyPipeline(batchNormMaskFp32);
-    destroyPipeline(batchNormMaskReluFp32);
-    destroyPipeline(batchNormMaskMishFp32);
-    destroyPipeline(batchNormMaskMishScale8Fp32);
-    destroyPipeline(globalPoolingChannelsFp32);
-    destroyPipeline(valueHeadPoolingChannelsFp32);
-    destroyPipeline(sumChannelsFp32);
-    destroyPipeline(addChannelBiasNCHWFp32);
-    destroyPipeline(addChannelBiasNCIdentityFp32);
-    destroyPipeline(addChannelBiasNCReluFp32);
-    destroyPipeline(addChannelBiasNCMishFp32);
-    destroyPipeline(addChannelBiasNCMishScale8Fp32);
-    destroyPipeline(extractChannel0NCHWFp32);
-  }
-
-  /**
-   * @brief cleanup pipeline resources
-   */
-  void ComputePipelines::destroyPipeline(Pipeline& pipeline) {
-    if( pipeline.pipeline != VK_NULL_HANDLE ) {
-      vkDestroyPipeline(device, pipeline.pipeline, nullptr);
-      pipeline.pipeline = VK_NULL_HANDLE;
-    }
-
-    if ( pipeline.layout != VK_NULL_HANDLE ) {
-      vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
-      pipeline.layout = VK_NULL_HANDLE;
-    }
-
-    if ( pipeline.descriptorSetLayout != VK_NULL_HANDLE ) {
-      vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
-      pipeline.descriptorSetLayout = VK_NULL_HANDLE;
-    }
-  }
-
-  void ComputePipelines::createPipeline(
-    std::string pipelineName,
-    const unsigned char* spirvBytes,
-    size_t spirvSize,
-    size_t bindingSize,
-    uint32_t pushConstantSize,
-    Pipeline &outPipeline,
-    VkSpecializationInfo* specializationInfo
-  ) {
-    VkResult res = VK_ERROR_UNKNOWN;
-
-    if(spirvSize % 4 != 0) {
-      throw StringError(pipelineName + " SPIR-V size is not a multiple of 4 bytes");
-    }
-
-    size_t numWords = spirvSize / 4;
-    std::vector<uint32_t> spirvWords(numWords);
-    // Safe memcpy to properly align bytes into 32-bit words
-    memcpy(spirvWords.data(), spirvBytes, spirvSize);
-
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    const auto fail = [&](const string& operation, VkResult result) {
-      if(pipeline != VK_NULL_HANDLE)
-        vkDestroyPipeline(device,pipeline,nullptr);
-      if(layout != VK_NULL_HANDLE)
-        vkDestroyPipelineLayout(device,layout,nullptr);
-      if(descriptorSetLayout != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(device,descriptorSetLayout,nullptr);
-      if(shaderModule != VK_NULL_HANDLE)
-        vkDestroyShaderModule(device,shaderModule,nullptr);
-      throw StringError(pipelineName + " " + operation + " failed: " + vk_helper::vkErrorToString(result));
-    };
-    VkShaderModuleCreateInfo shaderModuleCI = {};
-    shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderModuleCI.codeSize = spirvSize;
-    shaderModuleCI.pCode = spirvWords.data();
-    // std::cout << "Creating Compute Pipeline: " << pipelineName <<  " code size : " << shaderModuleCI.codeSize << std::endl;
-    res = vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule);
-    if(res != VK_SUCCESS)
-      fail("shader module creation",res);
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for ( size_t i = 0 ; i < bindingSize ; i++ ) {
-      bindings.push_back(
-        vk_helper::descriptorSetLayoutBinding(
-          static_cast<uint32_t>(i),
-          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-        )
-      );
-    }
-
-    descriptorSetLayout = vk_helper::createDescriptorSetLayout(device,bindings,&res);
-    if(res != VK_SUCCESS)
-      fail("descriptor set layout creation",res);
-
-    std::vector<VkPushConstantRange> pushConstants;
-    VkPushConstantRange pushConstant = {};
-
-    if ( pushConstantSize > 0 ) {
-      pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-      pushConstant.offset = 0;
-      pushConstant.size = static_cast<uint32_t>(pushConstantSize);
-      pushConstants.push_back(pushConstant);
-    }
-    layout = vk_helper::createPipelineLayout(device,{ descriptorSetLayout }, pushConstants, &res);
-    if(res != VK_SUCCESS)
-      fail("pipeline layout creation",res);
-
-    pipeline = vk_helper::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
-
-    if(res != VK_SUCCESS)
-      fail("compute pipeline creation",res);
-    outPipeline.descriptorSetLayout = descriptorSetLayout;
-    outPipeline.layout = layout;
-    outPipeline.pipeline = pipeline;
-    // std::cout << "Created Compute Pipeline: " << pipelineName << " result : " << res << std::endl;
-    vkDestroyShaderModule(device, shaderModule, nullptr);
-  }
-
-  /**
-   * @brief Create a Conv2d Fp32 object
-  */
-  void ComputePipelines::createConv2dFp32() {
-    createPipeline("Conv2dFp32",  vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
-  }
-
-  void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
-    createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32);
-  }
-
-  void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
-    createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32);
-  }
-
-  void ComputePipelines::createWinogradInputTransform() {
-    WinogradInputTransformSpec spec;
-    spec.localSizeX = (tuneParams.conv3x3.inputTransformLocalXSize);
-    spec.localSizeY = (tuneParams.conv3x3.inputTransformLocalYSize);
-    spec.localSizeZ = 1;
-    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
-    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
-    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
-    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
-    spec.inTileYOffset= -1;
-    spec.inTileXOffset= -1;
-    spec.convY = 3;
-    spec.convX = 3;
-    std::vector<int32_t> specData_3322 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322.size());
-    VkSpecializationInfo si3322 = vk_helper::createSpecializationInfo(specData_3322, specEntry);
-
-    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322);
-    spec.convX = 5;
-    spec.convY = 5;
-    spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize = tuneParams.conv5x5.outTileYSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYOffset= -2;
-    spec.inTileXOffset= -2;
-    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
-    std::vector<int32_t> specData_5544 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    VkSpecializationInfo si5544 = vk_helper::createSpecializationInfo(specData_5544, specEntry);
-    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
-  }
-
-  void ComputePipelines::createWinogradInputTransformBnAct() {
-    auto spec = WinogradInputTransformBnActSpec();
-    spec.localSizeX = tuneParams.conv3x3.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv3x3.inputTransformLocalYSize;
-    spec.localSizeZ = 1;
-    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
-    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
-    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
-    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
-    spec.inTileYOffset= -1;
-    spec.inTileXOffset= -1;
-    spec.convY = 3;
-    spec.convX = 3;
-    spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_3322_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322_identity.size());
-    VkSpecializationInfo si3322_identity = vk_helper::createSpecializationInfo(specData_3322_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity);
-
-    spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_3322_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_relu = vk_helper::createSpecializationInfo(specData_3322_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu);
-
-    spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_3322_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish = vk_helper::createSpecializationInfo(specData_3322_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish);
-
-    spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_3322_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish_scale8 = vk_helper::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8);
-
-    // 5x5
-    spec.convX = 5;
-    spec.convY = 5;
-    spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize = tuneParams.conv5x5.outTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.inTileXOffset= -2;
-    spec.inTileYOffset= -2;
-    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
-    spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_55_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_identity = vk_helper::createSpecializationInfo(specData_55_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity);
-    spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_55_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_relu = vk_helper::createSpecializationInfo(specData_55_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu);
-    spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_55_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish = vk_helper::createSpecializationInfo(specData_55_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish);
-    spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_55_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish_scale8 = vk_helper::createSpecializationInfo(specData_55_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8);
-  }
-
-  void ComputePipelines::createWinogradOutputTransform() {
-    WinogradOutputTransformSpec spec;
-    // Ensure specialization constants for the 3x3 output transform
-    // match the dispatch-local sizes used at runtime (8,2,2).
-    spec.localSizeX = tuneParams.conv3x3.outputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv3x3.outputTransformLocalYSize;
-    spec.localSizeZ = tuneParams.conv3x3.outputTransformLocalZSize;
-    spec.outTileXSize= tuneParams.conv3x3.outTileXSize;
-    spec.outTileYSize= tuneParams.conv3x3.outTileYSize;
-    spec.inTileXSize = tuneParams.conv3x3.inTileXSize;
-    spec.inTileYSize = tuneParams.conv3x3.inTileYSize;
-    spec.convX = 3;
-    spec.convY = 3;
-    std::vector<int32_t> specData_33 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_33.size());
-    VkSpecializationInfo si33 = vk_helper::createSpecializationInfo(specData_33, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33);
-
-    spec.localSizeX = tuneParams.conv5x5.outputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.outputTransformLocalYSize;
-    spec.localSizeZ =  tuneParams.conv5x5.outputTransformLocalZSize;
-    spec.outTileXSize= tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize= tuneParams.conv5x5.outTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.convX = 5;
-    spec.convY = 5;
-    std::vector<int32_t> specData_55 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    VkSpecializationInfo si55 = vk_helper::createSpecializationInfo(specData_55, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55);
-  }
-
-  /**
-   * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
-   */
-  // void ComputePipelines::createConv2d3x3BnFp32() {
-  //   createPipeline("Conv2d3x3BnFp32", vk_shader::spirv_conv2d_3x3_bn_fp32, vk_shader::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
-  // }
-
-  /**
-   * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
-   */
-  // void ComputePipelines::createConv2d3x3BnReluFp32() {
-  //   createPipeline("Conv2d3x3BnReluFp32", vk_shader::spirv_conv2d_3x3_bn_relu_fp32, vk_shader::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
-  // }
-  /**
-   * @brief Create a Conv2d3x3 Bn Mish Fp32 object
-   */
-  // void ComputePipelines::createConv2d3x3BnMishFp32() {
-  //   createPipeline("Conv2d3x3BnMishFp32", vk_shader::spirv_conv2d_3x3_bn_mish_fp32,vk_shader::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
-  // }
-
-  /**
-   * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
-   */
-  // void ComputePipelines::createConv2d5x5BnFp32() {
-  //   createPipeline("Conv2d5x5BnFp32", vk_shader::spirv_conv2d_5x5_bn_fp32, vk_shader::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
-  // }
-
-  /**
-   * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
-   */
-  // void ComputePipelines::createConv2d5x5BnReluFp32() {
-  //   createPipeline("Conv2d5x5BnReluFp32",vk_shader::spirv_conv2d_5x5_bn_relu_fp32, vk_shader::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
-  // }
-
-  /**
-   * @brief Create a Conv2d5x5 Bn Mish Fp32 object
-   */
-  // void ComputePipelines::createConv2d5x5BnMishFp32() {
-  //   createPipeline("Conv2d5x5BnMishFp32",vk_shader::spirv_conv2d_5x5_bn_mish_fp32, vk_shader::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
-  // }
-
-  /**
-   * @brief Create a Add Point Wise Fp32 object
-   */
-  void ComputePipelines::createAddPointWiseFp32() {
-    createPipeline("AddPointWiseFp32",vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(KatagoVulkan::AddPointWiseParams), addPointWiseFp32);
-  }
-
-  void ComputePipelines::createMatmulFp32() {
-    createPipeline("MatmulFp32", vk_shader::spirv_matmul_fp32, vk_shader::spirv_matmul_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), matmulFp32);
-  }
-
-  void ComputePipelines::createBatchedXgemmDirect() {
-    auto spec = XgemmDirectSpec();
-    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
-    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
-    spec.localSizeZ = 1;
-    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
-    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
-    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
-    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
-    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
-    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
-    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
-    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
-    std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
-    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_batched_xgemm_direct, vk_shader::spirv_batched_xgemm_direct_size, 3, sizeof(KatagoVulkan::BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo);
-  }
-
-  void ComputePipelines::createXGEMMBatchedFp32() {
-
-    auto spec = XGEMMBatchedSpec();
-    spec.localSizeX = tuneParams.xgemm.MDIMC;
-    spec.localSizeY = tuneParams.xgemm.NDIMC;
-    spec.localSizeZ = 1;
-    spec.MWG = tuneParams.xgemm.MWG;
-    spec.NWG = tuneParams.xgemm.NWG;
-    spec.KWG = tuneParams.xgemm.KWG;
-    spec.MDIMC = tuneParams.xgemm.MDIMC;
-    spec.NDIMC = tuneParams.xgemm.NDIMC;
-    spec.MDIMA = tuneParams.xgemm.MDIMA;
-    spec.NDIMB = tuneParams.xgemm.NDIMB;
-    std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
-    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMBatchedFp32", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(KatagoVulkan::XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo);
-  }
-
-  void ComputePipelines::createXGEMMStridedBatchedFp32() {
-    auto spec = XgemmDirectSpec();
-    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
-    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
-    spec.localSizeZ = 1;
-    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
-    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
-    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
-    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
-    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
-    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
-    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
-    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
-    auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
-    auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(KatagoVulkan::XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo);
-  }
-
-  void ComputePipelines::createBatchNormMaskFp32() {
-    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_fp32, vk_shader::spirv_bn_mask_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskFp32);
-  }
-
-  void ComputePipelines::createBatchNormMaskReluFp32() {
-    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskReluFp32);
-  }
-
-  void ComputePipelines::createBatchNormMaskMishFp32() {
-    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishFp32);
-  }
-
-  void ComputePipelines::createBatchNormMaskMishScale8Fp32() {
-    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishScale8Fp32);
-  }
-
-  void ComputePipelines::createGlobalPoolingChannelsFp32() {
-    createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(KatagoVulkan::GlobalPoolingChannelsParams), globalPoolingChannelsFp32);
-  }
-
-  void ComputePipelines::createValueHeadPoolingChannelsFp32() {
-    createPipeline("ValueHeadPoolingChannelsFp32", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32);
-  }
-
-  void ComputePipelines::createSumChannelsFp32() {
-    createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(KatagoVulkan::SumChannelsParams), sumChannelsFp32);
-  }
-
-  void ComputePipelines::createAddChannelBiasNCHWFp32() {
-    createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWFp32);
-  }
-
-  void ComputePipelines::createAddChannelBiasNCIdentityFp32() {
-    createPipeline("AddChannelBiasNCIdentityFp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCIdentityFp32);
-  }
-
-  void ComputePipelines::createAddChannelBiasNCReluFp32() {
-    createPipeline("AddChannelBiasNCReluFp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCReluFp32);
-  }
-
-  void ComputePipelines::createAddChannelBiasNCMishFp32() {
-    createPipeline("AddChannelBiasNCMishFp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishFp32);
-  }
-
-  void ComputePipelines::createAddChannelBiasNCMishScale8Fp32() {
-    createPipeline("AddChannelBiasNCMishScale8Fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32);
-  }
-
-  void ComputePipelines::createExtractChannel0NCHWFp32() {
-    createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(KatagoVulkan::ExtractChannel0NCHWParams), extractChannel0NCHWFp32);
-  }
 
   // ########################### End of Compute Pipelines #########################
-}
 
 
 #endif

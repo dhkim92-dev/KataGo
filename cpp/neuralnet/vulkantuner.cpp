@@ -15,6 +15,8 @@
 #include "../neuralnet/vulkanbackend.h"
 
 using namespace std;
+using namespace vk_shader;
+using namespace vk_shader::tune;
 
 namespace {
   const char* VERSION_LINE = "VERSION=1";
@@ -64,7 +66,7 @@ namespace {
     if(!params.isValid())
       return {CandidateStatus::Reject, 0.0, "invalid parameter relationships"};
 
-    KatagoVulkan::ComputePipelines* pipelines = nullptr;
+    vk_shader::ComputePipelines* pipelines = nullptr;
     vector<VulkanBuffer*> buffers;
     VkFence fence = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -94,7 +96,7 @@ namespace {
     };
 
     try {
-      pipelines = new KatagoVulkan::ComputePipelines(device->device, params);
+      pipelines = new vk_shader::ComputePipelines(device->device, params);
     } catch(const StringError& e) {
       return {CandidateStatus::Reject, 0.0, e.what()};
     }

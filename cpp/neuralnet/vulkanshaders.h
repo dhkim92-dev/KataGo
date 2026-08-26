@@ -10,6 +10,9 @@
 
 #include <vector>
 #include <cstddef>
+#include <string>
+#include "../neuralnet/activations.h"
+#include "../neuralnet/vulkanhelpers.h"
 
 extern "C" {
   // conv2d_fp32.glsl
@@ -256,6 +259,636 @@ namespace vk_shader {
   // Extract channel 0 from NCHW fp32
   extern const unsigned char* spirv_extract_channel0_nchw_fp32;
   extern size_t spirv_extract_channel0_nchw_fp32_size;
+
+  namespace spec {
+    struct WinogradInputTransformBnActSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int inTileYOffset = -1;
+      int inTileXOffset = -1;
+      int convY = 3;
+      int convX = 3;
+      int activation = 0; // 0: Identity, 1: ReLU, 2: Mish, 12: Mish + Scale8
+    };
+
+    struct WinogradInputTransformSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int inTileYOffset = -1;
+      int inTileXOffset = -1;
+      int convY = 3;
+      int convX = 3;
+    };
+
+    struct WinogradOutputTransformSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int convY = 3;
+      int convX = 3;
+    };
+
+    struct XGEMMBatchedSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+      uint32_t MWG=64;
+      uint32_t NWG=64;
+      uint32_t KWG=32;
+      uint32_t MDIMC=16;
+      uint32_t NDIMC=16;
+      uint32_t MDIMA=16;
+      uint32_t NDIMB=16;
+    };
+
+    struct XgemmDirectSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+      int WGD = 32;
+      int MDIMCD = 8;
+      int NDIMCD = 8;
+      int MDIMAD = 16;
+      int NDIMBD = 16;
+      int KWID = 2;
+      int PADA = 1;
+      int PADB = 1;
+    };
+  };
+
+  namespace push {
+    struct Conv2DPushConstantParams {
+      uint32_t batchSize; // Batch size
+      uint32_t inChannels; // Input channels
+      uint32_t outChannels; // Output channels
+      uint32_t nnYLen;
+      uint32_t nnXLen;
+      uint32_t filterH; // Filter height
+      uint32_t filterW; // Filter width
+    };
+
+    struct Conv2DTiledBnActParams {
+      uint32_t batchSize;
+      uint32_t inChannels;
+      uint32_t outChannels;
+      uint32_t nnYLen;
+      uint32_t nnXLen;
+      uint32_t filterH;
+      uint32_t filterW;
+      uint32_t activation; // 0: Identity, 1: ReLU, 2: Mish, 3: Mish + Scale8
+    };
+
+    struct WinogradInputTransformParams {
+      uint32_t batchSize;
+      uint32_t nnYLen;
+      uint32_t nnXLen;
+      uint32_t numTilesY;
+      uint32_t numTilesX;
+      uint32_t inChannels;
+      uint32_t inChannelsPadded;
+      uint32_t ntxtySizePadded;
+    };
+
+    struct WinogradOutputTransformParams {
+      int batchSize;
+      int ySize;
+      int xSize;
+      int numTilesY;
+      int numTilesX;
+      int outChannels;
+      int outChannelsPadded;
+      int ntxtySizePadded;
+    };
+
+    /**
+     * @brief Matmul pipeline Push Constant Parameters
+     * @param M: rows of A and C, each batch
+     * @param K: cols of A and rows of B, inChannels
+     * @param N: cols of B and C, outChannels
+     * @param numBatchElts: number of batches
+     * @param cTranspose: whether output C is transposed or not
+     */
+    struct MatmulFp32Params {
+      uint32_t M;  
+      uint32_t K;  
+      uint32_t N;
+      uint32_t numBatchElts;
+      uint32_t cTranspose; // Output Transpose
+    };
+
+    struct XGEMMBatchedParams{
+      uint32_t M;  
+      uint32_t N;  
+      uint32_t K;
+      uint32_t aOne;
+      uint32_t aTwo;
+      uint32_t bOne;
+      uint32_t bTwo;
+      uint32_t cOne;
+      uint32_t cTwo;
+    };
+
+    struct BatchedXGEMMDirectParams {
+      uint32_t M;  
+      uint32_t N;
+      uint32_t K;  
+      uint32_t aLead;
+      uint32_t bLead;
+      uint32_t cLead;
+      uint32_t aTranspose; // Input A Transpose
+      uint32_t bTranspose; // Input B Transpose
+      uint32_t cTranspose; // Output C Transpose
+    };
+
+    struct XgemmStridedBatchedFp32Params {
+      uint32_t kSizeM;  
+      uint32_t kSizeN;
+      uint32_t kSizeK;  
+      uint32_t aLead;
+      uint32_t aStride;
+      uint32_t bLead;
+      uint32_t bStride;
+      uint32_t cLead;
+      uint32_t cStride;
+      uint32_t cTranspose;
+    };
+
+    struct BatchedXgemmDirectFp32Params {
+      uint32_t kSizeM;  
+      uint32_t kSizeN;
+      uint32_t kSizeK;  
+      uint32_t aLead;
+      uint32_t bLead;
+      uint32_t cLead;
+      uint32_t cTranspose; // Output C Transpose
+    };
+
+    /**
+     * @brief Batch Normalization Mask Fp32 Push Constant Parameters 
+     * @param batchSize
+     * @param numChannels
+     * @param nnYLen
+     */
+    struct BatchNormMaskParams {
+      uint32_t batchSize;
+      uint32_t numChannels;
+      uint32_t nnXYLen;
+    };
+
+    /**
+     * @brief Sum Channels Fp32 Push Constant Parameters
+     */
+    struct SumChannelsParams {
+      uint32_t batchSize;
+      uint32_t numChannels;
+      uint32_t nnXYLen;
+    };
+
+    /**
+     * @brief MatBias Push Constant Parameters
+     */
+    struct MatBiasFp32Params {
+      uint32_t batchSize;
+      uint32_t numChannels;
+    };
+
+    /**
+      * @brief Global Pooling Channels Push Constant Parameters
+      */
+    struct GlobalPoolingChannelsParams {
+      uint32_t batchSize;
+      uint32_t gpoolChannels;
+      uint32_t nnXYLen;
+    };
+
+    /**
+      * @brief Value Head Pooling Channels Push Constant Parameters
+      */
+    struct ValueHeadPoolingChannelsParams {
+      uint32_t batchSize;
+      uint32_t gpoolChannels;
+      uint32_t nnXYLen;
+    };
+
+    /**
+      *  @brief Add Point Wise Push Constant Parameters
+      **/
+    struct AddPointWiseParams {
+      uint32_t totalSize;
+    };
+
+    /**
+     * @brief Add Channel Bias NCHW Push Constant Parameters
+     */
+    struct AddChannelBiasNCHWParams {
+      uint32_t ncSize;
+      uint32_t xySize;
+    };
+
+    /**
+     * @brief Add Channel Bias NC Push Constant Parameters
+     */
+    struct AddChannelBiasNCParams {
+      uint32_t nSize;
+      uint32_t cSize;
+    };
+
+    struct ExtractChannel0NCHWParams {
+      uint32_t batchSize;
+      uint32_t numInputChannels;
+      uint32_t nnXYLen;
+    };
+
+    struct NCHWPushConstantParams {
+      uint32_t N; // Batch size
+      uint32_t C; // Channels
+      uint32_t H; // Height
+      uint32_t W; // Width
+    };
+  };
+
+  namespace tune {
+    struct ConvTuneParams {
+      uint32_t inTileYSize;
+      uint32_t inTileXSize;
+      uint32_t outTileYSize;
+      uint32_t outTileXSize;
+      uint32_t inputTransformLocalXSize;
+      uint32_t inputTransformLocalYSize;
+      uint32_t outputTransformLocalXSize;
+      uint32_t outputTransformLocalYSize;
+      uint32_t outputTransformLocalZSize;
+    };
+
+    struct XgemmTuneParams {
+      uint32_t MDIMC;
+      uint32_t NDIMC;
+      uint32_t MWG;
+      uint32_t NWG;
+      uint32_t KWG;
+      uint32_t MDIMA;
+      uint32_t NDIMB;
+    };
+
+    struct XgemmDirectTuneParams {
+      uint32_t WGD;
+      uint32_t MDIMCD;
+      uint32_t NDIMCD;
+      uint32_t MDIMAD;
+      uint32_t NDIMBD;
+      uint32_t KWID;
+      uint32_t PADA;
+      uint32_t PADB;
+    };
+
+    struct VulkanTuneParams {
+      ConvTuneParams conv3x3;
+      ConvTuneParams conv5x5;
+      XgemmTuneParams xgemm;
+      XgemmDirectTuneParams xgemmDirect;
+
+      VulkanTuneParams(const VulkanTuneParams& other) = default;
+      VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
+
+      bool isValid() const;
+      bool operator==(const VulkanTuneParams& other) const;
+      bool operator!=(const VulkanTuneParams& other) const { return !(*this == other); }
+
+      static void save(const std::string& filename, const VulkanTuneParams& config);
+      static VulkanTuneParams load(const std::string& filename);
+
+      VulkanTuneParams() {
+        // conv3x3 = ConvTuneParams{
+        //   .inTileYSize = 6,
+        //   .inTileXSize = 6,
+        //   .outTileYSize = 4,
+        //   .outTileXSize = 4,
+        //   .inputTransformLocalXSize = 4,
+        //   .inputTransformLocalYSize = 2,
+        //   .outputTransformLocalXSize = 8,
+        //   .outputTransformLocalYSize = 2,
+        //   .outputTransformLocalZSize = 2
+        // };
+        // conv5x5 = ConvTuneParams{
+        //   .inTileYSize = 6,
+        //   .inTileXSize = 6,
+        //   .outTileYSize = 2,
+        //   .outTileXSize = 2,
+        //   .inputTransformLocalXSize = 4,
+        //   .inputTransformLocalYSize = 2,
+        //   .outputTransformLocalXSize = 8,
+        //   .outputTransformLocalYSize = 2,
+        //   .outputTransformLocalZSize = 2
+        // };
+        // xgemm = XgemmTuneParams{
+        //   .MDIMC = 16,
+        //   .NDIMC = 16,
+        //   .MWG = 64,
+        //   .NWG = 64,
+        //   .KWG = 16,
+        //   .MDIMA = 16,
+        //   .NDIMB = 16
+        // };
+
+        // xgemmDirect = XgemmDirectTuneParams{
+        //   .WGD = 32,
+        //   .MDIMCD = 8,
+        //   .NDIMCD = 8,
+        //   .MDIMAD = 8,
+        //   .NDIMBD = 8,
+        //   .KWID = 2,
+        //   .PADA = 1,
+        //   .PADB = 1
+        // };
+
+        conv3x3 = ConvTuneParams();
+        conv3x3.inTileYSize = 6;
+        conv3x3.inTileXSize = 6;
+        conv3x3.outTileYSize = 4;
+        conv3x3.outTileXSize = 4;
+        conv3x3.inputTransformLocalXSize = 128;
+        conv3x3.inputTransformLocalYSize = 2;
+        conv3x3.outputTransformLocalXSize = 8;
+        conv3x3.outputTransformLocalYSize = 4;
+        conv3x3.outputTransformLocalZSize = 8;
+
+        conv5x5 = ConvTuneParams();
+        conv5x5.inTileYSize = 6;
+        conv5x5.inTileXSize = 6;
+        conv5x5.outTileYSize = 2;
+        conv5x5.outTileXSize = 2;
+        conv5x5.inputTransformLocalXSize = 128;
+        conv5x5.inputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalXSize = 8;
+        conv5x5.outputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalZSize = 2;
+
+        xgemm = XgemmTuneParams();
+        xgemm.MDIMC = 16;
+        xgemm.NDIMC = 16;
+        xgemm.MWG = 64;
+        xgemm.NWG = 64;
+        xgemm.KWG = 16;
+        xgemm.MDIMA = 16;
+        xgemm.NDIMB = 16;
+
+        xgemmDirect = XgemmDirectTuneParams();
+        xgemmDirect.WGD = 32;
+        xgemmDirect.MDIMCD = 8;
+        xgemmDirect.NDIMCD = 8;
+        xgemmDirect.MDIMAD = 8;
+        xgemmDirect.NDIMBD = 8;
+        xgemmDirect.KWID = 2;
+        xgemmDirect.PADA = 1;
+        xgemmDirect.PADB = 1;
+      }
+    };
+
+  }
+
+  struct ComputePipelines {
+    // const VulkanTuneParams tuneParams;
+    // const bool usingFP16Storage;
+    // const bool usingFP16Compute;
+    // const bool usingFP16TensorCores;
+    VkDevice device;
+    const tune::VulkanTuneParams tuneParams;
+    VkPipelineCache cache;
+
+    // In this code, assume that NCHW is default format if no postfix is given.
+
+    // Conv2D pipelines
+    Pipeline conv2dFp32; 
+    Pipeline conv2dTiledBnAct3x3Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
+    Pipeline conv2dTiledBnAct5x5Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
+
+    Pipeline winogradInputTransform3x3;
+    Pipeline winogradInputTransform5x5;
+
+    Pipeline winogradInputTransform3x3_bnact_identity;
+    Pipeline winogradInputTransform3x3_bnact_relu;
+    Pipeline winogradInputTransform3x3_bnact_mish;
+    Pipeline winogradInputTransform3x3_bnact_mish_scale8;
+    Pipeline winogradInputTransform5x5_bnact_identity;
+    Pipeline winogradInputTransform5x5_bnact_relu;
+    Pipeline winogradInputTransform5x5_bnact_mish;
+    Pipeline winogradInputTransform5x5_bnact_mish_scale8;
+
+    Pipeline winogradOutputTransform3x3;
+    Pipeline winogradOutputTransform5x5;
+
+    Pipeline addPointWiseFp32;  // operation for skipping connections
+
+    // Pipeline for matrix multiplication
+    Pipeline matmulFp32; 
+    Pipeline batchedXgemmDirect;
+    Pipeline xgemmBatchedFp32;
+
+    // note that conv1x1 can be implemented as matmul operation
+    // Pipeline stridedBatchedMatmulFp32;
+    Pipeline xgemmStridedBatchedFp32;
+
+    // Batch Normalization pipelines
+    // note that prediction phase does not need batch normalization operation separately
+    // as the parameters can be folded into convolution scale and bias.
+    Pipeline batchNormMaskFp32;
+    Pipeline batchNormMaskReluFp32;
+    Pipeline batchNormMaskMishFp32;
+    Pipeline batchNormMaskMishScale8Fp32;
+
+    // Pooling pipelines
+    Pipeline globalPoolingChannelsFp32;
+    Pipeline valueHeadPoolingChannelsFp32;
+    
+    // Element wise operations
+    Pipeline sumChannelsFp32;
+
+    Pipeline addChannelBiasNCHWFp32;
+    Pipeline addChannelBiasNCIdentityFp32;
+    Pipeline addChannelBiasNCReluFp32;
+    Pipeline addChannelBiasNCMishFp32;
+    Pipeline addChannelBiasNCMishScale8Fp32;
+    Pipeline extractChannel0NCHWFp32;
+
+    ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_);
+    ComputePipelines() = delete;
+    ComputePipelines(const ComputePipelines&) = delete;
+    ComputePipelines& operator=(const ComputePipelines&) = delete;
+
+    ~ComputePipelines();
+
+  private :
+    void createPipelines();
+    void destroyPipelines();
+    void destroyPipeline(Pipeline& pipeline);
+    void createPipeline(
+      std::string pipelineName,
+      const unsigned char* spirvBytes,
+      size_t spirvSize,
+      size_t bindingSize,
+      uint32_t pushConstantSize,
+      Pipeline &outPipeline,
+      VkSpecializationInfo* specializationInfo = nullptr
+    );
+    /**
+     * @brief Create a Conv2d Fp32 object
+    */
+    void createConv2dFp32();
+
+    /**
+     * @brief Create Conv2d Tiled Bn + Activation 3x3 Fp32 object
+     */
+    void createConv2dTiledBnAct3x3Fp32();
+
+    /**
+     * @brief Create Conv2d Tiled Bn + Activation 5x5 Fp32 object
+     */
+    void createConv2dTiledBnAct5x5Fp32();
+
+    void createWinogradInputTransform();
+
+    void createWinogradInputTransformBnAct();
+
+    void createWinogradOutputTransform();
+
+    /**
+     * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
+     */
+    // void createConv2d3x3BnFp32();
+
+    /**
+     * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
+     */
+    // void createConv2d3x3BnReluFp32();
+    /**
+     * @brief Create a Conv2d3x3 Bn Mish Fp32 object
+     */
+    // void createConv2d3x3BnMishFp32();
+
+    /**
+     * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
+     */
+    // void createConv2d5x5BnFp32();
+
+    /**
+     * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
+     */
+    // void createConv2d5x5BnReluFp32();
+
+    /**
+     * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
+     */
+    // void createConv2d5x5BnReluFp32();
+
+    /**
+     * @brief Create a Conv2d5x5 Bn Mish Fp32 object
+     */
+    // void createConv2d5x5BnMishFp32();
+
+    /**
+     * @brief Create a Add Point Wise Fp32 object
+     */
+    void createAddPointWiseFp32();
+
+    /**
+     * @brief Create a Matmul Fp32 object
+     */
+    void createMatmulFp32();
+
+    /**
+     * @brief Create a Batched XGEMM Direct Fp32 object
+     */
+    void createBatchedXgemmDirect();
+
+    /**
+     * @brief Create a XGEMM Batched Fp32 object
+     */
+    void createXGEMMBatchedFp32();
+
+     /**
+     * @brief Create a Strided Batched Matmul Fp32 object
+     */
+    void createXGEMMStridedBatchedFp32();
+
+    /**
+     * @brief Create a BatchNorm Mask Fp32 object
+     */
+    void createBatchNormMaskFp32();
+
+    /**
+     * @brief Create a BatchNorm Mask + ReLU Fp32 object
+     */
+    void createBatchNormMaskReluFp32();
+
+    /**
+     * @brief Create a BatchNorm Mask + Mish Fp32 object
+     */
+    void createBatchNormMaskMishFp32();
+
+    /**
+     * @brief Create a BatchNorm Mask + Mish + Scale8 Fp32 object
+     */
+    void createBatchNormMaskMishScale8Fp32();
+
+    /**
+     * @brief Create a Global Average Pool Fp32 object
+     */
+    void createGlobalPoolingChannelsFp32();
+
+    /**
+     * @brief Create a Value Head Pool Channels Fp32 object
+     */
+    void createValueHeadPoolingChannelsFp32();
+
+    /**
+     * @brief Create a Sum Channels Fp32 object
+     */
+    void createSumChannelsFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NCHW Fp32 object
+     */
+    void createAddChannelBiasNCHWFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NC Fp32 object
+     */
+    void createAddChannelBiasNCIdentityFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NC + ReLU Fp32 object
+     */
+    void createAddChannelBiasNCReluFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NC + Mish Fp32 object
+     */
+    void createAddChannelBiasNCMishFp32();
+
+    /**
+     * @brief Create a Add Channel Bias NC + Mish + Scale8 Fp32 object
+     */
+    void createAddChannelBiasNCMishScale8Fp32();
+    
+    /**
+     * @brief Create a Extract Channel 0 NCHW Fp32 object
+     */
+    void createExtractChannel0NCHWFp32();
+  };
 }
 
 #endif

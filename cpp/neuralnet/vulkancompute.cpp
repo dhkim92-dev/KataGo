@@ -118,7 +118,7 @@ std::vector<float> convWeightsToWinogradDomain(
 
 void convInputsToWinogradDomain(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
   VkDescriptorSet descriptorSet,
@@ -154,7 +154,7 @@ void convInputsToWinogradDomain(
   const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
   const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams();
+  auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
   params.nnYLen = nnYLen;
   params.nnXLen = nnXLen;
@@ -206,7 +206,7 @@ void convInputsToWinogradDomain(
 
 void convInputToWinogradDomainBnActMask(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
   VkDescriptorSet descriptorSet,
@@ -250,7 +250,7 @@ void convInputToWinogradDomainBnActMask(
   const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
   const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
-  auto params = KatagoVulkan::WinogradInputTransformParams();
+  auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
   params.nnYLen = nnYLen;
   params.nnXLen = nnXLen;
@@ -289,7 +289,7 @@ void convInputToWinogradDomainBnActMask(
 
 void winogradOutputToSpatialDomain(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
   VkDescriptorSet descriptorSet,
@@ -310,7 +310,7 @@ void winogradOutputToSpatialDomain(
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Output Transform", *result);
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::WinogradOutputTransformParams();
+  auto params = vk_shader::push::WinogradOutputTransformParams();
   params.batchSize = static_cast<int>(batchSize);
   params.ySize = static_cast<int>(nnYLen);
   params.xSize = static_cast<int>(nnXLen);
@@ -359,7 +359,7 @@ void winogradOutputToSpatialDomain(
 
 void xgemmBatched(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
   VkDescriptorSet descriptorSet,
@@ -380,7 +380,7 @@ void xgemmBatched(
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
 
-  auto params = KatagoVulkan::XGEMMBatchedParams();
+  auto params = vk_shader::push::XGEMMBatchedParams();
   params.M = M;
   params.N = N;
   params.K = K;
@@ -424,7 +424,7 @@ void xgemmBatched(
 
 void xgemmStridedBatchedNN(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   const VkCommandBuffer cb,
   const VkDescriptorSet descriptorSet,
@@ -449,7 +449,7 @@ void xgemmStridedBatchedNN(
 
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-  auto params = KatagoVulkan::XgemmStridedBatchedFp32Params();
+  auto params = vk_shader::push::XgemmStridedBatchedFp32Params();
   params.kSizeM = kSizeM;
   params.kSizeN = kSizeN;
   params.kSizeK = kSizeK;
@@ -497,7 +497,7 @@ void xgemmStridedBatchedNN(
 
 void batchedXGemmDirect_MK_NK_MN(
   const VulkanDevice* device,
-  const VulkanTuneParams& tuneParams,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   const VkCommandBuffer cb,
   const VkDescriptorSet descriptorSet,
@@ -519,7 +519,7 @@ void batchedXGemmDirect_MK_NK_MN(
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
     
-    auto params = KatagoVulkan::BatchedXgemmDirectFp32Params();
+    auto params = vk_shader::push::BatchedXgemmDirectFp32Params();
     params.kSizeM = static_cast<uint32_t>(M);
     params.kSizeN = static_cast<uint32_t>(N);
     params.kSizeK = static_cast<uint32_t>(K);
