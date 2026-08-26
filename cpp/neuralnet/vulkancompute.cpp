@@ -169,37 +169,21 @@ void convInputsToWinogradDomain(
   // );
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
-  constexpr uint32_t dim = 3;
-  uint32_t local[dim];
+  const uint32_t localSizeX = pipeline->localSizeX;
+  const uint32_t localSizeY = pipeline->localSizeY;
+  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, localSizeX)) / localSizeX;
+  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, localSizeY)) / localSizeY;
+  uint32_t wgCountZ = 1u;
 
-  if ( convSize == 3 ) {
-    local[0] = tuneParams.conv3x3.inputTransformLocalXSize;
-    local[1] = tuneParams.conv3x3.inputTransformLocalYSize;
-    local[2] = 1;
-  } else {
-    local[0] = tuneParams.conv5x5.inputTransformLocalXSize;
-    local[1] = tuneParams.conv5x5.inputTransformLocalYSize;
-    local[2] = 1;
-  }
-
-  uint32_t global[dim] = {
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, local[0])),
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, local[1])),
-  };
-
-  uint32_t groupCountX = global[0] / local[0];
-  uint32_t groupCountY = global[1] / local[1];  
-
-  groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-  groupCountY = (groupCountY == 0) ? 1 : groupCountY;
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
 
   // std::printf(
   //   "convInputsToWinogradDomain: localSizes = %d,%d globalSizes = %d,%d groupCounts = %d,%d\n",
-  //   local[0], local[1],
-  //   global[0], global[1],
-  //   groupCountX, groupCountY
+  //   localSizeX, localSizeY,
+  //   wgCountX, wgCountY
   // );
-  vkCmdDispatch(cb, groupCountX, groupCountY, 1);
+  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
@@ -261,35 +245,21 @@ void convInputToWinogradDomainBnActMask(
   params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
-  constexpr uint32_t dim = 3;
-  uint32_t local[dim];
-  if ( convSize == 3 ) {
-    local[0] = tuneParams.conv3x3.inputTransformLocalXSize;
-    local[1] = tuneParams.conv3x3.inputTransformLocalYSize;
-    local[2] = 1;
-  } else {
-    local[0] = tuneParams.conv5x5.inputTransformLocalXSize;
-    local[1] = tuneParams.conv5x5.inputTransformLocalYSize;
-    local[2] = 1;
-  }
-  uint32_t global[dim] = {
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, local[0])),
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, local[1])),
-  };
+  const uint32_t localSizeX = pipeline->localSizeX;
+  const uint32_t localSizeY = pipeline->localSizeY;
+  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, localSizeX)) / localSizeX;
+  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, localSizeY)) / localSizeY;
+  uint32_t wgCountZ = 1u;
 
-  uint32_t groupCountX = global[0] / local[0];
-  uint32_t groupCountY = global[1] / local[1];  
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
 
-  groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-  groupCountY = (groupCountY == 0) ? 1 : groupCountY;
-
-  vkCmdDispatch(cb, groupCountX, groupCountY, 1);
+  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
 void winogradOutputToSpatialDomain(
   const VulkanDevice* device,
-  const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
   VkDescriptorSet descriptorSet,
@@ -298,10 +268,8 @@ void winogradOutputToSpatialDomain(
   uint32_t nnYLen, uint32_t nnXLen,
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t outChannels, uint32_t outChannelsPadMultiple,
-  uint32_t convSize,
   VkResult *result
 ) {
-  const uint32_t nKernelDims = 3;
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, convWorkspace2),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
@@ -326,34 +294,21 @@ void winogradOutputToSpatialDomain(
   // );
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
-  uint32_t local[nKernelDims] = {8, 2, 2};
-
-  if ( convSize == 3 ) {
-    local[0] = tuneParams.conv3x3.outputTransformLocalXSize;
-    local[1] = tuneParams.conv3x3.outputTransformLocalYSize;
-    local[2] = tuneParams.conv3x3.outputTransformLocalZSize;
-  } else {
-    local[0] = tuneParams.conv5x5.outputTransformLocalXSize;
-    local[1] = tuneParams.conv5x5.outputTransformLocalYSize;
-    local[2] = tuneParams.conv5x5.outputTransformLocalZSize;
-  }
-  uint32_t global[nKernelDims] = {
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesX)), local[0])),
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesY)), local[1])),
-    static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), local[2]))
-  };
-  uint32_t groupCountX = global[0] / local[0];
-  uint32_t groupCountY = global[1] / local[1];
-  uint32_t groupCountZ = global[2] / local[2];
-  groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-  groupCountY = (groupCountY == 0) ? 1 : groupCountY;
-  groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
+  const uint32_t localSizeX = pipeline->localSizeX;
+  const uint32_t localSizeY = pipeline->localSizeY;
+  const uint32_t localSizeZ = pipeline->localSizeZ;
+  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesX)), localSizeX)) / localSizeX;
+  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesY)), localSizeY)) / localSizeY;
+  uint32_t wgCountZ = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), localSizeZ)) / localSizeZ;
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
+  wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
   // Debug: Log push-constant params and dispatch sizes to help diagnose missing outputs
   // std::printf("[VK WINOGRAD OUT] batchSize=%d ySize=%d xSize=%d numTilesY=%d numTilesX=%d outChannels=%d outChannelsPadded=%d ntxtySizePadded=%d\\n",
   //   params.batchSize, params.ySize, params.xSize, params.numTilesY, params.numTilesX, params.outChannels, params.outChannelsPadded, params.ntxtySizePadded);
   // std::printf("[VK WINOGRAD OUT] local=%u,%u,%u global=%u,%u,%u groups=%u,%u,%u\\n",
-  //   (unsigned)local[0], (unsigned)local[1], (unsigned)local[2], (unsigned)global[0], (unsigned)global[1], (unsigned)global[2], (unsigned)groupCountX, (unsigned)groupCountY, (unsigned)groupCountZ);
-  vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
+  //   (unsigned)localSizeX, (unsigned)localSizeY, (unsigned)localSizeZ, (unsigned)wgCountX, (unsigned)wgCountY, (unsigned)wgCountZ);
+  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
@@ -397,27 +352,24 @@ void xgemmBatched(
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   
-  constexpr uint32_t dim = 3;
-  const uint32_t MDIMC = tuneParams.xgemm.MDIMC;
-  const uint32_t NDIMC = tuneParams.xgemm.NDIMC;
   const uint32_t MWG = tuneParams.xgemm.MWG;
   const uint32_t NWG = tuneParams.xgemm.NWG;
-  uint32_t global[dim] = { M * MDIMC / MWG, N * NDIMC / NWG, numBatchElts };
-  uint32_t local[dim] = {MDIMC, NDIMC, 1};
-  uint32_t groupCountX = global[0] / local[0];
-  uint32_t groupCountY = global[1] / local[1];
-  uint32_t groupCountZ = global[2] / local[2];
-  groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-  groupCountY = (groupCountY == 0) ? 1 : groupCountY;
-  groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
+  const uint32_t localSizeX = pipeline->localSizeX;
+  const uint32_t localSizeY = pipeline->localSizeY;
+  const uint32_t localSizeZ = pipeline->localSizeZ;
+  uint32_t wgCountX = (M * localSizeX / MWG) / localSizeX;
+  uint32_t wgCountY = (N * localSizeY / NWG) / localSizeY;
+  uint32_t wgCountZ = numBatchElts / localSizeZ;
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
+  wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
   
   // std::printf(
   //   "BatchedXGemm_KM_KN_NM: localSizes = %u,%u,%u globalSizes = %u,%u,%u groupCounts = %u,%u,%u\n",
-  //   (unsigned)local[0], (unsigned)local[1], (unsigned)local[2],
-  //   (unsigned)global[0], (unsigned)global[1], (unsigned)global[2],
-  //   (unsigned)groupCountX, (unsigned)groupCountY, (unsigned)groupCountZ
+  //   (unsigned)localSizeX, (unsigned)localSizeY, (unsigned)localSizeZ,
+  //   (unsigned)wgCountX, (unsigned)wgCountY, (unsigned)wgCountZ
   // );
-  vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
+  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
@@ -465,22 +417,21 @@ void xgemmStridedBatchedNN(
   size_t mCeiled = vk_helper::roundUpToMultiple(kSizeM, tuneParams.xgemmDirect.WGD);
   size_t nCeiled = vk_helper::roundUpToMultiple(kSizeN, tuneParams.xgemmDirect.WGD);
   uint32_t global[3] = {
-    static_cast<uint32_t>(mCeiled * tuneParams.xgemmDirect.MDIMCD / tuneParams.xgemmDirect.WGD),
-    static_cast<uint32_t>(nCeiled * tuneParams.xgemmDirect.NDIMCD / tuneParams.xgemmDirect.WGD),
+    static_cast<uint32_t>(mCeiled * pipeline->localSizeX / tuneParams.xgemmDirect.WGD),
+    static_cast<uint32_t>(nCeiled * pipeline->localSizeY / tuneParams.xgemmDirect.WGD),
     static_cast<uint32_t>(numBatchElts)
   };
-  uint32_t local[3] = { tuneParams.xgemmDirect.MDIMCD, tuneParams.xgemmDirect.NDIMCD, 1 };
-  uint32_t groupCountX = global[0] / local[0];
-  uint32_t groupCountY = global[1] / local[1];
-  uint32_t groupCountZ = global[2] / local[2];
-  groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-  groupCountY = (groupCountY == 0) ? 1 : groupCountY;
-  groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
-  vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
+  uint32_t wgCountX = global[0] / pipeline->localSizeX;
+  uint32_t wgCountY = global[1] / pipeline->localSizeY;
+  uint32_t wgCountZ = global[2] / pipeline->localSizeZ;
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
+  wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
+  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, C);
   // Debug: print push-constant params and dispatch sizes for strided batched gemm
   #ifdef VULKAN_API_DEBUG
-  uint32_t localDbg[3] = { (uint32_t)tuneParams.xgemmDirect.MDIMCD, (uint32_t)tuneParams.xgemmDirect.NDIMCD, 1 };
+  uint32_t localDbg[3] = { pipeline->localSizeX, pipeline->localSizeY, pipeline->localSizeZ };
   uint32_t globalDbg[3] = { (uint32_t)mCeiled, (uint32_t)nCeiled, numBatchElts };
   uint32_t groupX = (globalDbg[0] + localDbg[0] - 1) / localDbg[0];
   uint32_t groupY = (globalDbg[1] + localDbg[1] - 1) / localDbg[1];
@@ -530,24 +481,20 @@ void batchedXGemmDirect_MK_NK_MN(
     vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
     const uint32_t WGD = tuneParams.xgemmDirect.WGD;
-    const uint32_t MDIMCD = tuneParams.xgemmDirect.MDIMCD;
-    const uint32_t NDIMCD = tuneParams.xgemmDirect.NDIMCD;
-
     size_t mCeiled = vk_helper::roundUpToMultiple(M, WGD);
     size_t nCeiled = vk_helper::roundUpToMultiple(N, WGD);
     uint32_t global[3] = {
-      static_cast<uint32_t>(mCeiled * MDIMCD / WGD),
-      static_cast<uint32_t>(nCeiled * NDIMCD / WGD),
+      static_cast<uint32_t>(mCeiled * pipeline->localSizeX / WGD),
+      static_cast<uint32_t>(nCeiled * pipeline->localSizeY / WGD),
       static_cast<uint32_t>(numBatchElts)
     };
-    uint32_t local[3] = { MDIMCD, NDIMCD, 1 };
-    uint32_t groupCountX = global[0] / local[0];
-    uint32_t groupCountY = global[1] / local[1];
-    uint32_t groupCountZ = global[2] / local[2];
-    groupCountX = (groupCountX == 0) ? 1 : groupCountX;
-    groupCountY = (groupCountY == 0) ? 1 : groupCountY;
-    groupCountZ = (groupCountZ == 0) ? 1 : groupCountZ;
-    vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
+    uint32_t wgCountX = global[0] / pipeline->localSizeX;
+    uint32_t wgCountY = global[1] / pipeline->localSizeY;
+    uint32_t wgCountZ = global[2] / pipeline->localSizeZ;
+    wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+    wgCountY = (wgCountY == 0) ? 1 : wgCountY;
+    wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 

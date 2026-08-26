@@ -228,7 +228,6 @@ namespace {
       if(result == VK_SUCCESS) {
         vkcompute::winogradOutputToSpatialDomain(
           device,
-          params,
           &outputPipeline,
           commandBuffer,
           outputSet,
@@ -242,7 +241,6 @@ namespace {
           params.xgemm.MWG,
           channels,
           params.xgemm.NWG,
-          convSize,
           &result);
       }
       verifiedOutputs.push_back({transformed, inputWorkspaceFloats});

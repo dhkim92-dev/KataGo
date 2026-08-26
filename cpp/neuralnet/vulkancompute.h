@@ -69,7 +69,6 @@ namespace vkcompute {
 
   void winogradOutputToSpatialDomain(
     const VulkanDevice* device,
-    const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
     VkCommandBuffer cb,
     VkDescriptorSet descriptorSet,
@@ -78,7 +77,6 @@ namespace vkcompute {
     uint32_t nnYLen, uint32_t nnXLen,
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t outChannels, uint32_t outChannelsPadMultiple,
-    uint32_t convSize,
     VkResult *result
   ); 
 

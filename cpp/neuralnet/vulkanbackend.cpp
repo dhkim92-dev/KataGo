@@ -12,7 +12,6 @@
 #include "../core/simpleallocator.h"
 #include "../core/test.h"
 #include "../core/using.h"
-#include "../external/vulkan/shaders/glsl/common.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/modelversion.h"
 #include "../neuralnet/nneval.h"
@@ -537,14 +536,16 @@ private:
       nullptr
     );
 
-    // Optimized Matmul uses numthreads(MATMUL_THREAD_M=16, MATMUL_THREAD_N=16) with register tiling
-    // Each thread computes MATMUL_WORK_M=4 x MATMUL_WORK_N=4 outputs
-    // Workgroup tile size: TILE_M=64 (16*4), TILE_N=64 (16*4)
+    // Each invocation computes a fixed 4x4 register tile, so one workgroup covers
+    // four times its specialized local size in each output dimension.
     // HLSL: GId.x = groupM (M axis), GId.y = groupN (N axis)
-    uint32_t groupCountX = (static_cast<uint32_t>(batchSize) + MATMUL_TILE_M - 1) / MATMUL_TILE_M;  // M Direction
-    uint32_t groupCountY = (static_cast<uint32_t>(outChannels) + MATMUL_TILE_N - 1) / MATMUL_TILE_N; // N Direction
+    const uint32_t matmulTileX = pipelines->matmulFp32.localSizeX * 4u;
+    const uint32_t matmulTileY = pipelines->matmulFp32.localSizeY * 4u;
+    uint32_t wgCountX = (static_cast<uint32_t>(batchSize) + matmulTileX - 1u) / matmulTileX;
+    uint32_t wgCountY = (static_cast<uint32_t>(outChannels) + matmulTileY - 1u) / matmulTileY;
+    uint32_t wgCountZ = 1u;
     SHADER_PROFILE_START("MATMUL_FP32", cb);
-    vkCmdDispatch(cb, groupCountX, groupCountY, 1);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("MATMUL_FP32", cb);
   }
 
@@ -601,9 +602,6 @@ struct BatchNormLayer {
 
   VulkanBuffer* mergedScaleBuf;
   VulkanBuffer* mergedBiasBuf;
-
-  static constexpr int nKernelDims = 2;
-  size_t globalSizes[nKernelDims];
 
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
 
@@ -673,11 +671,6 @@ struct BatchNormLayer {
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
 
-    // globalSizes are dispatch group counts, computed by dividing problem size by local workgroup size
-    // BatchNorm uses numthreads(BN_DISPATCH_X=32, BN_DISPATCH_Y=8, BN_DISPATCH_Z=1)
-    // Thread mapping optimized for memory coalescing: x->spatial, y->channel, z->batch
-    globalSizes[0] = (static_cast<size_t>(nnXYLen) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
-    globalSizes[1] = (static_cast<size_t>(numChannels) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
   }
 
   void forward(
@@ -736,12 +729,13 @@ struct BatchNormLayer {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BatchNormMaskParams), &pushConstants);
     // Dispatch: x=spatial, y=channels, z=batch (optimized for memory coalescing in NCHW layout)
-    // Shader uses numthreads(BN_DISPATCH_X=32, BN_DISPATCH_Y=8, BN_DISPATCH_Z=1)
-    uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + BN_DISPATCH_X - 1) / BN_DISPATCH_X;
-    uint32_t dispatchY = (static_cast<uint32_t>(numChannels) + BN_DISPATCH_Y - 1) / BN_DISPATCH_Y;
-    uint32_t dispatchZ = static_cast<uint32_t>(batchSize);
+    const uint32_t localSizeX = targetPipeline.localSizeX;
+    const uint32_t localSizeY = targetPipeline.localSizeY;
+    uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + localSizeX - 1u) / localSizeX;
+    uint32_t wgCountY = (static_cast<uint32_t>(numChannels) + localSizeY - 1u) / localSizeY;
+    uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
     SHADER_PROFILE_START("BATCHNORM_MASK_FP32", cb);
-    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("BATCHNORM_MASK_FP32", cb);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     // res = vk_helper::endCommandBuffer(cb);
@@ -1033,17 +1027,14 @@ struct ConvLayer {
 
     vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Conv2DTiledBnActParams), &pushConstants);
 
-    // Compute dispatch dimensions using macros from common.h
-    // CONV_BNACT_TILE_X: output X positions per workgroup
-    // CONV_BNACT_TILE_Y: output Y positions per workgroup (2D spatial tiling)
-    // CONV_BNACT_TILE_OC: output channels per workgroup
-    uint32_t dispatchX = (pushConstants.nnXLen + CONV_BNACT_TILE_X - 1u) / CONV_BNACT_TILE_X;
-    uint32_t dispatchY = (pushConstants.nnYLen + CONV_BNACT_TILE_Y - 1u) / CONV_BNACT_TILE_Y;
-    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + CONV_BNACT_TILE_OC - 1u) / CONV_BNACT_TILE_OC;
-    uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
+    const uint32_t outputTileY = 8u;
+    uint32_t wgCountX = (pushConstants.nnXLen + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+    uint32_t wgCountY = (pushConstants.nnYLen + outputTileY - 1u) / outputTileY;
+    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
+    uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
 
     SHADER_PROFILE_START(shaderName, cb);
-    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END(shaderName, cb);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     vk_helper::barrierCommandBuffer(cb);
@@ -1104,16 +1095,12 @@ struct ConvLayer {
       &pushConstants
     );
 
-    // Compute dispatch dimensions using macros from common.h
-    // CONV_2D_TILE_X: output X positions per workgroup
-    // CONV_2D_TILE_Y: output Y positions per workgroup (2D spatial tiling)
-    // CONV_2D_TILE_OC: output channels per workgroup
-    uint32_t dispatchX = (pushConstants.nnXLen + CONV_2D_TILE_X - 1u) / CONV_2D_TILE_X;
-    uint32_t dispatchY = (pushConstants.nnYLen + CONV_2D_TILE_Y - 1u) / CONV_2D_TILE_Y;
-    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + CONV_2D_TILE_OC - 1u) / CONV_2D_TILE_OC;
-    uint32_t dispatchZ = pushConstants.batchSize * ocGroupsPerBatch;
+    uint32_t wgCountX = (pushConstants.nnXLen + pipelines->conv2dFp32.localSizeX - 1u) / pipelines->conv2dFp32.localSizeX;
+    uint32_t wgCountY = (pushConstants.nnYLen + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
+    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
+    uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
     SHADER_PROFILE_START("CONV2D_TILED_FP32", cb);
-    vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("CONV2D_TILED_FP32", cb);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     vk_helper::barrierCommandBuffer(cb);
@@ -1290,7 +1277,6 @@ struct ConvLayer {
       SHADER_PROFILE_START("WINOGRAD_OUTPUT_TRANSFORM", cb);
       vkcompute::winogradOutputToSpatialDomain(
         handle->vulkanDevice,
-        handle->tuneParams,
         &winogradOutputTransformPipeline,
         cb,
         winogradOutputTransformDS,
@@ -1299,7 +1285,6 @@ struct ConvLayer {
         nnYLen, nnXLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
         outChannels, handle->getXGemmNPaddingMult(),
-        convYSize,
         &res
       );
       SHADER_PROFILE_END("WINOGRAD_OUTPUT_TRANSFORM", cb);
@@ -1407,7 +1392,6 @@ struct ConvLayer {
       SHADER_PROFILE_START("WINOGRAD_OUTPUT_TRANSFORM", cb);
       vkcompute::winogradOutputToSpatialDomain(
         device,
-        handle->tuneParams,
         &outputTransformPipeline,
         cb,
         winogradOutputTransformDS,
@@ -1416,7 +1400,6 @@ struct ConvLayer {
         nnYLen, nnXLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
         outChannels, handle->getXGemmNPaddingMult(),
-        convYSize,
         &res
       );
       SHADER_PROFILE_END("WINOGRAD_OUTPUT_TRANSFORM", cb);
@@ -1657,9 +1640,11 @@ struct MatBiasLayer {
 
     // 1D dispatch: total elements = batchSize * numChannels
     uint32_t totalSize = static_cast<uint32_t>(batchSize) * static_cast<uint32_t>(numChannels);
-    uint32_t dispatchX = (totalSize + ADD_CHANNEL_BIAS_NC_THREADS - 1) / ADD_CHANNEL_BIAS_NC_THREADS;
+    uint32_t wgCountX = (totalSize + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+    uint32_t wgCountY = 1u;
+    uint32_t wgCountZ = 1u;
     SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NC_FP32", cb);
-    vkCmdDispatch(cb, dispatchX, 1, 1);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NC_FP32", cb);
     vk_helper::barrierCommandBuffer(cb);
       vk_helper::barrierCommandBufferForBuffer(cb, input);
@@ -1794,7 +1779,6 @@ void performExtractChannel0NCHW(
   int nnXYLen,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 2;
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
@@ -1842,12 +1826,12 @@ void performExtractChannel0NCHW(
     sizeof(ExtractChannel0NCHWParams),
     &pushConstants
   );
-  // ExtractChannel0 uses numthreads(EXTRACT_CHANNEL0_DISPATCH_X=64, EXTRACT_CHANNEL0_DISPATCH_Y=1)
   // Thread mapping: x->spatial, y->batch
-  uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + EXTRACT_CHANNEL0_DISPATCH_X - 1) / EXTRACT_CHANNEL0_DISPATCH_X;
-  uint32_t dispatchY = static_cast<uint32_t>(batchSIze);
+  uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+  uint32_t wgCountY = (static_cast<uint32_t>(batchSIze) + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
+  uint32_t wgCountZ = 1u;
   SHADER_PROFILE_START("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, output);
 
@@ -1867,11 +1851,6 @@ void performAddChannelBiases(
   int nnXYLen,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 2;
-  size_t globalSizes[nKernelDims] = {
-    vk_helper::powerOf2ify(static_cast<size_t>(nnXYLen)),
-    vk_helper::powerOf2ify(static_cast<size_t>(ncSize))
-  };
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->addChannelBiasNCHWFp32;
@@ -1921,12 +1900,11 @@ void performAddChannelBiases(
     sizeof(AddChannelBiasNCHWParams),
     &pushConstants
   );
-  // Dispatch count = ceil(size / workgroupSize)
-  // AddChannelBias NCHW shader uses numthreads(ADD_CHANNELS_DISPATCH_X=16, ADD_CHANNELS_DISPATCH_Y=16, 1)
-  uint32_t dispatchX = (static_cast<uint32_t>(nnXYLen) + ADD_CHANNELS_DISPATCH_X - 1) / ADD_CHANNELS_DISPATCH_X;
-  uint32_t dispatchY = (static_cast<uint32_t>(ncSize) + ADD_CHANNELS_DISPATCH_Y - 1) / ADD_CHANNELS_DISPATCH_Y;
+  uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+  uint32_t wgCountY = (static_cast<uint32_t>(ncSize) + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
+  uint32_t wgCountZ = 1u;
   SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, input);
   if ( begin ) {
@@ -1944,10 +1922,6 @@ void performAddPointWise(
   int totalSize,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 1;
-  size_t globalSizes[nKernelDims] = {
-    vk_helper::powerOf2ify(static_cast<size_t>(totalSize))
-  };
   if( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
@@ -1995,10 +1969,12 @@ void performAddPointWise(
     sizeof(AddPointWiseParams),
     &pushConstants
   );
-  // AddPointWise shader uses numthreads(ADD_POINTWISE_DISPATCH_X=256, 1, 1)
-  uint32_t groupCountX = (static_cast<uint32_t>(totalSize) + ADD_POINTWISE_DISPATCH_X - 1) / ADD_POINTWISE_DISPATCH_X;
+  const Pipeline& targetPipeline = pipelines->addPointWiseFp32;
+  uint32_t wgCountX = (static_cast<uint32_t>(totalSize) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+  uint32_t wgCountY = 1u;
+  uint32_t wgCountZ = 1u;
   SHADER_PROFILE_START("ADD_POINTWISE_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, groupCountX, 1, 1);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("ADD_POINTWISE_FP32", commandBuffer);
   vk_helper::barrierCommandBuffer(commandBuffer);
     vk_helper::barrierCommandBufferForBuffer(commandBuffer, acc);
@@ -2021,8 +1997,6 @@ void performGpoolMask(
   VkResult* result,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 3;
-  static constexpr int localSizes[nKernelDims] = {1, 1, 1};
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   if ( commandBuffer == VK_NULL_HANDLE ) {
@@ -2074,15 +2048,14 @@ void performGpoolMask(
     &pushConstants
   );
 
-  // GlobalPooling shader uses numthreads(POOLING_DISPATCH_X=128, 1, 1)
   // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
   // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
   // Since Vulkan shader has fixed numthreads with Y,Z=1, dispatch Y,Z directly equals channel and batch counts
-  uint32_t groupCountX = 1u;
-  uint32_t groupCountY = static_cast<uint32_t>(gpoolChannels);
-  uint32_t groupCountZ = static_cast<uint32_t>(batchSize);
+  uint32_t wgCountX = 1u;
+  uint32_t wgCountY = static_cast<uint32_t>(gpoolChannels);
+  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
   SHADER_PROFILE_START("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
   vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
@@ -2107,8 +2080,6 @@ void performValueHeadPool(
   int nnXYLen,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 3;
-  static constexpr int localSizes[nKernelDims] = {1, 1, 1};
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
@@ -2158,14 +2129,13 @@ void performValueHeadPool(
     sizeof(ValueHeadPoolingChannelsParams),
     &pushConstants
   );
-  // ValueHeadPool shader uses numthreads(POOLING_DISPATCH_X=128, 1, 1)
   // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
   // Same pattern as GlobalPooling - each workgroup processes one (batch, channel) pair
-  uint32_t groupCountX = 1u;
-  uint32_t groupCountY = static_cast<uint32_t>(valueHeadChannels);
-  uint32_t groupCountZ = static_cast<uint32_t>(batchSize);
+  uint32_t wgCountX = 1u;
+  uint32_t wgCountY = static_cast<uint32_t>(valueHeadChannels);
+  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
   SHADER_PROFILE_START("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
   vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
@@ -3178,8 +3148,7 @@ void computeMaskSums(
   VulkanBuffer* maskSum,
   bool begin = true
 ) {
-  static constexpr int nKernelDims = 3;
-  // SumChannels shader uses numthreads(SUM_CHANNELS_DISPATCH_X=128, 1, 1)
+  // SumChannels uses one workgroup for each (batch, channel) reduction.
   // Dispatch: X=1 (single workgroup for reduction), Y=numChannels, Z=batchSize
   // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
   // VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -3218,7 +3187,10 @@ void computeMaskSums(
   pushConstants.nnXYLen = nnXYLen;
   vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SumChannelsParams), &pushConstants);
   // Dispatch: X=1 (reduction), Y=numChannels(=1 for mask sum), Z=batchSize
-  vkCmdDispatch(commandBuffer, 1u, static_cast<uint32_t>(numChannels), static_cast<uint32_t>(batchSize));
+  uint32_t wgCountX = 1u;
+  uint32_t wgCountY = static_cast<uint32_t>(numChannels);
+  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
 
