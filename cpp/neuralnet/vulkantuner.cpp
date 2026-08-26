@@ -74,7 +74,7 @@ namespace {
       if(fence != VK_NULL_HANDLE)
         vkDestroyFence(device->device, fence, nullptr);
       for(VulkanBuffer* buffer: buffers)
-        VkHelpers::releaseVulkanBuffer(device, buffer);
+        vk_helper::releaseVulkanBuffer(device, buffer);
       delete pipelines;
       vkResetDescriptorPool(device->device, device->descriptorPool, 0);
       vkResetCommandPool(device->device, device->commandPool, 0);
@@ -100,18 +100,18 @@ namespace {
     }
 
     const auto makeBuffer = [&](size_t numFloats) -> VulkanBuffer* {
-      VulkanBuffer* buffer = VkHelpers::createDeviceBuffer(device, numFloats * sizeof(float), false, &result);
+      VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, numFloats * sizeof(float), false, &result);
       if(result == VK_SUCCESS && buffer != nullptr)
         buffers.push_back(buffer);
       return buffer;
     };
 
-    commandBuffer = VkHelpers::allocateCommandBuffer(device, &result);
+    commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
     if(result != VK_SUCCESS || commandBuffer == VK_NULL_HANDLE)
-      return reject("command buffer allocation failed: " + VkHelpers::vkErrorToString(result));
-    result = VkHelpers::beginCommandBuffer(commandBuffer);
+      return reject("command buffer allocation failed: " + vk_helper::vkErrorToString(result));
+    result = vk_helper::beginCommandBuffer(commandBuffer);
     if(result != VK_SUCCESS)
-      return reject("command buffer begin failed: " + VkHelpers::vkErrorToString(result));
+      return reject("command buffer begin failed: " + vk_helper::vkErrorToString(result));
 
     vector<pair<VulkanBuffer*, size_t>> verifiedOutputs;
     const uint32_t channels = static_cast<uint32_t>(std::max(32, trunkChannels));
@@ -125,15 +125,15 @@ namespace {
       VulkanBuffer* b = makeBuffer(static_cast<size_t>(n) * k * batches);
       VulkanBuffer* c = makeBuffer(static_cast<size_t>(m) * n * batches);
       if(result != VK_SUCCESS || a == nullptr || b == nullptr || c == nullptr)
-        return reject("XGEMM buffer allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("XGEMM buffer allocation failed: " + vk_helper::vkErrorToString(result));
       vkCmdFillBuffer(commandBuffer, a->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, b->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, c->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      VkHelpers::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
       VkDescriptorSet descriptorSet =
-        VkHelpers::allocateDescriptorSet(device, pipelines->xgemmBatchedFp32.descriptorSetLayout, &result);
+        vk_helper::allocateDescriptorSet(device, pipelines->xgemmBatchedFp32.descriptorSetLayout, &result);
       if(result != VK_SUCCESS)
-        return reject("XGEMM descriptor allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("XGEMM descriptor allocation failed: " + vk_helper::vkErrorToString(result));
       vkcompute::xgemmBatched(
         device, params, &pipelines->xgemmBatchedFp32, commandBuffer, descriptorSet, m, n, k, a, b, c, batches, &result);
       verifiedOutputs.push_back({c, static_cast<size_t>(m) * n * batches});
@@ -145,15 +145,15 @@ namespace {
       VulkanBuffer* b = makeBuffer(static_cast<size_t>(n) * k);
       VulkanBuffer* c = makeBuffer(static_cast<size_t>(m) * n);
       if(result != VK_SUCCESS || a == nullptr || b == nullptr || c == nullptr)
-        return reject("direct XGEMM buffer allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("direct XGEMM buffer allocation failed: " + vk_helper::vkErrorToString(result));
       vkCmdFillBuffer(commandBuffer, a->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, b->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, c->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      VkHelpers::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
       VkDescriptorSet descriptorSet =
-        VkHelpers::allocateDescriptorSet(device, pipelines->batchedXgemmDirect.descriptorSetLayout, &result);
+        vk_helper::allocateDescriptorSet(device, pipelines->batchedXgemmDirect.descriptorSetLayout, &result);
       if(result != VK_SUCCESS)
-        return reject("direct XGEMM descriptor allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("direct XGEMM descriptor allocation failed: " + vk_helper::vkErrorToString(result));
       vkcompute::batchedXGemmDirect_MK_NK_MN(
         device,
         params,
@@ -189,22 +189,22 @@ namespace {
       if(
         result != VK_SUCCESS || input == nullptr || transformed == nullptr || outputTransformInput == nullptr ||
         output == nullptr)
-        return reject("Winograd buffer allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("Winograd buffer allocation failed: " + vk_helper::vkErrorToString(result));
       vkCmdFillBuffer(commandBuffer, input->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, transformed->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
       vkCmdFillBuffer(commandBuffer, outputTransformInput->buffer, 0, VK_WHOLE_SIZE, 0);
       vkCmdFillBuffer(commandBuffer, output->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      VkHelpers::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
       const Pipeline& inputPipeline =
         is3x3 ? pipelines->winogradInputTransform3x3 : pipelines->winogradInputTransform5x5;
       const Pipeline& outputPipeline =
         is3x3 ? pipelines->winogradOutputTransform3x3 : pipelines->winogradOutputTransform5x5;
-      VkDescriptorSet inputSet = VkHelpers::allocateDescriptorSet(device, inputPipeline.descriptorSetLayout, &result);
+      VkDescriptorSet inputSet = vk_helper::allocateDescriptorSet(device, inputPipeline.descriptorSetLayout, &result);
       if(result != VK_SUCCESS)
-        return reject("Winograd input descriptor allocation failed: " + VkHelpers::vkErrorToString(result));
-      VkDescriptorSet outputSet = VkHelpers::allocateDescriptorSet(device, outputPipeline.descriptorSetLayout, &result);
+        return reject("Winograd input descriptor allocation failed: " + vk_helper::vkErrorToString(result));
+      VkDescriptorSet outputSet = vk_helper::allocateDescriptorSet(device, outputPipeline.descriptorSetLayout, &result);
       if(result != VK_SUCCESS)
-        return reject("Winograd output descriptor allocation failed: " + VkHelpers::vkErrorToString(result));
+        return reject("Winograd output descriptor allocation failed: " + vk_helper::vkErrorToString(result));
       vkcompute::convInputsToWinogradDomain(
         device,
         params,
@@ -248,18 +248,18 @@ namespace {
         {output, static_cast<size_t>(VulkanTuner::DEFAULT_BATCH_SIZE) * nnXLen * nnYLen * channels});
     }
     if(result != VK_SUCCESS)
-      return reject("candidate command recording failed: " + VkHelpers::vkErrorToString(result));
+      return reject("candidate command recording failed: " + vk_helper::vkErrorToString(result));
 
     size_t verifiedFloats = 0;
     for(const auto& output: verifiedOutputs)
       verifiedFloats += output.second;
-    VulkanBuffer* readback = VkHelpers::createReadbackBuffer(device, verifiedFloats * sizeof(float), &result);
+    VulkanBuffer* readback = vk_helper::createReadbackBuffer(device, verifiedFloats * sizeof(float), &result);
     if(result != VK_SUCCESS || readback == nullptr)
-      return reject("readback buffer allocation failed: " + VkHelpers::vkErrorToString(result));
+      return reject("readback buffer allocation failed: " + vk_helper::vkErrorToString(result));
     buffers.push_back(readback);
     VkDeviceSize readbackOffset = 0;
     for(const auto& output: verifiedOutputs) {
-      VkHelpers::barrierCommandBufferForBuffer(
+      vk_helper::barrierCommandBufferForBuffer(
         commandBuffer,
         output.first,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -272,15 +272,15 @@ namespace {
       vkCmdCopyBuffer(commandBuffer, output.first->buffer, readback->buffer, 1, &copyRegion);
       readbackOffset += copyRegion.size;
     }
-    result = VkHelpers::endCommandBuffer(commandBuffer);
+    result = vk_helper::endCommandBuffer(commandBuffer);
     if(result != VK_SUCCESS)
-      return reject("command buffer end failed: " + VkHelpers::vkErrorToString(result));
+      return reject("command buffer end failed: " + vk_helper::vkErrorToString(result));
 
     VkFenceCreateInfo fenceInfo = {};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
     if(result != VK_SUCCESS)
-      return reject("fence creation failed: " + VkHelpers::vkErrorToString(result));
+      return reject("fence creation failed: " + vk_helper::vkErrorToString(result));
 
     double totalMilliseconds = 0.0;
     constexpr int warmupRuns = 1;
@@ -289,7 +289,7 @@ namespace {
       result = vkResetFences(device->device, 1, &fence);
       if(result == VK_SUCCESS) {
         auto start = chrono::steady_clock::now();
-        result = VkHelpers::submitCommandBuffers(device, {commandBuffer}, fence);
+        result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
         if(result == VK_SUCCESS)
           result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, 5000000000ULL);
         auto end = chrono::steady_clock::now();
@@ -300,16 +300,16 @@ namespace {
         if(isDeviceFailure(result)) {
           cleanupAfterDeviceFailure();
           return {
-            CandidateStatus::RecreateDevice, 0.0, "candidate execution failed: " + VkHelpers::vkErrorToString(result)};
+            CandidateStatus::RecreateDevice, 0.0, "candidate execution failed: " + vk_helper::vkErrorToString(result)};
         }
-        return reject("candidate execution failed: " + VkHelpers::vkErrorToString(result));
+        return reject("candidate execution failed: " + vk_helper::vkErrorToString(result));
       }
     }
 
     void* mapped = nullptr;
     result = vmaMapMemory(device->allocator, readback->allocation, &mapped);
     if(result != VK_SUCCESS)
-      return reject("readback map failed: " + VkHelpers::vkErrorToString(result));
+      return reject("readback map failed: " + vk_helper::vkErrorToString(result));
     vmaInvalidateAllocation(device->allocator, readback->allocation, 0, VK_WHOLE_SIZE);
     const float* values = static_cast<const float*>(mapped);
     bool correct = true;

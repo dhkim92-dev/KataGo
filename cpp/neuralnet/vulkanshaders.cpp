@@ -5,7 +5,7 @@
  */
 #include "../neuralnet/vulkanshaders.h"
 
-namespace VkSPIRVShaders {
+namespace vk_shader {
 
   // conv2d_fp32
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;

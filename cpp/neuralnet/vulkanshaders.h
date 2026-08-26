@@ -137,7 +137,7 @@ extern "C" {
  * Provides convenient access to embedded shader bytecode.
  * NCHW is the default data layout unless otherwise specified.
  */
-namespace VkSPIRVShaders {
+namespace vk_shader {
 
   // conv2d_fp32 - Direct convolution layer
   extern const unsigned char* spirv_conv2d_fp32;

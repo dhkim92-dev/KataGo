@@ -109,7 +109,7 @@ static void printDeviceBuffer(
 if ( globalBatchCount > 1 ) {
   VkResult res;
   std::vector<float> hostBuffer(numElts);
-  VkHelpers::copyDeviceBufferToHost(
+  vk_helper::copyDeviceBufferToHost(
     device,
     buffer,
     numElts * sizeof(float),
@@ -150,7 +150,7 @@ static void printDeviceBufferIndices(
 #ifdef VULKAN_API_DEBUG
   VkResult res;
   std::vector<float> hostBuffer(numElts);
-  VkHelpers::copyDeviceBufferToHost(
+  vk_helper::copyDeviceBufferToHost(
     device,
     buffer,
     numElts * sizeof(float),
@@ -201,8 +201,8 @@ struct ComputeContext {
     gIdx(gpuIdxsToUse),
     logger(logger_)
      {
-      VkInstance instance = VkHelpers::createVulkanInstance();
-      std::vector<VulkanDeviceInfo> allDeviceInfos = VkHelpers::enumerateVulkanDevices(instance, logger);
+      VkInstance instance = vk_helper::createVulkanInstance();
+      std::vector<VulkanDeviceInfo> allDeviceInfos = vk_helper::enumerateVulkanDevices(instance, logger);
       std::vector<VulkanDevice *> vulkanDevices = {};
 
       if ( gpuIdxsToUse.size() == 1 && gpuIdxsToUse[0] == UINT32_MAX ) {
@@ -246,7 +246,7 @@ struct ComputeContext {
           requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
         }
 
-        VulkanDevice* vulkanDevice = VkHelpers::createVulkanDevice(
+        VulkanDevice* vulkanDevice = vk_helper::createVulkanDevice(
           instance,
           deviceInfo,
           requiredExtensions,
@@ -257,7 +257,7 @@ struct ComputeContext {
           VulkanTuneParams tuneParams;
           if(modelInfo != nullptr) {
             const auto recreateDevice = [&]() {
-              return VkHelpers::createVulkanDevice(instance,deviceInfo,requiredExtensions,logger);
+              return vk_helper::createVulkanDevice(instance,deviceInfo,requiredExtensions,logger);
             };
             tuneParams = VulkanTuner::loadOrAutoTune(
               tunerFile,homeDataDirOverride,vulkanDevice,recreateDevice,
@@ -415,7 +415,7 @@ struct MatmulLayer {
       }
       VkResult res;
       // printFloatBuffer("MatmulLayer " + name + " weights: ", weights.data(), weights.size(), 1, outChannels, 1, inChannels);
-      matBuf = VkHelpers::createDeviceBufferWithData(
+      matBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * weights.size(),
         weights.data(),
@@ -431,7 +431,7 @@ struct MatmulLayer {
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( matBuf != nullptr ) {
-      VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, matBuf);
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, matBuf);
       matBuf = nullptr;
     }
     #ifdef VULKAN_API_DEBUG
@@ -444,14 +444,14 @@ struct MatmulLayer {
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
-    VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     // printDeviceBuffer(name + " input", handle->vulkanDevice, input, batchSize * inChannels);
-    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
     // doMatmulFp32(commandBuffer, batchSize, input, output);
     doBatchedXGEMMDirectFP32_MK_NK_MN(commandBuffer, batchSize, input, output);
-    res = VkHelpers::endCommandBuffer(commandBuffer);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
     std::printf("Debug MatmulLayer: %s, batchSize: %d, inChannels: %d, outChannels: %d\n", name.c_str(), batchSize, inChannels, outChannels);
     printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, batchSize * outChannels, true);
@@ -472,8 +472,8 @@ struct MatmulLayer {
     assert(cb != VK_NULL_HANDLE);
     // doMatmulFp32(cb, batchSize, input, output);
     doBatchedXGEMMDirectFP32_MK_NK_MN(cb, batchSize, input, output);
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    VkHelpers::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBuffer(cb);
   }
 
 private:
@@ -487,7 +487,7 @@ private:
     auto *pipelines = handle->context->pipelinesPerDev.at(gpuId);
     VkResult res;
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         pipelines->matmulFp32.descriptorSetLayout,
         &res
@@ -497,11 +497,11 @@ private:
 
     // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, matBuf),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, output)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, matBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
     };
-    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
     auto pushConstants = KatagoVulkan::MatmulFp32Params();
     pushConstants.M = static_cast<uint32_t>(batchSize);
@@ -557,7 +557,7 @@ private:
     SHADER_PROFILE_START("BATCHED_XGEMM_DIRECT_FP32", cb);
     Pipeline pipeline = pipelines->batchedXgemmDirect;
     if( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         pipeline.descriptorSetLayout,
         &res
@@ -575,8 +575,8 @@ private:
       1, &res
     );
     SHADER_PROFILE_END("BATCHED_XGEMM_DIRECT_FP32", cb);
-    // VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    VkHelpers::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBuffer(cb);
   }
 };
 
@@ -609,12 +609,12 @@ struct BatchNormLayer {
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( mergedScaleBuf != nullptr ) {
-      VkHelpers::releaseVulkanBuffer(mergedScaleBuf->device, mergedScaleBuf);
+      vk_helper::releaseVulkanBuffer(mergedScaleBuf->device, mergedScaleBuf);
       // delete mergedScaleBuf;
       mergedScaleBuf = nullptr;
     }
     if ( mergedBiasBuf != nullptr ) {
-      VkHelpers::releaseVulkanBuffer(mergedBiasBuf->device, mergedBiasBuf);
+      vk_helper::releaseVulkanBuffer(mergedBiasBuf->device, mergedBiasBuf);
       // delete mergedBiasBuf;
       mergedBiasBuf = nullptr;
     }
@@ -652,7 +652,7 @@ struct BatchNormLayer {
 
     VkResult res;
 
-    mergedBiasBuf = VkHelpers::createDeviceBufferWithData(
+    mergedBiasBuf = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       sizeof(float) * mergedBias.size(),
       mergedBias.data(),
@@ -661,7 +661,7 @@ struct BatchNormLayer {
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged bias buffer", res);
 
-    mergedScaleBuf = VkHelpers::createDeviceBufferWithData(
+    mergedScaleBuf = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       sizeof(float) * mergedScale.size(),
       mergedScale.data(),
@@ -708,7 +708,7 @@ struct BatchNormLayer {
     }
 
     if (descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         targetPipeline.descriptorSetLayout,
         &res
@@ -717,13 +717,13 @@ struct BatchNormLayer {
     }
       // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, mask),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, mergedScaleBuf),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, mergedBiasBuf),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 4, output)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, mask),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mergedScaleBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, mergedBiasBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, output)
     };
-    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
     KatagoVulkan::BatchNormMaskParams pushConstants = {};
     pushConstants.batchSize = static_cast<uint32_t>(batchSize);
@@ -740,8 +740,8 @@ struct BatchNormLayer {
     SHADER_PROFILE_START("BATCHNORM_MASK_FP32", cb);
     vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
     SHADER_PROFILE_END("BATCHNORM_MASK_FP32", cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    // res = VkHelpers::endCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    // res = vk_helper::endCommandBuffer(cb);
 
     // CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
   }
@@ -759,12 +759,12 @@ struct BatchNormLayer {
     VulkanBuffer* mask,
     VulkanBuffer* output
   ) {
-    VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     std::vector<float> inputCopy(static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
     forward(commandBuffer, batchSize, input, mask, output);
-    res = VkHelpers::endCommandBuffer(commandBuffer);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
   }
 };
@@ -857,8 +857,8 @@ struct ConvLayer {
 
     // For 1x1 conv, transpose weights from [OC][IC] to [IC][OC] for KM_KN_NM matmul convention
     // This matches OpenCL's transWeights layout for 1x1 convolutions
-    int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
-    int outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
     if (convXSize == 1 && convYSize == 1) {
       std::vector<float> transWeights(inChannels * outChannels);
       for (int oc = 0; oc < outChannels; oc++) {
@@ -866,7 +866,7 @@ struct ConvLayer {
           transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
         }
       }
-      filterBuf = VkHelpers::createDeviceBufferWithData(
+      filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * transWeights.size(),
         transWeights.data(),
@@ -890,7 +890,7 @@ struct ConvLayer {
         inTilesY, inTilesX
       );
 
-      filterBuf = VkHelpers::createDeviceBufferWithData(
+      filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * winograd3x3Weights.size(),
         winograd3x3Weights.data(),
@@ -913,7 +913,7 @@ struct ConvLayer {
         convYSize, convXSize, 
         inTilesY, inTilesX
       );
-      filterBuf = VkHelpers::createDeviceBufferWithData(
+      filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * winograd5x5Weights.size(),
         winograd5x5Weights.data(),
@@ -922,7 +922,7 @@ struct ConvLayer {
       );
     } else {
       // For larger convolutions, use weights as-is
-      filterBuf = VkHelpers::createDeviceBufferWithData(
+      filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * desc->weights.size(),
         desc->weights.data(),
@@ -938,7 +938,7 @@ struct ConvLayer {
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( filterBuf != nullptr ) {
-      VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, filterBuf);
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, filterBuf);
       filterBuf = nullptr;
     }
     #ifdef VULKAN_API_DEBUG
@@ -955,9 +955,9 @@ struct ConvLayer {
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) {
-    int numTilesTotalPadded = VkHelpers::roundUpToMultipleInt(maxBatchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
-    int outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-    int inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int numTilesTotalPadded = vk_helper::roundUpToMultipleInt(maxBatchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
+    int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
 
     return ConvWorkspaceEltsNeeded {
       static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(inChannelsPadded) * static_cast<size_t>(inTilesXYSize),
@@ -989,7 +989,7 @@ struct ConvLayer {
                           throw StringError("Conv2DTiledBnActFp32: Unsupported conv size " + std::to_string(convXSize) + "x" + std::to_string(convYSize) + " in layer " + name);
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         targetPipeline.descriptorSetLayout,
         &res
@@ -999,14 +999,14 @@ struct ConvLayer {
 
     // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, output),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, bnScale),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 4, bnBias),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 5, mask)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, bnScale),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, bnBias),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 5, mask)
     };
-    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdBindDescriptorSets(
       cb,
@@ -1042,8 +1042,8 @@ struct ConvLayer {
     SHADER_PROFILE_START(shaderName, cb);
     vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
     SHADER_PROFILE_END(shaderName, cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    VkHelpers::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBuffer(cb);
   }
 
   void doConv2DTiledFp32(
@@ -1058,7 +1058,7 @@ struct ConvLayer {
     KatagoVulkan::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         pipelines->conv2dFp32.descriptorSetLayout,
         &res
@@ -1067,11 +1067,11 @@ struct ConvLayer {
     }
     // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, output)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
     };
-    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
     vkCmdBindDescriptorSets(
@@ -1112,8 +1112,8 @@ struct ConvLayer {
     SHADER_PROFILE_START("CONV2D_TILED_FP32", cb);
     vkCmdDispatch(cb, dispatchX, dispatchY, dispatchZ);
     SHADER_PROFILE_END("CONV2D_TILED_FP32", cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    VkHelpers::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBuffer(cb);
   }
 
   void doConv1x1AsMatmulFp32(
@@ -1126,7 +1126,7 @@ struct ConvLayer {
     Pipeline targetPipeline = handle->context->pipelinesPerDev.at(handle->vulkanDevice->info.deviceId)->xgemmStridedBatchedFp32;
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(
+      descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         targetPipeline.descriptorSetLayout,
         &res
@@ -1149,8 +1149,8 @@ struct ConvLayer {
       input, filterBuf, output,
       static_cast<uint32_t>(batchSize), &res
     );
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
-    VkHelpers::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBuffer(cb);
   }
 
   void doWinogradConvolutionBnActMask(
@@ -1200,7 +1200,7 @@ struct ConvLayer {
     }
 
     if ( winogradInputTransformDS == VK_NULL_HANDLE ) {
-      winogradInputTransformDS = VkHelpers::allocateDescriptorSet(
+      winogradInputTransformDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         winogradInputTransformBnActMaskPipeline.descriptorSetLayout,
         &res
@@ -1209,7 +1209,7 @@ struct ConvLayer {
     }
 
     if ( winogradOutputTransformDS == VK_NULL_HANDLE ) {
-      winogradOutputTransformDS = VkHelpers::allocateDescriptorSet(
+      winogradOutputTransformDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         winogradOutputTransformPipeline.descriptorSetLayout,
         &res
@@ -1218,7 +1218,7 @@ struct ConvLayer {
     }
 
     if ( xgemmBatchedDS == VK_NULL_HANDLE ) {
-      xgemmBatchedDS = VkHelpers::allocateDescriptorSet(
+      xgemmBatchedDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         xgemmBatchedPipeline.descriptorSetLayout,
         &res
@@ -1249,15 +1249,15 @@ struct ConvLayer {
       SHADER_PROFILE_END("WINOGRAD_INPUT_TRANSFORM_BN_ACT_MASK", cb);
     }
 
-    VkHelpers::barrierCommandBuffer(cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace1);
+    vk_helper::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace1);
     // Then xgemm and winograd output transform same as before
     {
       SHADER_PROFILE_START("WINOGRAD_GEMM", cb);
       // {
-        // uint32_t dbg_numTilesTotal = VkHelpers::roundUpToMultipleInt(numTilesTotal, handle->getXGemmMPaddingMult());
-        // uint32_t dbg_outCh = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-        // uint32_t dbg_inCh = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+        // uint32_t dbg_numTilesTotal = vk_helper::roundUpToMultipleInt(numTilesTotal, handle->getXGemmMPaddingMult());
+        // uint32_t dbg_outCh = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+        // uint32_t dbg_inCh = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
         // std::printf("[xGEMM] Before dispatch (BNAct path) numTilesTotal=%u outChPadded=%u inChPadded=%u inTilesXYSize=%d descriptorSet=%p\n",
           // dbg_numTilesTotal, dbg_outCh, dbg_inCh, this->inTilesXYSize, (void*)xgemmBatchedDS);
       // }
@@ -1267,9 +1267,9 @@ struct ConvLayer {
         &xgemmBatchedPipeline,
         cb,
         xgemmBatchedDS,
-        VkHelpers::roundUpToMultipleInt(batchSize * numTilesTotal, handle->getXGemmMPaddingMult()), 
-        VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult()), 
-        VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult()),
+        vk_helper::roundUpToMultipleInt(batchSize * numTilesTotal, handle->getXGemmMPaddingMult()), 
+        vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult()), 
+        vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult()),
         convWorkspace1,
         filterBuf,
         convWorkspace2,
@@ -1280,8 +1280,8 @@ struct ConvLayer {
     }
 
     // Barrier before output transform
-    VkHelpers::barrierCommandBuffer(cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace2);
+    vk_helper::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
     // Output transform is the same as before, since the fused bn+act is only on input transform side and doesn't change the data layout for xgemm
     {
       SHADER_PROFILE_START("WINOGRAD_OUTPUT_TRANSFORM", cb);
@@ -1301,7 +1301,7 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("WINOGRAD_OUTPUT_TRANSFORM", cb);
     }
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 
   void doWinogradConvolution(
@@ -1327,7 +1327,7 @@ struct ConvLayer {
     Pipeline xgemmPipeline = pipelines->xgemmBatchedFp32;
 
     if (  winogradInputTransformDS == VK_NULL_HANDLE ) {
-      winogradInputTransformDS = VkHelpers::allocateDescriptorSet(
+      winogradInputTransformDS = vk_helper::allocateDescriptorSet(
         device,
         inputTransformPipeline.descriptorSetLayout,
         &res
@@ -1336,7 +1336,7 @@ struct ConvLayer {
     }
 
     if ( winogradOutputTransformDS == VK_NULL_HANDLE ) {
-      winogradOutputTransformDS = VkHelpers::allocateDescriptorSet(
+      winogradOutputTransformDS = vk_helper::allocateDescriptorSet(
         device,
         outputTransformPipeline.descriptorSetLayout,
         &res
@@ -1346,7 +1346,7 @@ struct ConvLayer {
 
 
     if(  xgemmBatchedDS == VK_NULL_HANDLE ) {
-      xgemmBatchedDS = VkHelpers::allocateDescriptorSet(
+      xgemmBatchedDS = vk_helper::allocateDescriptorSet(
         device,
         xgemmPipeline.descriptorSetLayout,
         &res
@@ -1372,12 +1372,12 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("WINOGRAD_INPUT_TRANSFORM", cb);
     }
-    VkHelpers::barrierCommandBuffer(cb);
-    VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace1);
+    vk_helper::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace1);
 
-    uint32_t numTilesTotal = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
-    uint32_t inChannelsPadded = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
-    uint32_t outChannelsPadded = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+    uint32_t numTilesTotal = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
+    uint32_t inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    uint32_t outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
     {
       SHADER_PROFILE_START("WINOGRAD_GEMM", cb);
       // // std::printf("[xGEMM] Before dispatch numTilesTotal=%u outChPadded=%u inChPadded=%u inTilesXYSize=%d descriptorSet=%p\n",
@@ -1397,8 +1397,8 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
     }
-    VkHelpers::barrierCommandBufferForBuffer(cb, convWorkspace2);
-    VkHelpers::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
+    vk_helper::barrierCommandBuffer(cb);
 
     {
       SHADER_PROFILE_START("WINOGRAD_OUTPUT_TRANSFORM", cb);
@@ -1418,7 +1418,7 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("WINOGRAD_OUTPUT_TRANSFORM", cb);
     }
-    VkHelpers::barrierCommandBufferForBuffer(cb, output);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 
   void forward(
@@ -1477,20 +1477,20 @@ struct ConvLayer {
 
     std::printf("[%s] metadata batchSize=%d inCh=%d outCh=%d nnXLen=%d nnYLen=%d convX=%d convY=%d numTilesX=%d numTilesY=%d\n",
       name.c_str(), batchSize, inChannels, outChannels, nnXLen, nnYLen, convXSize, convYSize, numTilesX, numTilesY);
-    VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    int icPadded = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
-    int ocPadded = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-    int ntxtyPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    int icPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int ocPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+    int ntxtyPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
 
 
-    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     if ( bnLayer != nullptr && mask != nullptr ) {
       forwardBnActConv(commandBuffer, bnLayer, batchSize, input, output, convWorkspace1, convWorkspace2, mask);
     } else {
       forward(commandBuffer, batchSize, input, output, convWorkspace1, convWorkspace2);
     }
-    res = VkHelpers::endCommandBuffer(commandBuffer);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
 
 
     // if ( bnLayer != nullptr ) {
@@ -1510,15 +1510,15 @@ struct ConvLayer {
     // } else {
 
     //   if ( (convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5) ) {
-    //     icPadded = VkHelpers::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
-    //     ocPadded = VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-    //     ntxtyPadded = VkHelpers::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
+    //     icPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    //     ocPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+    //     ntxtyPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
     //     bool summarized = true;
     //     size_t szWinoFilters = inTilesXYSize * icPadded* ocPadded;
     //     // printDeviceBuffer(name + " Raw Input : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(inChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen), printAll);
     //     // printDeviceBuffer(name + " Winograd Filter : ", handle->vulkanDevice, filterBuf,szWinoFilters, printAll);
     //     printDeviceBuffer(name + " Winograd Input Transform Output : ", handle->vulkanDevice, convWorkspace1, static_cast<size_t>(ntxtyPadded) * static_cast<size_t>(icPadded) * static_cast<size_t>(inTilesXYSize), summarized);
-    //     printDeviceBuffer(name + " Winograd GEMM Output : ", handle->vulkanDevice, convWorkspace2, VkHelpers::roundUpToMultipleInt(numTilesTotal, handle->getXGemmMPaddingMult()) * VkHelpers::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult()) * static_cast<size_t>(inTilesXYSize), summarized);
+    //     printDeviceBuffer(name + " Winograd GEMM Output : ", handle->vulkanDevice, convWorkspace2, vk_helper::roundUpToMultipleInt(numTilesTotal, handle->getXGemmMPaddingMult()) * vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult()) * static_cast<size_t>(inTilesXYSize), summarized);
     //     printDeviceBuffer(name + " Winograd Output Transform Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen), summarized);
     //   } else  {
     //     bool summarized = true;
@@ -1556,7 +1556,7 @@ struct MatBiasLayer {
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( biasBuf != nullptr ) {
-      VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, biasBuf);
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, biasBuf);
       // delete biasBuf;
       biasBuf = nullptr;
     }
@@ -1579,7 +1579,7 @@ struct MatBiasLayer {
       assert(desc->weights.size() == static_cast<size_t>(numChannels));
       std::vector<float> weights = desc->weights;
       VkResult res;
-      biasBuf = VkHelpers::createDeviceBufferWithData(
+      biasBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * weights.size(),
         weights.data(),
@@ -1617,7 +1617,7 @@ struct MatBiasLayer {
     }
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+      descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
       CHECK_VK_MSG("Allocate descriptor set for MatBiasLayer: " + name, res);
     }
     // CHECK_VK_MSG("Begin command buffer for MatBiasLayer: " + name, res);
@@ -1626,11 +1626,11 @@ struct MatBiasLayer {
     pushConstants.cSize = numChannels;
     // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, biasBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, biasBuf),
     };
 
-    VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
     vkCmdPushConstants(
@@ -1658,9 +1658,9 @@ struct MatBiasLayer {
     SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NC_FP32", cb);
     vkCmdDispatch(cb, dispatchX, 1, 1);
     SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NC_FP32", cb);
-    VkHelpers::barrierCommandBuffer(cb);
-      VkHelpers::barrierCommandBufferForBuffer(cb, input);
-    // res = VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::barrierCommandBuffer(cb);
+      vk_helper::barrierCommandBufferForBuffer(cb, input);
+    // res = vk_helper::endCommandBuffer(commandBuffer);
     // CHECK_VK_MSG("End command buffer for MatBiasLayer: " + name, res);
   }
 
@@ -1670,11 +1670,11 @@ struct MatBiasLayer {
    * @param input
    */
   void debug(int batchSize, VulkanBuffer* input) {
-    VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = VkHelpers::beginCommandBuffer(commandBuffer);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     forward(commandBuffer, batchSize, input);
-    res = VkHelpers::endCommandBuffer(commandBuffer);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     printDeviceBuffer(name + " Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels));
   }
 
@@ -1741,12 +1741,12 @@ struct NormActConv {
   ) {
     // if ( conv.isBNActFusedPossible() ) {
       // conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
-      // VkHelpers::barrierCommandBufferForBuffer(cb, output);
+      // vk_helper::barrierCommandBufferForBuffer(cb, output);
     // } else {
       bn.forward(cb, batchSize, input, mask, inputScratchOrInput);
-      VkHelpers::barrierCommandBufferForBuffer(cb, inputScratchOrInput);
+      vk_helper::barrierCommandBufferForBuffer(cb, inputScratchOrInput);
       conv.forward(cb, batchSize, inputScratchOrInput, output, convWorkspace, convWorkspace2);
-      VkHelpers::barrierCommandBufferForBuffer(cb, output);
+      vk_helper::barrierCommandBufferForBuffer(cb, output);
     // }
   }
 
@@ -1796,25 +1796,25 @@ void performExtractChannel0NCHW(
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
   if ( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
 
   VkResult res = VK_ERROR_UNKNOWN;
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for ExtractChannel0NCHW", res);
   }
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0NCHW", res);
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, output)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(
@@ -1846,10 +1846,10 @@ void performExtractChannel0NCHW(
   SHADER_PROFILE_START("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
   SHADER_PROFILE_END("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, output);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, output);
 
   if ( begin ) {
-    VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::endCommandBuffer(commandBuffer);
   }
   // return commandBuffer;
 }
@@ -1866,24 +1866,24 @@ void performAddChannelBiases(
 ) {
   static constexpr int nKernelDims = 2;
   size_t globalSizes[nKernelDims] = {
-    VkHelpers::powerOf2ify(static_cast<size_t>(nnXYLen)),
-    VkHelpers::powerOf2ify(static_cast<size_t>(ncSize))
+    vk_helper::powerOf2ify(static_cast<size_t>(nnXYLen)),
+    vk_helper::powerOf2ify(static_cast<size_t>(ncSize))
   };
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   Pipeline targetPipeline = pipelines->addChannelBiasNCHWFp32;
 
   if( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
-  // VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+  // VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   VkResult res = VK_ERROR_UNKNOWN;
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for AddChannelBiases", res);
   }
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(
+    descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       targetPipeline.descriptorSetLayout,
       &res
@@ -1891,10 +1891,10 @@ void performAddChannelBiases(
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, input),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, bias)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, bias)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(
@@ -1925,9 +1925,9 @@ void performAddChannelBiases(
   SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1);
   SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, input);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, input);
   if ( begin ) {
-    VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::endCommandBuffer(commandBuffer);
   }
   // return commandBuffer;
 }
@@ -1943,22 +1943,22 @@ void performAddPointWise(
 ) {
   static constexpr int nKernelDims = 1;
   size_t globalSizes[nKernelDims] = {
-    VkHelpers::powerOf2ify(static_cast<size_t>(totalSize))
+    vk_helper::powerOf2ify(static_cast<size_t>(totalSize))
   };
   if( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
-  // VkCommandBuffer commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+  // VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   VkResult res = VK_ERROR_UNKNOWN;
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
   }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(
+    descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       pipelines->addPointWiseFp32.descriptorSetLayout,
       &res
@@ -1966,10 +1966,10 @@ void performAddPointWise(
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, acc),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, value)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, acc),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, value)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWiseFp32.pipeline);
   vkCmdBindDescriptorSets(
@@ -1997,10 +1997,10 @@ void performAddPointWise(
   SHADER_PROFILE_START("ADD_POINTWISE_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, groupCountX, 1, 1);
   SHADER_PROFILE_END("ADD_POINTWISE_FP32", commandBuffer);
-  VkHelpers::barrierCommandBuffer(commandBuffer);
-    VkHelpers::barrierCommandBufferForBuffer(commandBuffer, acc);
+  vk_helper::barrierCommandBuffer(commandBuffer);
+    vk_helper::barrierCommandBufferForBuffer(commandBuffer, acc);
   if ( begin ) {
-    VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::endCommandBuffer(commandBuffer);
   }
 }
 
@@ -2023,15 +2023,15 @@ void performGpoolMask(
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
   if ( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
   VkResult res = VK_ERROR_UNKNOWN;
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for GlobalPoolingMask", res);
   }
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(
+    descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       pipelines->globalPoolingChannelsFp32.descriptorSetLayout,
       &res
@@ -2040,12 +2040,12 @@ void performGpoolMask(
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, mask),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 3, maskSum)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mask),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, maskSum)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->globalPoolingChannelsFp32.pipeline);
   vkCmdBindDescriptorSets(
@@ -2081,13 +2081,13 @@ void performGpoolMask(
   SHADER_PROFILE_START("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
   SHADER_PROFILE_END("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
-  VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, maskSum);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, mask);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat); 
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  vk_helper::barrierCommandBuffer(commandBuffer);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, mask);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat); 
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
   if ( begin ) {
-    res = VkHelpers::endCommandBuffer(commandBuffer);
+    res = vk_helper::endCommandBuffer(commandBuffer);
   }
   *result = res;
 }
@@ -2107,18 +2107,18 @@ void performValueHeadPool(
   static constexpr int nKernelDims = 3;
   static constexpr int localSizes[nKernelDims] = {1, 1, 1};
   if ( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
   VkResult res = VK_ERROR_UNKNOWN;
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
   }
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   KatagoVulkan::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(
+    descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       pipelines->valueHeadPoolingChannelsFp32.descriptorSetLayout,
       &res
@@ -2126,11 +2126,11 @@ void performValueHeadPool(
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->valueHeadPoolingChannelsFp32.pipeline);
   vkCmdBindDescriptorSets(
@@ -2164,12 +2164,12 @@ void performValueHeadPool(
   SHADER_PROFILE_START("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
   SHADER_PROFILE_END("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
-  VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, maskSum);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  vk_helper::barrierCommandBuffer(commandBuffer);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
   if ( begin ) {
-    VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::endCommandBuffer(commandBuffer);
   }
 }
 
@@ -2269,7 +2269,7 @@ struct ResidualBlock {
     normActConv2->debug(batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen));
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " RB Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }
 };
@@ -2392,14 +2392,14 @@ struct GlobalPoolingResidualBlock {
     VkCommandBuffer addChannelCB = VK_NULL_HANDLE;
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
     performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, nnXYLen, &res);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record GlobalPoolingResidualBlock gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(handle, addChannelCB, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addChannelCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelCB});
     normActConv2->debug(batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, batchSize * normActConv2->outChannels * nnXLen * nnYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " GPRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }
 };
@@ -2488,7 +2488,7 @@ struct NestedResidualBlock {
     blocks->debug(batchSize, scratch, mid.buf, midScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
     normActConv2->debug(batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen));
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " NestedRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }
 };
@@ -2838,18 +2838,18 @@ struct Trunk {
   ) {
     SizedBuf<VulkanBuffer*> trunkScratch( scratch->allocator, scratch->getBufSizeXY(trunkNumChannels) );
 
-    VkCommandBuffer cb = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    VkHelpers::beginCommandBuffer(cb);
+    VkCommandBuffer cb = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    vk_helper::beginCommandBuffer(cb);
     vkCmdFillBuffer(cb, convWorkspace->buffer, 0, VK_WHOLE_SIZE, 0);
     vkCmdFillBuffer(cb, convWorkspace2->buffer, 0, VK_WHOLE_SIZE, 0);
-    VkHelpers::endCommandBuffer(cb);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {cb});
+    vk_helper::endCommandBuffer(cb);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {cb});
 
     initialConv->debug(batchSize, input, trunk, nullptr, nullptr, convWorkspace, convWorkspace2);
     initialMatmul->debug(batchSize, inputGlobal, trunkScratch.buf);
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
     performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
     {
       printDeviceBuffer(name  + "/add_channel_bias0 Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(trunkNumChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
     }
@@ -2858,7 +2858,7 @@ struct Trunk {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->debug(batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
       performAddChannelBiases(handle, addChannelBiasCB2, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
-      VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB2});
+      vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB2});
     }
     blockStack.debug(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
     trunkTipBN->debug(batchSize, trunk, mask, trunk);
@@ -2990,12 +2990,12 @@ struct PolicyHead {
     VkResult res;;
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
     performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record PolicyHead gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
     performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, nnXLen * nnYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
     p1BN->debug(batchSize, p1Out.buf, mask, p1Out.buf);
     p2Conv->debug(batchSize, p1Out.buf, policy, nullptr, nullptr, convWorkspace, convWorkspace2);
 
@@ -3129,7 +3129,7 @@ struct ValueHead {
     VkResult res;
     VkCommandBuffer gpoolCB =  VK_NULL_HANDLE;
     performValueHeadPool(handle, gpoolCB, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, nnXLen * nnYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
 
     v2Mul->debug(batchSize, v1Mean.buf, v2Out.buf);
     v2Bias->debug(batchSize, v2Out.buf);
@@ -3190,21 +3190,21 @@ void computeMaskSums(
 
   VkResult res = VK_SUCCESS;
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = VkHelpers::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("Allocate compute mask sum descriptor set", res);
   }
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 0, mask),
-    VkHelpers::writeDescriptorSetBuffer(descriptorSet, 1, maskSum)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mask),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, maskSum)
   };
-  VkHelpers::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
   if ( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
+    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
 
   if ( begin ) {
-    res = VkHelpers::beginCommandBuffer(commandBuffer);
+    res = vk_helper::beginCommandBuffer(commandBuffer);
   }
   CHECK_VK_MSG("Begin compute mask sum command buffer", res);
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
@@ -3216,11 +3216,11 @@ void computeMaskSums(
   vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KatagoVulkan::SumChannelsParams), &pushConstants);
   // Dispatch: X=1 (reduction), Y=numChannels(=1 for mask sum), Z=batchSize
   vkCmdDispatch(commandBuffer, 1u, static_cast<uint32_t>(numChannels), static_cast<uint32_t>(batchSize));
-  VkHelpers::barrierCommandBuffer(commandBuffer);
-  VkHelpers::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  vk_helper::barrierCommandBuffer(commandBuffer);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
 
   if ( begin ) {
-    VkHelpers::endCommandBuffer(commandBuffer);
+    vk_helper::endCommandBuffer(commandBuffer);
   }
 }
 
@@ -3317,13 +3317,13 @@ struct Model {
     valueHead = std::make_unique<ValueHead>(handle, &desc.valueHead, nnXLen, nnYLen);
 
     VkResult res = VK_SUCCESS;
-    fence = VkHelpers::createFence(handle->vulkanDevice, &res);
+    fence = vk_helper::createFence(handle->vulkanDevice, &res);
     CHECK_VK_MSG("Create model fence", res);
   }
 
   ~Model() {
     if( fence != VK_NULL_HANDLE ) {
-      VkHelpers::destroyFence(handle->vulkanDevice, fence);
+      vk_helper::destroyFence(handle->vulkanDevice, fence);
       fence = VK_NULL_HANDLE;
     }
   }
@@ -3355,17 +3355,17 @@ struct Model {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
-    VkCommandBuffer forwardCB = VkHelpers::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = VkHelpers::beginCommandBuffer(forwardCB);
+    VkCommandBuffer forwardCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(forwardCB);
     CHECK_VK_MSG("Begin model forward command buffer", res);
     performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen, false);
     computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum, false);
     trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
     valueHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership, convWorkspace, convWorkspace2);
-    VkHelpers::endCommandBuffer(forwardCB);
+    vk_helper::endCommandBuffer(forwardCB);
     vkResetFences(handle->vulkanDevice->device, 1, &fence);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, { forwardCB }, fence);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, { forwardCB }, fence);
     vkWaitForFences(handle->vulkanDevice->device, 1, &fence, VK_TRUE, UINT64_MAX);
   }
 
@@ -3395,10 +3395,10 @@ struct Model {
     }
 
     performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {extractChannel0CB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {extractChannel0CB});
     printDeviceBuffer("Model::debug Extract Channel 0 Result", handle->vulkanDevice, mask, batchSize * nnXLen * nnYLen);
     computeMaskSums(handle, computeMaskSumCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {computeMaskSumCB});
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {computeMaskSumCB});
     printDeviceBuffer("Model::debug Mask Sum Result", handle->vulkanDevice, maskSum, batchSize);
     trunk->debug(batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     printDeviceBuffer("Model::debug Trunk Output", handle->vulkanDevice, trunkBuf, batchSize * trunk->trunkNumChannels * nnXLen * nnYLen);
@@ -3536,22 +3536,22 @@ struct Buffers {
     const size_t dtypeSize = sizeof(float);
     // input = createReadWriteBuffer(handle, inputElts, useFP16);
     VkResult res = VK_SUCCESS;
-    input = VkHelpers::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputElts, false, &res);
+    input = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input buffer", res);
-    inputGlobal = VkHelpers::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputGlobalElts, false, &res);
+    inputGlobal = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputGlobalElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input global buffer", res);
     if(m.numInputMetaChannels > 0) {
-      inputMeta = VkHelpers::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputMetaElts, false, &res);
+      inputMeta = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputMetaElts, false, &res);
     }
     else {
       inputMeta = NULL;
     }
 
-    mask = VkHelpers::createDeviceBuffer(handle->vulkanDevice, batchXYElts * dtypeSize, false, &res);
+    mask = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchXYElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create mask buffer", res);
-    maskSum = VkHelpers::createDeviceBuffer(handle->vulkanDevice, batchElts * dtypeSize, false, &res);
+    maskSum = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create mask sum buffer", res);
-    trunk = VkHelpers::createDeviceBuffer(handle->vulkanDevice, m.trunk->trunkNumChannels * batchXYElts * dtypeSize, false, &res);
+    trunk = vk_helper::createDeviceBuffer(handle->vulkanDevice, m.trunk->trunkNumChannels * batchXYElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create trunk buffer", res);
 
     if(m.modelVersion >= 16)
@@ -3562,22 +3562,22 @@ struct Buffers {
       testAssert(m.policyHead->p2Channels == 1);
 
     policyPassElts = m.policyHead->p2Channels * batchElts;
-    policyPass = VkHelpers::createDeviceBuffer(handle->vulkanDevice, policyPassElts * dtypeSize, false, &res);
+    policyPass = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyPassElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create policy pass buffer", res);
     policyElts = m.policyHead->p2Channels * batchXYElts;
-    policy = VkHelpers::createDeviceBuffer(handle->vulkanDevice, policyElts * dtypeSize, false, &res);
+    policy = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create policy buffer", res);
 
     valueElts = m.valueHead->valueChannels * batchElts;
-    value = VkHelpers::createDeviceBuffer(handle->vulkanDevice, valueElts * dtypeSize, false, &res);
+    value = vk_helper::createDeviceBuffer(handle->vulkanDevice, valueElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create value buffer", res);
 
     scoreValueElts = m.valueHead->scoreValueChannels * batchElts;
-    scoreValue = VkHelpers::createDeviceBuffer(handle->vulkanDevice, scoreValueElts * dtypeSize, false, &res);
+    scoreValue = vk_helper::createDeviceBuffer(handle->vulkanDevice, scoreValueElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create score value buffer", res);
 
     ownershipElts = m.valueHead->ownershipChannels * batchXYElts;
-    ownership = VkHelpers::createDeviceBuffer(handle->vulkanDevice, ownershipElts * dtypeSize, false, &res);
+    ownership = vk_helper::createDeviceBuffer(handle->vulkanDevice, ownershipElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create ownership buffer", res);
 
     // TODO: Implement workspace allocation when winograd or other conv algorithms are added.
@@ -3585,29 +3585,29 @@ struct Buffers {
 
     std::printf("Conv workspace elts needed: size1=%zu, size2=%zu\n", convWorkspaceElts.size1, convWorkspaceElts.size2);
 
-    convWorkspace = VkHelpers::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size1 * sizeof(float), false, &res);
+    convWorkspace = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size1 * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create conv workspace buffer", res);
-    convWorkspace2 = VkHelpers::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size2 * sizeof(float), false, &res);
+    convWorkspace2 = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size2 * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create conv workspace2 buffer", res);
   }
 
   ~Buffers() {
-    VkHelpers::releaseVulkanBuffer(input->device, input);
-    VkHelpers::releaseVulkanBuffer(inputGlobal->device, inputGlobal);
+    vk_helper::releaseVulkanBuffer(input->device, input);
+    vk_helper::releaseVulkanBuffer(inputGlobal->device, inputGlobal);
     if(inputMeta != nullptr)
-    VkHelpers::releaseVulkanBuffer(inputMeta->device, inputMeta);
-    VkHelpers::releaseVulkanBuffer(mask->device, mask);
-    VkHelpers::releaseVulkanBuffer(maskSum->device, maskSum);
-    VkHelpers::releaseVulkanBuffer(trunk->device, trunk);
-    VkHelpers::releaseVulkanBuffer(policyPass->device, policyPass);
-    VkHelpers::releaseVulkanBuffer(policy->device, policy);
-    VkHelpers::releaseVulkanBuffer(value->device, value);
-    VkHelpers::releaseVulkanBuffer(scoreValue->device, scoreValue);
-    VkHelpers::releaseVulkanBuffer(ownership->device, ownership);
+    vk_helper::releaseVulkanBuffer(inputMeta->device, inputMeta);
+    vk_helper::releaseVulkanBuffer(mask->device, mask);
+    vk_helper::releaseVulkanBuffer(maskSum->device, maskSum);
+    vk_helper::releaseVulkanBuffer(trunk->device, trunk);
+    vk_helper::releaseVulkanBuffer(policyPass->device, policyPass);
+    vk_helper::releaseVulkanBuffer(policy->device, policy);
+    vk_helper::releaseVulkanBuffer(value->device, value);
+    vk_helper::releaseVulkanBuffer(scoreValue->device, scoreValue);
+    vk_helper::releaseVulkanBuffer(ownership->device, ownership);
     if(convWorkspace != nullptr)
-      VkHelpers::releaseVulkanBuffer(convWorkspace->device, convWorkspace);
+      vk_helper::releaseVulkanBuffer(convWorkspace->device, convWorkspace);
     if(convWorkspace2 != nullptr)
-      VkHelpers::releaseVulkanBuffer(convWorkspace2->device, convWorkspace2);
+      vk_helper::releaseVulkanBuffer(convWorkspace2->device, convWorkspace2);
   }
 };
 
@@ -3695,8 +3695,8 @@ void NeuralNet::globalCleanup() {
 }
 
 void NeuralNet::printDevices() {
-  VkInstance inst = VkHelpers::createVulkanInstance();
-  auto infos = VkHelpers::enumerateVulkanDevices(inst, nullptr);
+  VkInstance inst = vk_helper::createVulkanInstance();
+  auto infos = vk_helper::enumerateVulkanDevices(inst, nullptr);
 
   for ( const auto& info : infos ) {
     std::cout << "Found Vulkan Device " << Global::intToString(static_cast<int>(info.deviceId))
@@ -3954,7 +3954,7 @@ void NeuralNet::getOutput(
   if ( useFP16Storage ) {
     // TODO: implement fp16 storage path
   } else {
-    VkHelpers::copyHostToDeviceBuffer(
+    vk_helper::copyHostToDeviceBuffer(
       handle->vulkanDevice,
       inputBuffers->userInputBuffer, // Host pointer
       buffers->input,
@@ -3964,7 +3964,7 @@ void NeuralNet::getOutput(
     );
     CHECK_VK_MSG("Copy input buffer to device", res);
 
-    VkHelpers::copyHostToDeviceBuffer(
+    vk_helper::copyHostToDeviceBuffer(
       handle->vulkanDevice,
       inputBuffers->userInputGlobalBuffer, // Host pointer
       buffers->inputGlobal,
@@ -3975,7 +3975,7 @@ void NeuralNet::getOutput(
     CHECK_VK_MSG("Copy input global buffer to device", res);
 
     if ( numMetaFeatures > 0 ) {
-      VkHelpers::copyHostToDeviceBuffer(
+      vk_helper::copyHostToDeviceBuffer(
         handle->vulkanDevice,
         inputBuffers->userInputMetaBuffer, // Host pointer
         buffers->inputMeta,
@@ -4028,7 +4028,7 @@ void NeuralNet::getOutput(
     #endif
 
     // Read back PolicyPass result
-    VkHelpers::copyDeviceBufferToHost(
+    vk_helper::copyDeviceBufferToHost(
       handle->vulkanDevice,
       buffers->policyPass,
       static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singlePolicyPassResultElts),
@@ -4052,7 +4052,7 @@ void NeuralNet::getOutput(
     if ( useFP16Storage ) {
       // TODO: implement fp16 storage path
     } else {
-      VkHelpers::copyDeviceBufferToHost(
+      vk_helper::copyDeviceBufferToHost(
         handle->vulkanDevice,
         buffers->policy,
         static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singlePolicyResultElts)),
@@ -4071,7 +4071,7 @@ void NeuralNet::getOutput(
     }
 
     // Read back Value result
-    VkHelpers::copyDeviceBufferToHost(
+    vk_helper::copyDeviceBufferToHost(
       handle->vulkanDevice,
       buffers->value,
       static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleValueResultElts),
@@ -4091,7 +4091,7 @@ void NeuralNet::getOutput(
     #endif
 
     // Read back ScoreValue result
-    VkHelpers::copyDeviceBufferToHost(
+    vk_helper::copyDeviceBufferToHost(
       handle->vulkanDevice,
       buffers->scoreValue,
       static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleScoreValueResultElts),
@@ -4113,7 +4113,7 @@ void NeuralNet::getOutput(
     if ( useFP16Storage ) {
       // TODO: implement fp16 storage path
     } else {
-      VkHelpers::copyDeviceBufferToHost(
+      vk_helper::copyDeviceBufferToHost(
         handle->vulkanDevice,
         buffers->ownership,
         static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singleOwnershipResultElts)),
@@ -4333,7 +4333,7 @@ bool NeuralNet::testEvaluateConv(
   outputBuffer.resize(numOutputFloats);
   // std::cout << "  expected output size " <<  numOutputFloats << std::endl;
   std::vector<float> inputTmp = inputBuffer;
-  VulkanBuffer* dInput = VkHelpers::createDeviceBufferWithData(
+  VulkanBuffer* dInput = vk_helper::createDeviceBufferWithData(
     device,
     byteSizeofVectorContents(inputTmp),
     inputTmp.data(),
@@ -4346,21 +4346,21 @@ bool NeuralNet::testEvaluateConv(
 
   size_t maxSize = std::max(needed.size1, needed.size2);
 
-  VulkanBuffer* convWorkspace = VkHelpers::createDeviceBuffer(
+  VulkanBuffer* convWorkspace = vk_helper::createDeviceBuffer(
     device,
     maxSize * sizeof(float),
     false,
     &res
   );
 
-  VulkanBuffer* convWorkspace2 = VkHelpers::createDeviceBuffer(
+  VulkanBuffer* convWorkspace2 = vk_helper::createDeviceBuffer(
     device,
     maxSize * sizeof(float),
     false,
     &res
   );
 
-  VulkanBuffer* dOutput = VkHelpers::createDeviceBuffer(
+  VulkanBuffer* dOutput = vk_helper::createDeviceBuffer(
     device,
     byteSizeofVectorContents(outputBuffer),
     false,
@@ -4370,13 +4370,13 @@ bool NeuralNet::testEvaluateConv(
 
   layer->debug(batchSize,dInput,dOutput, nullptr, nullptr, convWorkspace, convWorkspace2);
   // layer->apply(batchSize, dInput, dOutput);
-  // VkHelpers::submitCommandBuffers(handle->vulkanDevice, {layer->commandBuffer}, nullptr);
-  VkHelpers::copyDeviceBufferToHost(device, dOutput, static_cast<VkDeviceSize>(sizeof(float) * numOutputFloats), outputBuffer.data(), true, &res);
+  // vk_helper::submitCommandBuffers(handle->vulkanDevice, {layer->commandBuffer}, nullptr);
+  vk_helper::copyDeviceBufferToHost(device, dOutput, static_cast<VkDeviceSize>(sizeof(float) * numOutputFloats), outputBuffer.data(), true, &res);
   CHECK_VK_MSG("[TestConv] Failed to copy device output buffer to host", res);
   vkQueueWaitIdle(device->queue);
   vkDeviceWaitIdle(device->device);
-  VkHelpers::releaseVulkanBuffer(device, dInput);
-  VkHelpers::releaseVulkanBuffer(device, dOutput);
+  vk_helper::releaseVulkanBuffer(device, dInput);
+  vk_helper::releaseVulkanBuffer(device, dOutput);
   dInput = nullptr;
   dOutput = nullptr;
   delete layer;
@@ -4456,7 +4456,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     outputBuffer.resize(numOutputFloats);
     std::vector<float> inputTmp = inputBuffer;
     std::vector<float> maskTmp = maskBuffer;
-    VulkanBuffer* dInput = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dInput = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(inputTmp),
       inputTmp.data(),
@@ -4464,7 +4464,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device input buffer with data", res);
-    VulkanBuffer* dMask = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(maskTmp),
       maskTmp.data(),
@@ -4472,7 +4472,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device mask buffer", res);
-    VulkanBuffer* dOutput = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* dOutput = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       byteSizeofVectorContents(outputBuffer),
       false,
@@ -4481,16 +4481,16 @@ bool NeuralNet::testEvaluateBatchNorm(
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device output buffer", res);
 
     layer->debug(batchSize, dInput, dMask, dOutput);
-    // VkHelpers::submitCommandBuffers(handle->vulkanDevice, {layer->commandBuffer}, nullptr);
+    // vk_helper::submitCommandBuffers(handle->vulkanDevice, {layer->commandBuffer}, nullptr);
     // layer->apply(batchSize, dInput, dMask, dOutput);
-    VkHelpers::copyDeviceBufferToHost(handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * outputBuffer.size()), outputBuffer.data(), true, &res);
+    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * outputBuffer.size()), outputBuffer.data(), true, &res);
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy device output buffer to host", res);
     // delete dOutput;
     // delete dMask;
     // delete dInput;
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dInput);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dMask);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dOutput);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dInput);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dOutput);
     dInput = nullptr;
     dMask = nullptr;
     dOutput = nullptr;
@@ -4573,7 +4573,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize, nnXLen, nnYLen);
     std::vector<float> inputTmp = inputBuffer;
     std::vector<float> maskTmp = maskBuffer;
-    VulkanBuffer* dTrunk = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(inputTmp),
       inputTmp.data(),
@@ -4581,7 +4581,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk buffer with data", res);
-    VulkanBuffer* dMask = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(maskTmp),
       maskTmp.data(),
@@ -4589,7 +4589,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device mask buffer with data", res);
-    VulkanBuffer* dTrunkScratch = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       numTrunkFloats * sizeof(float),
       false,
@@ -4597,14 +4597,14 @@ bool NeuralNet::testEvaluateBatchNorm(
     );
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk scratch buffer", res);
 
-    VulkanBuffer *convWorkspace = VkHelpers::createDeviceBuffer(
+    VulkanBuffer *convWorkspace = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       layer->requiredConvWorkspaceElts(handle, batchSize).size1 * sizeof(float),
       false,
       &res
     );
 
-    VulkanBuffer *convWorkspace2 = VkHelpers::createDeviceBuffer(
+    VulkanBuffer *convWorkspace2 = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       layer->requiredConvWorkspaceElts(handle, batchSize).size2 * sizeof(float),
       false,
@@ -4613,16 +4613,16 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     layer->debug(batchSize, scratch, dTrunk, dTrunkScratch, dMask, convWorkspace, convWorkspace2);
     // layer->apply(batchSize, scratch, dTrunk, dTrunkScratch, dMask, convWorkspace, convWorkspace2);
-    // VkHelpers::submitCommandBuffers(handle->vulkanDevice, layer->commandBuffers, nullptr);
-    VkHelpers::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
+    // vk_helper::submitCommandBuffers(handle->vulkanDevice, layer->commandBuffers, nullptr);
+    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to copy device trunk buffer to host", res);
     vkQueueWaitIdle(handle->vulkanDevice->queue);
     vkDeviceWaitIdle(handle->vulkanDevice->device);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dMask);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace2);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace2);
     dTrunk = nullptr;
     dMask = nullptr;
     dTrunkScratch = nullptr;
@@ -4693,7 +4693,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize, nnXLen, nnYLen);
     std::vector<float> inputTmp = inputBuffer;
     std::vector<float> maskTmp = maskBuffer;
-    VulkanBuffer* dTrunk = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(inputTmp),
       inputTmp.data(),
@@ -4701,7 +4701,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device trunk buffer with data", res);
-    VulkanBuffer* dMask = VkHelpers::createDeviceBufferWithData(
+    VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
       byteSizeofVectorContents(maskTmp),
       maskTmp.data(),
@@ -4709,26 +4709,26 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device mask buffer with data", res);
-    VulkanBuffer* dTrunkScratch = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       numTrunkFloats * sizeof(float),
       false,
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device trunk scratch buffer", res);
-    VulkanBuffer* dMaskSum = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* dMaskSum = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       numMaskSumFloats * sizeof(float),
       false,
       &res
     );
-    VulkanBuffer* convWorkspace = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* convWorkspace = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       layer->requiredConvWorkspaceElts(handle, batchSize).size1 * sizeof(float),
       false,
       &res
     );
-    VulkanBuffer* convWorkspace2 = VkHelpers::createDeviceBuffer(
+    VulkanBuffer* convWorkspace2 = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
       layer->requiredConvWorkspaceElts(handle, batchSize).size2 * sizeof(float),
       false,      
@@ -4739,22 +4739,22 @@ bool NeuralNet::testEvaluateBatchNorm(
     VkCommandBuffer maskSumsCB = VK_NULL_HANDLE;
     VkDescriptorSet maskSumsDS = VK_NULL_HANDLE;
     computeMaskSums(handle, maskSumsCB, maskSumsDS, batchSize, nnXLen, nnYLen, dMask, dMaskSum);
-    VkHelpers::submitCommandBuffers(handle->vulkanDevice, {maskSumsCB}, nullptr);
-    VkHelpers::copyDeviceBufferToHost(handle->vulkanDevice, dMaskSum, static_cast<VkDeviceSize>(sizeof(float) * numMaskSumFloats), maskSumTmp.data(), true, &res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {maskSumsCB}, nullptr);
+    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dMaskSum, static_cast<VkDeviceSize>(sizeof(float) * numMaskSumFloats), maskSumTmp.data(), true, &res);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device mask sum buffer to host", res);
     // printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Mask Sums", maskSumTmp.data(), maskSumTmp.size(), batchSize, 1, 1, 1);
     layer->debug(batchSize, scratch, dTrunk, dTrunkScratch, dMask, dMaskSum, convWorkspace, convWorkspace2);
     // layer->apply(batchSize, scratch, dTrunk, dTrunkScratch, dMask, dMaskSum, convWorkspace, convWorkspace2);
-    VkHelpers::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
+    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device trunk buffer to host", res);
     vkQueueWaitIdle(handle->vulkanDevice->queue);
     vkDeviceWaitIdle(handle->vulkanDevice->device);
 
     printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Output", outputBuffer.data(), outputBuffer.size(), batchSize, desc->preBN.numChannels, nnYLen, nnXLen);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dMask);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
-    VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, dMaskSum);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMaskSum);
     dTrunk = nullptr;
     dMask = nullptr;
     dTrunkScratch = nullptr;
@@ -4774,9 +4774,9 @@ namespace KatagoVulkan {
     const VulkanTuneParams& params
   ): device(device_), tuneParams(params) {
     VkResult res = VK_ERROR_UNKNOWN;
-    cache = VkHelpers::createPipelineCache(device, &res);
+    cache = vk_helper::createPipelineCache(device, &res);
     if(res != VK_SUCCESS)
-      throw StringError("Failed to create Vulkan pipeline cache: " + VkHelpers::vkErrorToString(res));
+      throw StringError("Failed to create Vulkan pipeline cache: " + vk_helper::vkErrorToString(res));
     try {
       createPipelines();
     }
@@ -4925,7 +4925,7 @@ namespace KatagoVulkan {
         vkDestroyDescriptorSetLayout(device,descriptorSetLayout,nullptr);
       if(shaderModule != VK_NULL_HANDLE)
         vkDestroyShaderModule(device,shaderModule,nullptr);
-      throw StringError(pipelineName + " " + operation + " failed: " + VkHelpers::vkErrorToString(result));
+      throw StringError(pipelineName + " " + operation + " failed: " + vk_helper::vkErrorToString(result));
     };
     VkShaderModuleCreateInfo shaderModuleCI = {};
     shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -4938,14 +4938,14 @@ namespace KatagoVulkan {
     std::vector<VkDescriptorSetLayoutBinding> bindings;
     for ( size_t i = 0 ; i < bindingSize ; i++ ) {
       bindings.push_back(
-        VkHelpers::descriptorSetLayoutBinding(
+        vk_helper::descriptorSetLayoutBinding(
           static_cast<uint32_t>(i),
           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
         )
       );
     }
 
-    descriptorSetLayout = VkHelpers::createDescriptorSetLayout(device,bindings,&res);
+    descriptorSetLayout = vk_helper::createDescriptorSetLayout(device,bindings,&res);
     if(res != VK_SUCCESS)
       fail("descriptor set layout creation",res);
 
@@ -4958,11 +4958,11 @@ namespace KatagoVulkan {
       pushConstant.size = static_cast<uint32_t>(pushConstantSize);
       pushConstants.push_back(pushConstant);
     }
-    layout = VkHelpers::createPipelineLayout(device,{ descriptorSetLayout }, pushConstants, &res);
+    layout = vk_helper::createPipelineLayout(device,{ descriptorSetLayout }, pushConstants, &res);
     if(res != VK_SUCCESS)
       fail("pipeline layout creation",res);
 
-    pipeline = VkHelpers::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
+    pipeline = vk_helper::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
 
     if(res != VK_SUCCESS)
       fail("compute pipeline creation",res);
@@ -4977,15 +4977,15 @@ namespace KatagoVulkan {
    * @brief Create a Conv2d Fp32 object
   */
   void ComputePipelines::createConv2dFp32() {
-    createPipeline("Conv2dFp32",  VkSPIRVShaders::spirv_conv2d_fp32, VkSPIRVShaders::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
+    createPipeline("Conv2dFp32",  vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
   }
 
   void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
-    createPipeline("Conv2dTiledBnAct3x3Fp32", VkSPIRVShaders::spirv_conv2d_tiled_bn_act_3x3_fp32, VkSPIRVShaders::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32);
+    createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32);
   }
 
   void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
-    createPipeline("Conv2dTiledBnAct5x5Fp32", VkSPIRVShaders::spirv_conv2d_tiled_bn_act_5x5_fp32, VkSPIRVShaders::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32);
+    createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32);
   }
 
   void ComputePipelines::createWinogradInputTransform() {
@@ -5001,11 +5001,11 @@ namespace KatagoVulkan {
     spec.inTileXOffset= -1;
     spec.convY = 3;
     spec.convX = 3;
-    std::vector<int32_t> specData_3322 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = VkHelpers::createSpecMapEntries(specData_3322.size());
-    VkSpecializationInfo si3322 = VkHelpers::createSpecializationInfo(specData_3322, specEntry);
+    std::vector<int32_t> specData_3322 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322.size());
+    VkSpecializationInfo si3322 = vk_helper::createSpecializationInfo(specData_3322, specEntry);
 
-    createPipeline("WinogradInputTransform for 3x3 kernels", VkSPIRVShaders::spirv_winograd_input_transform, VkSPIRVShaders::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322);
+    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322);
     spec.convX = 5;
     spec.convY = 5;
     spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
@@ -5016,9 +5016,9 @@ namespace KatagoVulkan {
     spec.inTileXOffset= -2;
     spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
     spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
-    std::vector<int32_t> specData_5544 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    VkSpecializationInfo si5544 = VkHelpers::createSpecializationInfo(specData_5544, specEntry);
-    createPipeline("WinogradInputTransform for 5x5 kernels", VkSPIRVShaders::spirv_winograd_input_transform, VkSPIRVShaders::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
+    std::vector<int32_t> specData_5544 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
+    VkSpecializationInfo si5544 = vk_helper::createSpecializationInfo(specData_5544, specEntry);
+    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
   }
 
   void ComputePipelines::createWinogradInputTransformBnAct() {
@@ -5035,25 +5035,25 @@ namespace KatagoVulkan {
     spec.convY = 3;
     spec.convX = 3;
     spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_3322_identity = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = VkHelpers::createSpecMapEntries(specData_3322_identity.size());
-    VkSpecializationInfo si3322_identity = VkHelpers::createSpecializationInfo(specData_3322_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 identity", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity);
+    std::vector<int32_t> specData_3322_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322_identity.size());
+    VkSpecializationInfo si3322_identity = vk_helper::createSpecializationInfo(specData_3322_identity, specEntry);
+    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity);
 
     spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_3322_relu = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_relu = VkHelpers::createSpecializationInfo(specData_3322_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 relu", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu);
+    std::vector<int32_t> specData_3322_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si3322_relu = vk_helper::createSpecializationInfo(specData_3322_relu, specEntry);
+    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu);
 
     spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_3322_mish = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish = VkHelpers::createSpecializationInfo(specData_3322_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 mish", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish);
+    std::vector<int32_t> specData_3322_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si3322_mish = vk_helper::createSpecializationInfo(specData_3322_mish, specEntry);
+    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish);
 
     spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_3322_mish_scale8 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish_scale8 = VkHelpers::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8);
+    std::vector<int32_t> specData_3322_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si3322_mish_scale8 = vk_helper::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
+    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8);
 
     // 5x5
     spec.convX = 5;
@@ -5067,21 +5067,21 @@ namespace KatagoVulkan {
     spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
     spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
     spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_55_identity = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_identity = VkHelpers::createSpecializationInfo(specData_55_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act identity", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity);
+    std::vector<int32_t> specData_55_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si55_identity = vk_helper::createSpecializationInfo(specData_55_identity, specEntry);
+    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity);
     spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_55_relu = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_relu = VkHelpers::createSpecializationInfo(specData_55_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act relu", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu);
+    std::vector<int32_t> specData_55_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si55_relu = vk_helper::createSpecializationInfo(specData_55_relu, specEntry);
+    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu);
     spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_55_mish = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish = VkHelpers::createSpecializationInfo(specData_55_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish);
+    std::vector<int32_t> specData_55_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si55_mish = vk_helper::createSpecializationInfo(specData_55_mish, specEntry);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish);
     spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_55_mish_scale8 = VkHelpers::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish_scale8 = VkHelpers::createSpecializationInfo(specData_55_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", VkSPIRVShaders::spirv_winograd_input_transform_bnact, VkSPIRVShaders::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8);
+    std::vector<int32_t> specData_55_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
+    VkSpecializationInfo si55_mish_scale8 = vk_helper::createSpecializationInfo(specData_55_mish_scale8, specEntry);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8);
   }
 
   void ComputePipelines::createWinogradOutputTransform() {
@@ -5097,10 +5097,10 @@ namespace KatagoVulkan {
     spec.inTileYSize = tuneParams.conv3x3.inTileYSize;
     spec.convX = 3;
     spec.convY = 3;
-    std::vector<int32_t> specData_33 = VkHelpers::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = VkHelpers::createSpecMapEntries(specData_33.size());
-    VkSpecializationInfo si33 = VkHelpers::createSpecializationInfo(specData_33, specEntry);
-    createPipeline("WinogradOutputTransform", VkSPIRVShaders::spirv_winograd_output_transform, VkSPIRVShaders::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33);
+    std::vector<int32_t> specData_33 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_33.size());
+    VkSpecializationInfo si33 = vk_helper::createSpecializationInfo(specData_33, specEntry);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33);
 
     spec.localSizeX = tuneParams.conv5x5.outputTransformLocalXSize;
     spec.localSizeY = tuneParams.conv5x5.outputTransformLocalYSize;
@@ -5111,61 +5111,61 @@ namespace KatagoVulkan {
     spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
     spec.convX = 5;
     spec.convY = 5;
-    std::vector<int32_t> specData_55 = VkHelpers::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    VkSpecializationInfo si55 = VkHelpers::createSpecializationInfo(specData_55, specEntry);
-    createPipeline("WinogradOutputTransform", VkSPIRVShaders::spirv_winograd_output_transform, VkSPIRVShaders::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55);
+    std::vector<int32_t> specData_55 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
+    VkSpecializationInfo si55 = vk_helper::createSpecializationInfo(specData_55, specEntry);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55);
   }
 
   /**
    * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
    */
   // void ComputePipelines::createConv2d3x3BnFp32() {
-  //   createPipeline("Conv2d3x3BnFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
+  //   createPipeline("Conv2d3x3BnFp32", vk_shader::spirv_conv2d_3x3_bn_fp32, vk_shader::spirv_conv2d_3x3_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnFp32);
   // }
 
   /**
    * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
    */
   // void ComputePipelines::createConv2d3x3BnReluFp32() {
-  //   createPipeline("Conv2d3x3BnReluFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
+  //   createPipeline("Conv2d3x3BnReluFp32", vk_shader::spirv_conv2d_3x3_bn_relu_fp32, vk_shader::spirv_conv2d_3x3_bn_relu_fp32_size,   3, sizeof(Conv2DPushConstantParams), conv2d3x3BnReluFp32);
   // }
   /**
    * @brief Create a Conv2d3x3 Bn Mish Fp32 object
    */
   // void ComputePipelines::createConv2d3x3BnMishFp32() {
-  //   createPipeline("Conv2d3x3BnMishFp32", VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32,VkSPIRVShaders::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
+  //   createPipeline("Conv2d3x3BnMishFp32", vk_shader::spirv_conv2d_3x3_bn_mish_fp32,vk_shader::spirv_conv2d_3x3_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d3x3BnMishFp32);
   // }
 
   /**
    * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
    */
   // void ComputePipelines::createConv2d5x5BnFp32() {
-  //   createPipeline("Conv2d5x5BnFp32", VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
+  //   createPipeline("Conv2d5x5BnFp32", vk_shader::spirv_conv2d_5x5_bn_fp32, vk_shader::spirv_conv2d_5x5_bn_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnFp32);
   // }
 
   /**
    * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
    */
   // void ComputePipelines::createConv2d5x5BnReluFp32() {
-  //   createPipeline("Conv2d5x5BnReluFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
+  //   createPipeline("Conv2d5x5BnReluFp32",vk_shader::spirv_conv2d_5x5_bn_relu_fp32, vk_shader::spirv_conv2d_5x5_bn_relu_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnReluFp32);
   // }
 
   /**
    * @brief Create a Conv2d5x5 Bn Mish Fp32 object
    */
   // void ComputePipelines::createConv2d5x5BnMishFp32() {
-  //   createPipeline("Conv2d5x5BnMishFp32",VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32, VkSPIRVShaders::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
+  //   createPipeline("Conv2d5x5BnMishFp32",vk_shader::spirv_conv2d_5x5_bn_mish_fp32, vk_shader::spirv_conv2d_5x5_bn_mish_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2d5x5BnMishFp32);
   // }
 
   /**
    * @brief Create a Add Point Wise Fp32 object
    */
   void ComputePipelines::createAddPointWiseFp32() {
-    createPipeline("AddPointWiseFp32",VkSPIRVShaders::spirv_add_pointwise_fp32, VkSPIRVShaders::spirv_add_pointwise_fp32_size, 2, sizeof(KatagoVulkan::AddPointWiseParams), addPointWiseFp32);
+    createPipeline("AddPointWiseFp32",vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(KatagoVulkan::AddPointWiseParams), addPointWiseFp32);
   }
 
   void ComputePipelines::createMatmulFp32() {
-    createPipeline("MatmulFp32", VkSPIRVShaders::spirv_matmul_fp32, VkSPIRVShaders::spirv_matmul_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), matmulFp32);
+    createPipeline("MatmulFp32", vk_shader::spirv_matmul_fp32, vk_shader::spirv_matmul_fp32_size, 3, sizeof(KatagoVulkan::MatmulFp32Params), matmulFp32);
   }
 
   void ComputePipelines::createBatchedXgemmDirect() {
@@ -5181,10 +5181,10 @@ namespace KatagoVulkan {
     spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
     spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
     spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
-    std::vector<VkSpecializationMapEntry> mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    std::vector<int32_t> specData = VkHelpers::createSpecData(&spec, sizeof(spec));
-    VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);
-    createPipeline("BatchedXGEMMDirect", VkSPIRVShaders::spirv_batched_xgemm_direct, VkSPIRVShaders::spirv_batched_xgemm_direct_size, 3, sizeof(KatagoVulkan::BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo);
+    std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
+    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
+    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_batched_xgemm_direct, vk_shader::spirv_batched_xgemm_direct_size, 3, sizeof(KatagoVulkan::BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo);
   }
 
   void ComputePipelines::createXGEMMBatchedFp32() {
@@ -5200,10 +5200,10 @@ namespace KatagoVulkan {
     spec.NDIMC = tuneParams.xgemm.NDIMC;
     spec.MDIMA = tuneParams.xgemm.MDIMA;
     spec.NDIMB = tuneParams.xgemm.NDIMB;
-    std::vector<VkSpecializationMapEntry> mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    std::vector<int32_t> specData = VkHelpers::createSpecData(&spec, sizeof(spec));
-    VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMBatchedFp32", VkSPIRVShaders::spirv_xgemm_batched_fp32, VkSPIRVShaders::spirv_xgemm_batched_fp32_size, 3, sizeof(KatagoVulkan::XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo);
+    std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
+    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
+    createPipeline("XGEMMBatchedFp32", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(KatagoVulkan::XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo);
   }
 
   void ComputePipelines::createXGEMMStridedBatchedFp32() {
@@ -5219,62 +5219,62 @@ namespace KatagoVulkan {
     spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
     spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
     spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
-    auto specData = VkHelpers::createSpecData(&spec, sizeof(spec));
-    auto mapEntries = VkHelpers::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
-    VkSpecializationInfo specializationInfo = VkHelpers::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMStridedBatchedFp32", VkSPIRVShaders::spirv_xgemm_strided_batched_nn_fp32, VkSPIRVShaders::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(KatagoVulkan::XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo);
+    auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
+    createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(KatagoVulkan::XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo);
   }
 
   void ComputePipelines::createBatchNormMaskFp32() {
-    createPipeline("BatchNormMaskFp32", VkSPIRVShaders::spirv_bn_mask_fp32, VkSPIRVShaders::spirv_bn_mask_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskFp32);
+    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_fp32, vk_shader::spirv_bn_mask_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskFp32);
   }
 
   void ComputePipelines::createBatchNormMaskReluFp32() {
-    createPipeline("BatchNormMaskReluFp32", VkSPIRVShaders::spirv_bn_mask_relu_fp32, VkSPIRVShaders::spirv_bn_mask_relu_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskReluFp32);
+    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskReluFp32);
   }
 
   void ComputePipelines::createBatchNormMaskMishFp32() {
-    createPipeline("BatchNormMaskMishFp32", VkSPIRVShaders::spirv_bn_mask_mish_fp32, VkSPIRVShaders::spirv_bn_mask_mish_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishFp32);
+    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishFp32);
   }
 
   void ComputePipelines::createBatchNormMaskMishScale8Fp32() {
-    createPipeline("BatchNormMaskMishScale8Fp32", VkSPIRVShaders::spirv_bn_mask_mish_scale8_fp32, VkSPIRVShaders::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishScale8Fp32);
+    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(KatagoVulkan::BatchNormMaskParams), batchNormMaskMishScale8Fp32);
   }
 
   void ComputePipelines::createGlobalPoolingChannelsFp32() {
-    createPipeline("GlobalPoolingChannelsFp32", VkSPIRVShaders::spirv_global_pooling_channels_fp32, VkSPIRVShaders::spirv_global_pooling_channels_fp32_size, 4, sizeof(KatagoVulkan::GlobalPoolingChannelsParams), globalPoolingChannelsFp32);
+    createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(KatagoVulkan::GlobalPoolingChannelsParams), globalPoolingChannelsFp32);
   }
 
   void ComputePipelines::createValueHeadPoolingChannelsFp32() {
-    createPipeline("ValueHeadPoolingChannelsFp32", VkSPIRVShaders::spirv_value_head_pool_channels_fp32, VkSPIRVShaders::spirv_value_head_pool_channels_fp32_size, 3, sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32);
+    createPipeline("ValueHeadPoolingChannelsFp32", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(KatagoVulkan::ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32);
   }
 
   void ComputePipelines::createSumChannelsFp32() {
-    createPipeline("SumChannelsFp32", VkSPIRVShaders::spirv_sum_channels_fp32, VkSPIRVShaders::spirv_sum_channels_fp32_size, 2, sizeof(KatagoVulkan::SumChannelsParams), sumChannelsFp32);
+    createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(KatagoVulkan::SumChannelsParams), sumChannelsFp32);
   }
 
   void ComputePipelines::createAddChannelBiasNCHWFp32() {
-    createPipeline("AddChannelBiasNCHWFp32", VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32, VkSPIRVShaders::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWFp32);
+    createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCHWParams), addChannelBiasNCHWFp32);
   }
 
   void ComputePipelines::createAddChannelBiasNCIdentityFp32() {
-    createPipeline("AddChannelBiasNCIdentityFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_identity_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCIdentityFp32);
+    createPipeline("AddChannelBiasNCIdentityFp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCIdentityFp32);
   }
 
   void ComputePipelines::createAddChannelBiasNCReluFp32() {
-    createPipeline("AddChannelBiasNCReluFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCReluFp32);
+    createPipeline("AddChannelBiasNCReluFp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCReluFp32);
   }
 
   void ComputePipelines::createAddChannelBiasNCMishFp32() {
-    createPipeline("AddChannelBiasNCMishFp32", VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishFp32);
+    createPipeline("AddChannelBiasNCMishFp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishFp32);
   }
 
   void ComputePipelines::createAddChannelBiasNCMishScale8Fp32() {
-    createPipeline("AddChannelBiasNCMishScale8Fp32", VkSPIRVShaders::spirv_add_channel_bias_nc_mish_scale8_fp32, VkSPIRVShaders::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32);
+    createPipeline("AddChannelBiasNCMishScale8Fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(KatagoVulkan::AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32);
   }
 
   void ComputePipelines::createExtractChannel0NCHWFp32() {
-    createPipeline("ExtractChannel0NCHWFp32", VkSPIRVShaders::spirv_extract_channel0_nchw_fp32, VkSPIRVShaders::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(KatagoVulkan::ExtractChannel0NCHWParams), extractChannel0NCHWFp32);
+    createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(KatagoVulkan::ExtractChannel0NCHWParams), extractChannel0NCHWFp32);
   }
 
   // ########################### End of Compute Pipelines #########################

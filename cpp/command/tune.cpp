@@ -84,8 +84,8 @@ int MainCmds::tuner(const vector<string>& args) {
     throw StringError("Vulkan tuner currently supports model versions through 16");
   VulkanTuner::ModelInfoForTuning modelInfo = VulkanTuner::ModelInfoForTuning::ofDesc(modelDesc);
 
-  VkInstance instance = VkHelpers::createVulkanInstance();
-  vector<VulkanDeviceInfo> deviceInfos = VkHelpers::enumerateVulkanDevices(instance,&logger);
+  VkInstance instance = vk_helper::createVulkanInstance();
+  vector<VulkanDeviceInfo> deviceInfos = vk_helper::enumerateVulkanDevices(instance,&logger);
   if(gpuIdxs.empty()) {
     for(size_t i = 0; i < deviceInfos.size(); i++)
       gpuIdxs.push_back(static_cast<int>(i));
@@ -96,7 +96,7 @@ int MainCmds::tuner(const vector<string>& args) {
     VulkanDeviceInfo deviceInfo = deviceInfos[gpuIdx];
     vector<const char*> requiredExtensions;
     const auto recreateDevice = [&]() {
-      return VkHelpers::createVulkanDevice(instance,deviceInfo,requiredExtensions,&logger);
+      return vk_helper::createVulkanDevice(instance,deviceInfo,requiredExtensions,&logger);
     };
     VulkanDevice* device = recreateDevice();
     try {

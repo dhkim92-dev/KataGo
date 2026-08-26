@@ -146,11 +146,11 @@ std::vector<VkDevice> VulkanContext::findDeviceIdsToUseWithName(const std::strin
   return deviceIds;
 }
 
-size_t VkHelpers::roundUpToMultiple(size_t size, size_t ofThis) {
+size_t vk_helper::roundUpToMultiple(size_t size, size_t ofThis) {
   return (size + ofThis - 1) / ofThis * ofThis;
 }
 
-int VkHelpers::roundUpToMultipleInt(int size, int ofThis) {
+int vk_helper::roundUpToMultipleInt(int size, int ofThis) {
   // Use 64-bit arithmetic to avoid overflow when multiplying large sizes,
   // then clamp to INT_MAX to keep return value in int range.
   if(ofThis <= 0) return size;
@@ -162,7 +162,7 @@ int VkHelpers::roundUpToMultipleInt(int size, int ofThis) {
   return static_cast<int>(ret);
 }
 
-size_t VkHelpers::powerOf2ify(size_t size) {
+size_t vk_helper::powerOf2ify(size_t size) {
   if(size <= 2)
     return size;
   if(size <= 4)
@@ -181,7 +181,7 @@ size_t VkHelpers::powerOf2ify(size_t size) {
   return s * 4;
 }
 
-std::string VkHelpers::vkErrorToString(VkResult res) {
+std::string vk_helper::vkErrorToString(VkResult res) {
   switch(res) {
     case VK_SUCCESS: return "VK_SUCCESS";
     case VK_NOT_READY: return "VK_NOT_READY";
@@ -206,7 +206,7 @@ std::string VkHelpers::vkErrorToString(VkResult res) {
   }
 }
 
-std::string VkHelpers::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
+std::string vk_helper::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
   switch(type) {
     case VK_PHYSICAL_DEVICE_TYPE_OTHER: return "Other";
     case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated GPU";
@@ -217,7 +217,7 @@ std::string VkHelpers::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
   }
 }
 
-VkInstance VkHelpers::createVulkanInstance() {
+VkInstance vk_helper::createVulkanInstance() {
   VkInstance instance = VK_NULL_HANDLE;
   std::vector<const char*> requiredLayers = {
 #ifdef VULKAN_API_DEBUG
@@ -260,7 +260,7 @@ VkInstance VkHelpers::createVulkanInstance() {
   return instance;
 }
 
-std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance instance, Logger* logger) {
+std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance instance, Logger* logger) {
   uint32_t numDevices = 0;
   VkResult res = vkEnumeratePhysicalDevices(instance, &numDevices, nullptr);
   CHECK_VK(res);
@@ -292,7 +292,7 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
     deviceInfo.deviceName = std::string(deviceInfo.properties.deviceName);
     if ( logger != nullptr ) {
       logger->write("  Name: " + deviceInfo.deviceName);
-      logger->write("  Type: " + VkHelpers::vkPhysicalDeviceTypeToString(deviceInfo.deviceType));
+      logger->write("  Type: " + vk_helper::vkPhysicalDeviceTypeToString(deviceInfo.deviceType));
       logger->write("  API Version: " +
         std::to_string(VK_VERSION_MAJOR(deviceInfo.properties.apiVersion)) + "." +
         std::to_string(VK_VERSION_MINOR(deviceInfo.properties.apiVersion)) + "." +
@@ -347,7 +347,7 @@ std::vector<VulkanDeviceInfo> VkHelpers::enumerateVulkanDevices(VkInstance insta
   return deviceInfos;
 }
 
-VulkanDevice* VkHelpers::createVulkanDevice(
+VulkanDevice* vk_helper::createVulkanDevice(
   VkInstance instance,
   VulkanDeviceInfo deviceInfo,
   std::vector<const char *> requiredExtensions,
@@ -473,13 +473,13 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   CHECK_VK_MSG("VMA create for device : " + deviceInfo.deviceName, res);
   vulkanDevice->allocator = allocator;
 
-  vulkanDevice->commandPool = VkHelpers::createCommandPool(
+  vulkanDevice->commandPool = vk_helper::createCommandPool(
     vulkanDevice,
     &res
   );
   CHECK_VK_MSG("CreateCommandPool for device : " + deviceInfo.deviceName, res);
 
-  vulkanDevice->descriptorPool = VkHelpers::createDescriptorPool(
+  vulkanDevice->descriptorPool = vk_helper::createDescriptorPool(
     vulkanDevice,
     {
       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
@@ -492,7 +492,7 @@ VulkanDevice* VkHelpers::createVulkanDevice(
   return vulkanDevice;
 }
 
-VkShaderModule VkHelpers::createShaderModuleFromSPIRVBytes(
+VkShaderModule vk_helper::createShaderModuleFromSPIRVBytes(
     VkDevice device,
     const std::vector<unsigned char>& spirvBytes,
     VkResult* result
@@ -506,7 +506,7 @@ VkShaderModule VkHelpers::createShaderModuleFromSPIRVBytes(
   return shaderModule;
 }
 
-VkPipelineCache VkHelpers::createPipelineCache(
+VkPipelineCache vk_helper::createPipelineCache(
   VkDevice device,
   VkResult *result
 ) {
@@ -517,7 +517,7 @@ VkPipelineCache VkHelpers::createPipelineCache(
   return pipelineCache;
 }
 
-VkPipelineLayout VkHelpers::createPipelineLayout(
+VkPipelineLayout vk_helper::createPipelineLayout(
     VkDevice device,
     const std::vector<VkDescriptorSetLayout>& descriptorSetLayouts,
     const std::vector<VkPushConstantRange>& pushConstantRanges,
@@ -534,7 +534,7 @@ VkPipelineLayout VkHelpers::createPipelineLayout(
   return pipelineLayout;
 }
 
-VkPipeline VkHelpers::createComputePipeline(
+VkPipeline vk_helper::createComputePipeline(
     VkDevice device,
     VkPipelineLayout pipelineLayout,
     VkPipelineCache pipelineCache,
@@ -556,7 +556,7 @@ VkPipeline VkHelpers::createComputePipeline(
   return pipeline;
 }
 
-VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
+VkDescriptorSetLayout vk_helper::createDescriptorSetLayout(
     VkDevice device,
     const std::vector<VkDescriptorSetLayoutBinding>& bindings,
     VkResult *result
@@ -570,7 +570,7 @@ VkDescriptorSetLayout VkHelpers::createDescriptorSetLayout(
   return descriptorSetLayout;
 }
 
-VkDescriptorPool VkHelpers::createDescriptorPool(
+VkDescriptorPool vk_helper::createDescriptorPool(
   const VulkanDevice *device,
   const std::vector<VkDescriptorPoolSize>& poolSizes,
   uint32_t maxSets,
@@ -591,7 +591,7 @@ VkDescriptorPool VkHelpers::createDescriptorPool(
   return descriptorPool;
 }
 
-VkDescriptorSet VkHelpers::allocateDescriptorSet(
+VkDescriptorSet vk_helper::allocateDescriptorSet(
   const VulkanDevice *device,
   VkDescriptorSetLayout descriptorSetLayout,
   VkResult *result
@@ -611,7 +611,7 @@ VkDescriptorSet VkHelpers::allocateDescriptorSet(
   return descriptorSet;
 }
 
-VkResult VkHelpers::updateDescriptorSets(
+VkResult vk_helper::updateDescriptorSets(
   const VulkanDevice *device,
   const std::vector<WriteDescriptorSet>& writeDescriptorSets
 ) {
@@ -634,7 +634,7 @@ VkResult VkHelpers::updateDescriptorSets(
   return VK_SUCCESS;
 }
 
-VkCommandPool VkHelpers::createCommandPool(
+VkCommandPool vk_helper::createCommandPool(
   const VulkanDevice *device,
   VkResult *result
 ) {
@@ -652,7 +652,7 @@ VkCommandPool VkHelpers::createCommandPool(
   return commandPool;
 }
 
-VkCommandBuffer VkHelpers::allocateCommandBuffer(
+VkCommandBuffer vk_helper::allocateCommandBuffer(
   const VulkanDevice *device,
   VkResult* result
 ) {
@@ -669,7 +669,7 @@ VkCommandBuffer VkHelpers::allocateCommandBuffer(
   return commandBuffer;
 }
 
-VkResult VkHelpers::beginCommandBuffer(
+VkResult vk_helper::beginCommandBuffer(
   VkCommandBuffer commandBuffer
 ) {
   VkCommandBufferBeginInfo beginInfo = {};
@@ -680,13 +680,13 @@ VkResult VkHelpers::beginCommandBuffer(
   return vkBeginCommandBuffer(commandBuffer, &beginInfo);
 }
 
-VkResult VkHelpers::endCommandBuffer(
+VkResult vk_helper::endCommandBuffer(
   VkCommandBuffer commandBuffer
 ) {
   return vkEndCommandBuffer(commandBuffer);
 }
 
-VkResult VkHelpers::submitCommandBuffers(
+VkResult vk_helper::submitCommandBuffers(
   const VulkanDevice *device,
   const std::vector<VkCommandBuffer>& commandBuffers,
   VkFence fence
@@ -698,7 +698,7 @@ VkResult VkHelpers::submitCommandBuffers(
   return vkQueueSubmit(device->queue, 1, &submitInfo, fence);
 }
 
-VkCommandBuffer VkHelpers::beginSingleTimeCommandBuffer(
+VkCommandBuffer vk_helper::beginSingleTimeCommandBuffer(
   const VulkanDevice *device
 ) {
   VkCommandBufferAllocateInfo allocInfo = {};
@@ -718,7 +718,7 @@ VkCommandBuffer VkHelpers::beginSingleTimeCommandBuffer(
   return commandBuffer;
 }
 
-void VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+void vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
   const VulkanDevice *device,
   VkCommandBuffer commandBuffer
 ) {
@@ -733,14 +733,14 @@ void VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
 }
 
 
-VulkanBuffer* VkHelpers::createDeviceBuffer(
+VulkanBuffer* vk_helper::createDeviceBuffer(
   const VulkanDevice *device,
   size_t size,
   bool readOnly,
   VkResult *result
 ) {
   if ( !result ) {
-    throw StringError("VkHelpers::createDeviceBuffer: result pointer is null");
+    throw StringError("vk_helper::createDeviceBuffer: result pointer is null");
   }
   VulkanBuffer *buffer = new VulkanBuffer();
   buffer->device = device;
@@ -773,7 +773,7 @@ VulkanBuffer* VkHelpers::createDeviceBuffer(
   return buffer;
 }
 
-VulkanBuffer* VkHelpers::createDeviceBufferWithData(
+VulkanBuffer* vk_helper::createDeviceBufferWithData(
   const VulkanDevice *device,
   size_t size,
   const void* data,
@@ -810,7 +810,7 @@ VulkanBuffer* VkHelpers::createDeviceBufferWithData(
     0,
     size
   );
-  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device);
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -822,19 +822,19 @@ VulkanBuffer* VkHelpers::createDeviceBufferWithData(
     1,
     &copyRegion
   );
-  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
   // Release staging buffer
-  VkHelpers::releaseVulkanBuffer(
+  vk_helper::releaseVulkanBuffer(
     device,
     stagingBuffer
   );
   return deviceBuffer;
 }
 
-VulkanBuffer* VkHelpers::createStagingBuffer(
+VulkanBuffer* vk_helper::createStagingBuffer(
   const VulkanDevice *device,
   size_t size,
   VkResult *result
@@ -866,7 +866,7 @@ VulkanBuffer* VkHelpers::createStagingBuffer(
   return buffer;
 }
 
-VulkanBuffer* VkHelpers::createReadbackBuffer(
+VulkanBuffer* vk_helper::createReadbackBuffer(
   const VulkanDevice *device,
   size_t size,
   VkResult *result
@@ -906,7 +906,7 @@ VulkanBuffer* VkHelpers::createReadbackBuffer(
  * @param waitForIdle If true, waits for the device to be idle after the copy operation.
  * @param result Pointer to a VkResult variable to capture the result of the operation.
  */
-void VkHelpers::copyDeviceBufferToHost(
+void vk_helper::copyDeviceBufferToHost(
   const VulkanDevice* device,
   VulkanBuffer* deviceBuffer,
   VkDeviceSize copySize,
@@ -915,7 +915,7 @@ void VkHelpers::copyDeviceBufferToHost(
   VkResult *result
 ) {
   // Create readback buffer
-  VulkanBuffer* readbackBuffer = VkHelpers::createReadbackBuffer(
+  VulkanBuffer* readbackBuffer = vk_helper::createReadbackBuffer(
     device,
     static_cast<size_t>(copySize),
     result
@@ -926,7 +926,7 @@ void VkHelpers::copyDeviceBufferToHost(
   }
 
   // Copy device buffer to readback buffer
-  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device);
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -938,7 +938,7 @@ void VkHelpers::copyDeviceBufferToHost(
     1,
     &copyRegion
   );
-  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
@@ -952,7 +952,7 @@ void VkHelpers::copyDeviceBufferToHost(
   );
 
   if ( *result != VK_SUCCESS ) {
-    VkHelpers::releaseVulkanBuffer(
+    vk_helper::releaseVulkanBuffer(
       device,
       readbackBuffer
     );
@@ -965,13 +965,13 @@ void VkHelpers::copyDeviceBufferToHost(
   );
 
   // Release readback buffer
-  VkHelpers::releaseVulkanBuffer(
+  vk_helper::releaseVulkanBuffer(
     device,
     readbackBuffer
   );
 }
 
-void VkHelpers::copyHostToDeviceBuffer(
+void vk_helper::copyHostToDeviceBuffer(
   const VulkanDevice* device,
   const void* hostPtr,
   VulkanBuffer* deviceBuffer,
@@ -980,7 +980,7 @@ void VkHelpers::copyHostToDeviceBuffer(
   VkResult *result
 ) {
   // Create staging buffer
-  VulkanBuffer* stagingBuffer = VkHelpers::createStagingBuffer(
+  VulkanBuffer* stagingBuffer = vk_helper::createStagingBuffer(
     device,
     static_cast<size_t>(copySize),
     result
@@ -1004,7 +1004,7 @@ void VkHelpers::copyHostToDeviceBuffer(
   );
 
   // Copy staging buffer to device buffer
-  VkCommandBuffer commandBuffer = VkHelpers::beginSingleTimeCommandBuffer(device);
+  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device);
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -1016,13 +1016,13 @@ void VkHelpers::copyHostToDeviceBuffer(
     1,
     &copyRegion
   );
-  VkHelpers::submitSingleTimeCommandBufferAndWaitIdle(
+  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
 
   // Release staging buffer
-  VkHelpers::releaseVulkanBuffer(
+  vk_helper::releaseVulkanBuffer(
     device,
     stagingBuffer
   );
@@ -1032,7 +1032,7 @@ void VkHelpers::copyHostToDeviceBuffer(
   }
 }
 
-void VkHelpers::releaseVulkanBuffer(
+void vk_helper::releaseVulkanBuffer(
   const VulkanDevice *device,
   VulkanBuffer *buffer
 ) {
@@ -1047,7 +1047,7 @@ void VkHelpers::releaseVulkanBuffer(
   }
 }
 
-VkFence VkHelpers::createFence(
+VkFence vk_helper::createFence(
   const VulkanDevice *device,
   VkResult *result
 ) {
@@ -1064,7 +1064,7 @@ VkFence VkHelpers::createFence(
   return fence;
 }
 
-void VkHelpers::destroyFence(
+void vk_helper::destroyFence(
   const VulkanDevice *device,
   VkFence fence
 ) {
@@ -1075,14 +1075,14 @@ void VkHelpers::destroyFence(
   );
 }
 
-VkResult VkHelpers::resetFence(
+VkResult vk_helper::resetFence(
   const VulkanDevice *device,
   VkFence fence
 ) {
   return vkResetFences(device->device, 1 , &fence);
 }
 
-void VkHelpers::barrierCommandBuffer(
+void vk_helper::barrierCommandBuffer(
   VkCommandBuffer commandBuffer,
   VkPipelineStageFlags srcStageMask,
   VkAccessFlags srcAccessMask,
@@ -1096,7 +1096,7 @@ void VkHelpers::barrierCommandBuffer(
   vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }
 
-void VkHelpers::barrierCommandBufferForBuffer(
+void vk_helper::barrierCommandBufferForBuffer(
   VkCommandBuffer commandBuffer,
   VulkanBuffer* buffer,
   VkPipelineStageFlags srcStageMask,
@@ -1116,14 +1116,14 @@ void VkHelpers::barrierCommandBufferForBuffer(
   vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 1, &bufferBarrier, 0, nullptr);
 }
 
-std::vector<int32_t> VkHelpers::createSpecData(void* data, size_t dataSize) {
+std::vector<int32_t> vk_helper::createSpecData(void* data, size_t dataSize) {
   size_t cnt = dataSize / sizeof(int32_t);
   int32_t* intData = reinterpret_cast<int32_t*>(data);
   std::vector<int32_t> specData(intData, intData + cnt);
   return specData;
 }
 
-std::vector<VkSpecializationMapEntry> VkHelpers::createSpecMapEntries(size_t dataCount) {
+std::vector<VkSpecializationMapEntry> vk_helper::createSpecMapEntries(size_t dataCount) {
   std::vector<VkSpecializationMapEntry> mapEntries(dataCount);
   for ( size_t i = 0; i < dataCount; i++ ) {
     mapEntries[i].constantID = static_cast<uint32_t>(i);
@@ -1133,7 +1133,7 @@ std::vector<VkSpecializationMapEntry> VkHelpers::createSpecMapEntries(size_t dat
   return mapEntries;
 }
 
-VkSpecializationInfo VkHelpers::createSpecializationInfo(const std::vector<int32_t>& specData, const std::vector<VkSpecializationMapEntry>& mapEntries) {
+VkSpecializationInfo vk_helper::createSpecializationInfo(const std::vector<int32_t>& specData, const std::vector<VkSpecializationMapEntry>& mapEntries) {
   VkSpecializationInfo specInfo = {};
   specInfo.mapEntryCount = static_cast<uint32_t>(mapEntries.size());
   specInfo.pMapEntries = mapEntries.data();

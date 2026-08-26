@@ -87,7 +87,7 @@ struct Pipeline {
 /**
  * @brief Vulkan Utility functions for instance and error handling
  */
-namespace VkHelpers {
+namespace vk_helper {
 
   size_t roundUpToMultiple(size_t size, size_t ofThis);
 
@@ -329,14 +329,14 @@ namespace VkDebug {
 
 #define CHECK_VK(res) { \
   if(res != VK_SUCCESS) { \
-    std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+    std::cerr << "[Vulkan error] " << vk_helper::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
     exit(EXIT_FAILURE); \
   } \
 }
 
 #define CHECK_VK_MSG(msg, res) { \
   if(res != VK_SUCCESS) { \
-    std::cerr << "[Vulkan error] " << VkHelpers::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl; \
+    std::cerr << "[Vulkan error] " << vk_helper::vkErrorToString(res) << " at " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl; \
     exit(EXIT_FAILURE); \
   } \
 }

@@ -211,12 +211,12 @@ struct ScratchBuffers {
     // std::cout << "Allocating ScratchBuffers for max batch size " << maxBatchSize << ", nnXLen " << nnXLen << ", nnYLen " << nnYLen << std::endl;
     std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {
       VkResult res = VK_SUCCESS;
-      return VkHelpers::createDeviceBuffer(handle->vulkanDevice, size, false, &res);
+      return vk_helper::createDeviceBuffer(handle->vulkanDevice, size, false, &res);
       CHECK_VK_MSG("Allocate Scratch Buffer of size " + std::to_string(size), res);
       // std::cout<<"Allocated Scratch Buffer of size " << size << std::endl;
     };
     std::function<void(VulkanBuffer *)> freeFunc = [this](VulkanBuffer *buffer) {
-      VkHelpers::releaseVulkanBuffer(handle->vulkanDevice, buffer);
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, buffer);
       // std::cout << "Released Scratch Buffer" << std::endl;
     };
 
