@@ -3764,6 +3764,17 @@ bool NeuralNet::setIsWarmup(const ComputeHandle* handle, bool isWarmup) {
   return false;
 }
 
+NeuralNet::BatchPolicy NeuralNet::getBatchPolicy(ConfigParser& cfg) {
+  (void)cfg;
+  return NeuralNet::BatchPolicy::Dynamic;
+}
+
+int NeuralNet::getNumEffectiveDevices(ConfigParser& cfg, const std::vector<int>& gpuIdxByServerThread) {
+  (void)cfg;
+  std::set<int> distinctDevices(gpuIdxByServerThread.begin(), gpuIdxByServerThread.end());
+  return std::max(1, (int)distinctDevices.size());
+}
+
 struct InputBuffers {
   int maxBatchSize;
 
