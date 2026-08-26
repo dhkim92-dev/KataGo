@@ -579,10 +579,16 @@ namespace vk_shader {
       uint32_t cSize;
     };
 
+    /**
+     * @brief Push parameters for ExtractChannel0NCHW shader
+     * @param nSize: number of batches
+     * @param cSize: number of input channels
+     * @param xySize: H*W spatial size
+     */
     struct ExtractChannel0NCHWParams {
-      uint32_t batchSize;
-      uint32_t numInputChannels;
-      uint32_t nnXYLen;
+      int nSize;  
+      int cSize;
+      int xySize;
     };
 
     struct NCHWPushConstantParams {

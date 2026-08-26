@@ -1774,7 +1774,7 @@ void performExtractChannel0NCHW(
   VkDescriptorSet& descriptorSet,
   VulkanBuffer* input,
   VulkanBuffer* output,
-  int batchSIze,
+  int batchSize,
   int numInputChannels,
   int nnXYLen,
   bool begin = true
@@ -1815,9 +1815,9 @@ void performExtractChannel0NCHW(
     nullptr
   );
   ExtractChannel0NCHWParams pushConstants = {};
-  pushConstants.numInputChannels = static_cast<uint32_t>(numInputChannels);
-  pushConstants.batchSize = static_cast<uint32_t>(batchSIze);
-  pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+  pushConstants.cSize = static_cast<uint32_t>(numInputChannels);
+  pushConstants.nSize = static_cast<uint32_t>(batchSize);
+  pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
   vkCmdPushConstants(
     commandBuffer,
     targetPipeline.layout,
@@ -1827,8 +1827,10 @@ void performExtractChannel0NCHW(
     &pushConstants
   );
   // Thread mapping: x->spatial, y->batch
-  uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
-  uint32_t wgCountY = (static_cast<uint32_t>(batchSIze) + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
+  uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(nnXYLen));
+  uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
+  uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+  uint32_t wgCountY = (globalSizeY + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
   uint32_t wgCountZ = 1u;
   SHADER_PROFILE_START("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
@@ -3333,7 +3335,7 @@ struct Model {
     VkCommandBuffer forwardCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(forwardCB);
     CHECK_VK_MSG("Begin model forward command buffer", res);
-    performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen, false);
+    performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels,handle->paddedNNXYLen, false);
     computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum, false);
     trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
@@ -3650,6 +3652,14 @@ ComputeHandleInternal::ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bo
 {
   this->queue = this->vulkanDevice->queue;
   this->device = this->vulkanDevice->device;
+  this->nnXLen = ctx->nnXLen;
+  this->nnYLen = ctx->nnYLen;
+
+  if ( usingFP16TensorCoresFor1x1 ) {
+    throw StringError("Define paddedNNXYLen required for WMMA 1x1 conv");
+  } else {
+    this->paddedNNXYLen = nnXLen * nnYLen;
+  }
 
   #ifdef SHADER_PROFILE 
   VkQueryPoolCreateInfo qpCI = {};

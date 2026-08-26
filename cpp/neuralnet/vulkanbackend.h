@@ -63,6 +63,11 @@ struct ComputeHandleInternal {
   const vk_shader::tune::VulkanTuneParams& tuneParams;
   VkDevice device;
   VkQueue queue;
+
+  int nnXLen;
+  int nnYLen;
+  int paddedNNXYLen; // nnXLen * nnYLen rounded up for spatial alignment
+
   bool usingFP16Storage = false;
   bool usingFp16Compute = false;
   bool usingFP16TensorCores = false;
