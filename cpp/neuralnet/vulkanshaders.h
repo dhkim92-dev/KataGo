@@ -261,6 +261,78 @@ namespace vk_shader {
   extern size_t spirv_extract_channel0_nchw_fp32_size;
 
   namespace spec {
+    struct Conv2DSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 8;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct Conv2DTiledBnAct3x3Spec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct Conv2DTiledBnAct5x5Spec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct AddPointWiseSpec {
+      uint32_t localSizeX = 256;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct MatmulSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct BatchNormMaskSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 8;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct GlobalPoolingChannelsSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct ValueHeadPoolingChannelsSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct SumChannelsSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct AddChannelBiasNCHWSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct AddChannelBiasNCSpec {
+      uint32_t localSizeX = 256;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct ExtractChannel0NCHWSpec {
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
     struct WinogradInputTransformBnActSpec {
       uint32_t localSizeX = 1;
       uint32_t localSizeY = 1;

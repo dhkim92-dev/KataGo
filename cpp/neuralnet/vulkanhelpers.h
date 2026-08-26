@@ -82,6 +82,9 @@ struct Pipeline {
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+  uint32_t localSizeX = 1;
+  uint32_t localSizeY = 1;
+  uint32_t localSizeZ = 1;
 };
 
 /**
