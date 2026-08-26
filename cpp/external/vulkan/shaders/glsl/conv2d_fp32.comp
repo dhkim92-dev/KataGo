@@ -51,7 +51,7 @@ layout(set = 0, binding = 2) buffer outputBuf_block {
 shared float inputCache[CONV_2D_TILE_Y][CONV_2D_TILE_K][CONV_2D_TILE_X + 1];  // +1 for bank conflict avoidance
 shared float filterCache[CONV_2D_TILE_OC][CONV_2D_TILE_K + 1];               // +1 for bank conflict avoidance
 
-layout(local_size_x = CONV_2D_DISPATCH_X, local_size_y = CONV_2D_DISPATCH_Y, local_size_z = 1) in;
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 void main()
 {

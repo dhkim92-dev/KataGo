@@ -26,7 +26,7 @@ layout(set = 0, binding = 1) readonly buffer g_bias_block {
     float g_bias[];
 };
 
-layout(local_size_x = ADD_CHANNELS_DISPATCH_X, local_size_y = ADD_CHANNELS_DISPATCH_Y, local_size_z = 1) in;
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 void main() {
     uvec3 gid = gl_GlobalInvocationID;

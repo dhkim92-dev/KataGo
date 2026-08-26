@@ -814,7 +814,10 @@ namespace vk_shader {
       size_t bindingSize,
       uint32_t pushConstantSize,
       Pipeline &outPipeline,
-      VkSpecializationInfo* specializationInfo = nullptr
+      VkSpecializationInfo* specializationInfo = nullptr,
+      uint32_t localSizeX = 1,
+      uint32_t localSizeY = 1,
+      uint32_t localSizeZ = 1
     );
     /**
      * @brief Create a Conv2d Fp32 object

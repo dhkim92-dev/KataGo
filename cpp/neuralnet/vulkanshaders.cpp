@@ -12,6 +12,21 @@ using namespace vk_shader::tune;
 
 namespace vk_shader {
 
+  namespace {
+    template <typename Spec>
+    struct SpecializationData {
+      std::vector<int32_t> data;
+      std::vector<VkSpecializationMapEntry> mapEntries;
+      VkSpecializationInfo info;
+
+      explicit SpecializationData(Spec& spec)
+        : data(vk_helper::createSpecData(&spec, sizeof(Spec))),
+          mapEntries(vk_helper::createSpecMapEntries(data.size())),
+          info(vk_helper::createSpecializationInfo(data, mapEntries))
+      {}
+    };
+  }
+
   // conv2d_fp32
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
@@ -238,7 +253,10 @@ namespace vk_shader {
     size_t bindingSize,
     uint32_t pushConstantSize,
     Pipeline &outPipeline,
-    VkSpecializationInfo* specializationInfo
+    VkSpecializationInfo* specializationInfo,
+    uint32_t localSizeX,
+    uint32_t localSizeY,
+    uint32_t localSizeZ
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
 
@@ -308,6 +326,9 @@ namespace vk_shader {
     outPipeline.descriptorSetLayout = descriptorSetLayout;
     outPipeline.layout = layout;
     outPipeline.pipeline = pipeline;
+    outPipeline.localSizeX = localSizeX;
+    outPipeline.localSizeY = localSizeY;
+    outPipeline.localSizeZ = localSizeZ;
     // std::cout << "Created Compute Pipeline: " << pipelineName << " result : " << res << std::endl;
     vkDestroyShaderModule(device, shaderModule, nullptr);
   }
@@ -316,15 +337,21 @@ namespace vk_shader {
    * @brief Create a Conv2d Fp32 object
   */
   void ComputePipelines::createConv2dFp32() {
-    createPipeline("Conv2dFp32",  vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32);
+    auto spec = Conv2DSpec();
+    SpecializationData specData(spec);
+    createPipeline("Conv2dFp32", vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
-    createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32);
+    auto spec = Conv2DTiledBnAct3x3Spec();
+    SpecializationData specData(spec);
+    createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
-    createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32);
+    auto spec = Conv2DTiledBnAct5x5Spec();
+    SpecializationData specData(spec);
+    createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createWinogradInputTransform() {
@@ -344,7 +371,7 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322.size());
     VkSpecializationInfo si3322 = vk_helper::createSpecializationInfo(specData_3322, specEntry);
 
-    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322);
+    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.convX = 5;
     spec.convY = 5;
     spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
@@ -357,7 +384,7 @@ namespace vk_shader {
     spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
     std::vector<int32_t> specData_5544 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
     VkSpecializationInfo si5544 = vk_helper::createSpecializationInfo(specData_5544, specEntry);
-    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544);
+    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createWinogradInputTransformBnAct() {
@@ -377,22 +404,22 @@ namespace vk_shader {
     std::vector<int32_t> specData_3322_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322_identity.size());
     VkSpecializationInfo si3322_identity = vk_helper::createSpecializationInfo(specData_3322_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity);
+    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_RELU;
     std::vector<int32_t> specData_3322_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_relu = vk_helper::createSpecializationInfo(specData_3322_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu);
+    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_MISH;
     std::vector<int32_t> specData_3322_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_mish = vk_helper::createSpecializationInfo(specData_3322_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish);
+    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_MISH_SCALE8;
     std::vector<int32_t> specData_3322_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_mish_scale8 = vk_helper::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8);
+    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     // 5x5
     spec.convX = 5;
@@ -408,19 +435,19 @@ namespace vk_shader {
     spec.activation = ACTIVATION_IDENTITY;
     std::vector<int32_t> specData_55_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_identity = vk_helper::createSpecializationInfo(specData_55_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity);
+    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_RELU;
     std::vector<int32_t> specData_55_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_relu = vk_helper::createSpecializationInfo(specData_55_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu);
+    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_MISH;
     std::vector<int32_t> specData_55_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_mish = vk_helper::createSpecializationInfo(specData_55_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_MISH_SCALE8;
     std::vector<int32_t> specData_55_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_mish_scale8 = vk_helper::createSpecializationInfo(specData_55_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createWinogradOutputTransform() {
@@ -439,7 +466,7 @@ namespace vk_shader {
     std::vector<int32_t> specData_33 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_33.size());
     VkSpecializationInfo si33 = vk_helper::createSpecializationInfo(specData_33, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.localSizeX = tuneParams.conv5x5.outputTransformLocalXSize;
     spec.localSizeY = tuneParams.conv5x5.outputTransformLocalYSize;
@@ -452,7 +479,7 @@ namespace vk_shader {
     spec.convY = 5;
     std::vector<int32_t> specData_55 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
     VkSpecializationInfo si55 = vk_helper::createSpecializationInfo(specData_55, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   /**
@@ -500,11 +527,15 @@ namespace vk_shader {
    * @brief Create a Add Point Wise Fp32 object
    */
   void ComputePipelines::createAddPointWiseFp32() {
-    createPipeline("AddPointWiseFp32",vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWiseFp32);
+    auto spec = AddPointWiseSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddPointWiseFp32", vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWiseFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createMatmulFp32() {
-    createPipeline("MatmulFp32", vk_shader::spirv_matmul_fp32, vk_shader::spirv_matmul_fp32_size, 3, sizeof(MatmulFp32Params), matmulFp32);
+    auto spec = MatmulSpec();
+    SpecializationData specData(spec);
+    createPipeline("MatmulFp32", vk_shader::spirv_matmul_fp32, vk_shader::spirv_matmul_fp32_size, 3, sizeof(MatmulFp32Params), matmulFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchedXgemmDirect() {
@@ -523,7 +554,7 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_batched_xgemm_direct, vk_shader::spirv_batched_xgemm_direct_size, 3, sizeof(BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo);
+    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_batched_xgemm_direct, vk_shader::spirv_batched_xgemm_direct_size, 3, sizeof(BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createXGEMMBatchedFp32() {
@@ -542,7 +573,7 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMBatchedFp32", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo);
+    createPipeline("XGEMMBatchedFp32", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createXGEMMStridedBatchedFp32() {
@@ -561,59 +592,85 @@ namespace vk_shader {
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo);
+    createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchNormMaskFp32() {
-    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_fp32, vk_shader::spirv_bn_mask_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskFp32);
+    auto spec = BatchNormMaskSpec();
+    SpecializationData specData(spec);
+    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_fp32, vk_shader::spirv_bn_mask_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchNormMaskReluFp32() {
-    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskReluFp32);
+    auto spec = BatchNormMaskSpec();
+    SpecializationData specData(spec);
+    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskReluFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchNormMaskMishFp32() {
-    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishFp32);
+    auto spec = BatchNormMaskSpec();
+    SpecializationData specData(spec);
+    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchNormMaskMishScale8Fp32() {
-    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishScale8Fp32);
+    auto spec = BatchNormMaskSpec();
+    SpecializationData specData(spec);
+    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishScale8Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createGlobalPoolingChannelsFp32() {
-    createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), globalPoolingChannelsFp32);
+    auto spec = GlobalPoolingChannelsSpec();
+    SpecializationData specData(spec);
+    createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), globalPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createValueHeadPoolingChannelsFp32() {
-    createPipeline("ValueHeadPoolingChannelsFp32", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32);
+    auto spec = ValueHeadPoolingChannelsSpec();
+    SpecializationData specData(spec);
+    createPipeline("ValueHeadPoolingChannelsFp32", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createSumChannelsFp32() {
-    createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), sumChannelsFp32);
+    auto spec = SumChannelsSpec();
+    SpecializationData specData(spec);
+    createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), sumChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCHWFp32() {
-    createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHWFp32);
+    auto spec = AddChannelBiasNCHWSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCIdentityFp32() {
-    createPipeline("AddChannelBiasNCIdentityFp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCIdentityFp32);
+    auto spec = AddChannelBiasNCSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCIdentityFp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCIdentityFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCReluFp32() {
-    createPipeline("AddChannelBiasNCReluFp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCReluFp32);
+    auto spec = AddChannelBiasNCSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCReluFp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCReluFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCMishFp32() {
-    createPipeline("AddChannelBiasNCMishFp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishFp32);
+    auto spec = AddChannelBiasNCSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCMishFp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCMishScale8Fp32() {
-    createPipeline("AddChannelBiasNCMishScale8Fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32);
+    auto spec = AddChannelBiasNCSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCMishScale8Fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createExtractChannel0NCHWFp32() {
-    createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(ExtractChannel0NCHWParams), extractChannel0NCHWFp32);
+    auto spec = ExtractChannel0NCHWSpec();
+    SpecializationData specData(spec);
+    createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(ExtractChannel0NCHWParams), extractChannel0NCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
 

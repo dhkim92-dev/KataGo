@@ -38,7 +38,7 @@ layout(set = 0, binding = 2) buffer gOutput_block {
 shared float Asub[MATMUL_TILE_M * (MATMUL_TILE_K + MATMUL_SMEM_PAD)];
 shared float Bsub[MATMUL_TILE_K * (MATMUL_TILE_N + MATMUL_SMEM_PAD)];
 
-layout(local_size_x = MATMUL_THREAD_M, local_size_y = MATMUL_THREAD_N, local_size_z = 1) in;
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 void main()
 {
