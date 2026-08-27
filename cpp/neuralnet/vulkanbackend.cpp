@@ -3134,8 +3134,6 @@ struct LoadedModel {
  * @brief Record command buffer to compute mask sums
  * @param handle Compute handle
  * @param batchSize Batch size
- * @param nnXLen Neural net X length
- * @param nnYLen Neural net Y length
  * @param mask Input mask buffer
  * @param maskSum Output mask sum buffer
  */
@@ -3144,23 +3142,38 @@ void computeMaskSums(
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
   int batchSize,
-  int nnXLen,
-  int nnYLen,
   VulkanBuffer* mask,
   VulkanBuffer* maskSum,
   bool begin = true
 ) {
   // SumChannels uses one workgroup for each (batch, channel) reduction.
-  // Dispatch: X=1 (single workgroup for reduction), Y=numChannels, Z=batchSize
-  // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
-  // VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  // The global work size follows OpenCL: (XYSTRIDE, 1, roundUp(batchSize, localSizeZ)).
 
-  int numChannels = 1;
-  int nnXYLen = nnXLen * nnYLen;
-  // Determine GPU and select appropriate compute pipeline
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+  const int numChannels = 1;
+  const int paddedNNXYLen = handle->paddedNNXYLen;
+  const uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
-  Pipeline targetPipeline = pipelines->sumChannelsFp32;
+
+  const uint32_t batchLocalSize = std::min(
+    {
+      static_cast<uint32_t>(handle->tuneParams.gPool.BATCHSTRIDE),
+      static_cast<uint32_t>(vk_helper::powerOf2ify(static_cast<size_t>(batchSize))),
+      static_cast<uint32_t>(pipelines->sumChannels.size())
+    }
+  );
+  const Pipeline& targetPipeline = pipelines->sumChannels.at(batchLocalSize - 1);
+
+  const uint32_t globalSizeX = static_cast<uint32_t>(handle->tuneParams.gPool.XYSTRIDE);
+  const uint32_t globalSizeY = 1u;
+  const uint32_t globalSizeZ = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(static_cast<size_t>(batchSize), targetPipeline.localSizeZ)
+  );
+  const uint32_t localSizeX = targetPipeline.localSizeX;
+  const uint32_t localSizeY = targetPipeline.localSizeY;
+  const uint32_t localSizeZ = targetPipeline.localSizeZ;
+  const uint32_t wgCountX = (globalSizeX + localSizeX - 1) / localSizeX;
+  const uint32_t wgCountY = (globalSizeY + localSizeY - 1) / localSizeY;
+  const uint32_t wgCountZ = (globalSizeZ + localSizeZ - 1) / localSizeZ;
 
   VkResult res = VK_SUCCESS;
   if ( descriptorSet == VK_NULL_HANDLE ) {
@@ -3184,14 +3197,11 @@ void computeMaskSums(
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
   vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
   SumChannelsParams pushConstants;
-  pushConstants.batchSize = batchSize;
-  pushConstants.numChannels = numChannels;
-  pushConstants.nnXYLen = nnXYLen;
+  pushConstants.nSize = batchSize;
+  pushConstants.cSize = numChannels;
+  pushConstants.xySize = paddedNNXYLen;
   vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SumChannelsParams), &pushConstants);
-  // Dispatch: X=1 (reduction), Y=numChannels(=1 for mask sum), Z=batchSize
-  uint32_t wgCountX = 1u;
-  uint32_t wgCountY = static_cast<uint32_t>(numChannels);
-  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
+
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
@@ -3336,7 +3346,7 @@ struct Model {
     VkResult res = vk_helper::beginCommandBuffer(forwardCB);
     CHECK_VK_MSG("Begin model forward command buffer", res);
     performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels,handle->paddedNNXYLen, false);
-    computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum, false);
+    computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, mask, maskSum, false);
     trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
     valueHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership, convWorkspace, convWorkspace2);
@@ -3374,7 +3384,7 @@ struct Model {
     performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {extractChannel0CB});
     printDeviceBuffer("Model::debug Extract Channel 0 Result", handle->vulkanDevice, mask, batchSize * nnXLen * nnYLen);
-    computeMaskSums(handle, computeMaskSumCB, computeMaskSumDS, batchSize, nnXLen, nnYLen, mask, maskSum);
+    computeMaskSums(handle, computeMaskSumCB, computeMaskSumDS, batchSize, mask, maskSum);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {computeMaskSumCB});
     printDeviceBuffer("Model::debug Mask Sum Result", handle->vulkanDevice, maskSum, batchSize);
     trunk->debug(batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
@@ -4723,7 +4733,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     std::vector<float> maskSumTmp(numMaskSumFloats, 0.0f);
     VkCommandBuffer maskSumsCB = VK_NULL_HANDLE;
     VkDescriptorSet maskSumsDS = VK_NULL_HANDLE;
-    computeMaskSums(handle, maskSumsCB, maskSumsDS, batchSize, nnXLen, nnYLen, dMask, dMaskSum);
+    computeMaskSums(handle, maskSumsCB, maskSumsDS, batchSize, dMask, dMaskSum);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {maskSumsCB}, nullptr);
     vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dMaskSum, static_cast<VkDeviceSize>(sizeof(float) * numMaskSumFloats), maskSumTmp.data(), true, &res);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device mask sum buffer to host", res);

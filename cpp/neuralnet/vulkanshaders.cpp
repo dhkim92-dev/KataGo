@@ -217,7 +217,10 @@ namespace vk_shader {
     destroyPipeline(batchNormMaskMishScale8Fp32);
     destroyPipeline(globalPoolingChannelsFp32);
     destroyPipeline(valueHeadPoolingChannelsFp32);
-    destroyPipeline(sumChannelsFp32);
+    for ( int bs =1 ; bs <= 4 ; bs++ ) {
+      destroyPipeline(sumChannels[bs]);
+    }
+    sumChannels.clear();
     destroyPipeline(addChannelBiasNCHWFp32);
     destroyPipeline(addChannelBiasNCIdentityFp32);
     destroyPipeline(addChannelBiasNCReluFp32);
@@ -633,8 +636,19 @@ namespace vk_shader {
 
   void ComputePipelines::createSumChannelsFp32() {
     auto spec = SumChannelsSpec();
-    SpecializationData specData(spec);
-    createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), sumChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
+    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
+    spec.localSizeX = spec.XYSTRIDE;
+    spec.localSizeY = spec.CHANNELSTRIDE;
+    sumChannels.clear();
+    for ( int bs = 1 ; bs <= 4 ; ++bs ) {
+      spec.localSizeZ = bs;
+      spec.LOCALSIZE_TOTAL = spec.localSizeX * spec.localSizeY * spec.localSizeZ;
+      SpecializationData specData(spec);
+      Pipeline pipeline{};
+      createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      sumChannels.push_back(pipeline);
+    }
   }
 
   void ComputePipelines::createAddChannelBiasNCHWFp32() {

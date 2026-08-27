@@ -309,10 +309,19 @@ namespace vk_shader {
       uint32_t localSizeZ = 1;
     };
 
+    /**
+     * @brief SumChannels Kernel Specialization Info
+     * @param XYSTRIDE - power of two parallelism stride for reduction, should be gl_WorkGroupSize.x;
+     * @param CHANNELSTRIDE - stride for channels, should be get gl_WorkGroupSize.y
+     * @param LOCALSIZE_TOTAL = should be get gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z
+     */
     struct SumChannelsSpec {
-      uint32_t localSizeX = 128;
+      uint32_t localSizeX = 32;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
     };
 
     struct AddChannelBiasNCHWSpec {
@@ -523,11 +532,14 @@ namespace vk_shader {
 
     /**
      * @brief Sum Channels Fp32 Push Constant Parameters
+     * @param nSize - number of batch
+     * @param cSize - number of channels
+     * @param xySize - H*W spatial size
      */
     struct SumChannelsParams {
-      uint32_t batchSize;
-      uint32_t numChannels;
-      uint32_t nnXYLen;
+      uint32_t nSize;
+      uint32_t cSize;
+      uint32_t xySize;
     };
 
     /**
@@ -600,6 +612,13 @@ namespace vk_shader {
   };
 
   namespace tune {
+
+    struct GPoolTuneParams {
+      int XYSTRIDE=32;
+      int CHANNELSTRIDE=1;
+      int BATCHSTRIDE=2;
+    };
+
     struct ConvTuneParams {
       uint32_t inTileYSize;
       uint32_t inTileXSize;
@@ -634,6 +653,7 @@ namespace vk_shader {
     };
 
     struct VulkanTuneParams {
+      GPoolTuneParams gPool;
       ConvTuneParams conv3x3;
       ConvTuneParams conv5x5;
       XgemmTuneParams xgemm;
@@ -793,7 +813,7 @@ namespace vk_shader {
     Pipeline valueHeadPoolingChannelsFp32;
     
     // Element wise operations
-    Pipeline sumChannelsFp32;
+    std::vector<Pipeline> sumChannels;
 
     Pipeline addChannelBiasNCHWFp32;
     Pipeline addChannelBiasNCIdentityFp32;
