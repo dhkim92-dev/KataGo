@@ -1,6 +1,6 @@
 /**
  * @file vulkanbackend.cpp
- * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @author dhkim92-dev
  * @brief Vulkan backend for Neural Net evaluation
  */
 #ifdef USE_VULKAN_BACKEND
@@ -403,6 +403,9 @@ struct MatmulLayer {
     inChannels(desc->inChannels),
     outChannels(desc->outChannels)
   {
+
+    // TODO useFP16 support
+
     if ( inChannels > 0 && outChannels > 0 ) {
       assert(desc->weights.size() == static_cast<size_t>(inChannels) * static_cast<size_t>(outChannels));
       std::vector<float> weights(desc->weights.size());
@@ -773,22 +776,22 @@ struct ConvLayer {
   const std::string name;
   const int convYSize;
   const int convXSize;
+  const int convYRadius;
+  const int convXRadius;
   const int inChannels;
   const int outChannels;
   const int dilationY;
   const int dilationX;
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
 
-  int inTilesY;
-  int inTilesX;
-  int outTilesY;
-  int outTilesX;
   int numTilesX;
   int numTilesY;
-  int inTilesXYSize;
-  int outTilesXYSize;
-  int numTilesTotal;
+  int inTileXYSize;
+  int outTileXYSize;
+
+  bool usingHGemmWmmaNCHW;
 
   VulkanBuffer* filterBuf = nullptr;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -815,12 +818,15 @@ struct ConvLayer {
     name(desc->name),
     convYSize(desc->convYSize),
     convXSize(desc->convXSize),
+    convYRadius(desc->convYSize/2),
+    convXRadius(desc->convXSize/2),
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
     dilationY(desc->dilationY),
     dilationX(desc->dilationX),
     nnXLen(nnXLen_),
-    nnYLen(nnYLen_)
+    nnYLen(nnYLen_),
+    paddedNNXYLen(handle_->paddedNNXYLen)
   {
     assert(convXSize % 2 == 1);
     assert(convYSize % 2 == 1);
@@ -829,12 +835,12 @@ struct ConvLayer {
       throw StringError("Vulkan ConvLayer: " + name + " dilation not supported yet");
     }
 
+    usingHGemmWmmaNCHW = false;
     VkResult res;
     numTilesX = 0;
     numTilesY = 0;
-    numTilesTotal = 0;
-    inTilesXYSize = 0;
-    outTilesXYSize = 0;
+    inTileXYSize = 0;
+    outTileXYSize = 0;
 
     // if ( convYSize == 3 || convYSize == 5 ) {
       // outTilesY = convYSize == 3 ? handle->tuneParams.conv3x3.outTileYSize : handle->tuneParams.conv5x5.outTileYSize;
@@ -850,8 +856,9 @@ struct ConvLayer {
 
     // For 1x1 conv, transpose weights from [OC][IC] to [IC][OC] for KM_KN_NM matmul convention
     // This matches OpenCL's transWeights layout for 1x1 convolutions
-    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
     int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+
     if (convXSize == 1 && convYSize == 1) {
       std::vector<float> transWeights(inChannels * outChannels);
       for (int oc = 0; oc < outChannels; oc++) {
@@ -859,6 +866,7 @@ struct ConvLayer {
           transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
         }
       }
+      // TODO: FP16 support
       filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
         sizeof(float) * transWeights.size(),
@@ -866,50 +874,41 @@ struct ConvLayer {
         true,
         &res
       );
-    } else if(convXSize == 3 && convYSize == 3) {
-      outTilesY = handle->tuneParams.conv3x3.outTileYSize;
-      outTilesX = handle->tuneParams.conv3x3.outTileXSize;
-      inTilesY = handle->tuneParams.conv3x3.inTileYSize;
-      inTilesX = handle->tuneParams.conv3x3.inTileXSize;
-      inTilesXYSize = inTilesY * inTilesX;
-      outTilesXYSize = outTilesY * outTilesX;
-      numTilesX = (nnXLen + outTilesX - 1) / outTilesX;
-      numTilesY = (nnYLen + outTilesY - 1) / outTilesY;
-      numTilesTotal = numTilesX * numTilesY;
-      std::vector<float> winograd3x3Weights = vkcompute::convWeightsToWinogradDomain(
+    } else if( (convXSize == 3 && convYSize == 3) || (convXSize==5 &&convYSize == 5)) {
+      // outTilesY = handle->tuneParams.conv3x3.outTileYSize;
+      // outTilesX = handle->tuneParams.conv3x3.outTileXSize;
+      // inTilesY = handle->tuneParams.conv3x3.inTileYSize;
+      // inTilesX = handle->tuneParams.conv3x3.inTileXSize;
+      int inTileXSize = convXSize == 3 ? handle->tuneParams.conv3x3.inTileXSize : handle->tuneParams.conv5x5.inTileXSize;
+      int inTileYSize = convYSize == 3 ? handle->tuneParams.conv3x3.inTileYSize : handle->tuneParams.conv5x5.inTileYSize;
+      int outTileXSize = convXSize == 3 ? handle->tuneParams.conv3x3.outTileXSize : handle->tuneParams.conv5x5.outTileXSize;
+      int outTileYSize = convYSize == 3 ? handle->tuneParams.conv3x3.outTileYSize : handle->tuneParams.conv5x5.outTileYSize;
+
+      int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+      int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
+
+      numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
+      numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
+      inTileXYSize = inTileXSize * inTileYSize;
+      outTileXYSize = outTileXSize * outTileYSize;
+
+      static constexpr int maxTileXSize = 6;
+      static constexpr int maxTileYSize = 6;
+
+      testAssert((convXSize == 3 && convYSize == 3) ? (inTileXSize == 4 && outTileXSize == 2) || (inTileXSize == 6 && outTileXSize == 4) : true);
+      testAssert((convXSize == 5 && convYSize == 5) ? (inTileYSize == 6 && outTileYSize == 2) : true);
+
+      std::vector<float> winogradWeights = vkcompute::convWeightsToWinogradDomain(
         desc->weights, inChannels, inChannelsPadded,
         outChannels, outChannelsPadded,
         convYSize, convXSize, 
-        inTilesY, inTilesX
+        inTileYSize, inTileXSize
       );
 
       filterBuf = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice,
-        sizeof(float) * winograd3x3Weights.size(),
-        winograd3x3Weights.data(),
-        true,
-        &res
-      );
-    } else if (convXSize == 5 && convYSize == 5) {
-      outTilesY = handle->tuneParams.conv5x5.outTileYSize;
-      outTilesX = handle->tuneParams.conv5x5.outTileXSize;
-      inTilesY = handle->tuneParams.conv5x5.inTileYSize;
-      inTilesX = handle->tuneParams.conv5x5.inTileXSize;
-      inTilesXYSize = inTilesY * inTilesX;
-      outTilesXYSize = outTilesY * outTilesX;
-      numTilesX = (nnXLen + outTilesX - 1) / outTilesX;
-      numTilesY = (nnYLen + outTilesY - 1) / outTilesY;
-      numTilesTotal = numTilesX * numTilesY;
-      std::vector<float> winograd5x5Weights = vkcompute::convWeightsToWinogradDomain(
-        desc->weights, inChannels, inChannelsPadded,
-        outChannels, outChannelsPadded,
-        convYSize, convXSize, 
-        inTilesY, inTilesX
-      );
-      filterBuf = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice,
-        sizeof(float) * winograd5x5Weights.size(),
-        winograd5x5Weights.data(),
+        sizeof(float) * winogradWeights.size(),
+        winogradWeights.data(),
         true,
         &res
       );
@@ -950,11 +949,11 @@ struct ConvLayer {
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) {
     int numTilesTotalPadded = vk_helper::roundUpToMultipleInt(maxBatchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
     int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
 
     return ConvWorkspaceEltsNeeded {
-      static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(inChannelsPadded) * static_cast<size_t>(inTilesXYSize),
-      static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(outChannelsPadded) * static_cast<size_t>(inTilesXYSize)
+      static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(inChannelsPadded) * static_cast<size_t>(inTileXYSize),
+      static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(outChannelsPadded) * static_cast<size_t>(inTileXYSize)
     };
   }
 
@@ -1228,7 +1227,7 @@ struct ConvLayer {
         mask,
         nnYLen, nnXLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
-        inChannels, handle->getXgemmKPaddingMult(),
+        inChannels, handle->getXGemmKPaddingMult(),
         convYSize,
         &res
       );
@@ -1253,13 +1252,13 @@ struct ConvLayer {
         &xgemmBatchedPipeline,
         cb,
         xgemmBatchedDS,
-        vk_helper::roundUpToMultipleInt(batchSize * numTilesTotal, handle->getXGemmMPaddingMult()), 
+        vk_helper::roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult()), 
         vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult()), 
-        vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult()),
+        vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult()),
         convWorkspace1,
         filterBuf,
         convWorkspace2,
-        this->inTilesXYSize,
+        inTileXYSize,
         &res
       );
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
@@ -1278,7 +1277,7 @@ struct ConvLayer {
         winogradOutputTransformDS,
         convWorkspace2,
         output,
-        nnYLen, nnXLen,
+        nnYLen, nnXLen, paddedNNXYLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
         outChannels, handle->getXGemmNPaddingMult(),
         &res
@@ -1348,9 +1347,9 @@ struct ConvLayer {
         winogradInputTransformDS,
         input,
         convWorkspace1,
-        nnYLen, nnXLen,
+        nnYLen, nnXLen, paddedNNXYLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
-        inChannels, handle->getXgemmKPaddingMult(),
+        inChannels, handle->getXGemmKPaddingMult(),
         convYSize,
         &res
       );
@@ -1360,7 +1359,7 @@ struct ConvLayer {
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace1);
 
     uint32_t numTilesTotal = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
-    uint32_t inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    uint32_t inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
     uint32_t outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
     {
       SHADER_PROFILE_START("WINOGRAD_GEMM", cb);
@@ -1376,7 +1375,7 @@ struct ConvLayer {
         convWorkspace1,
         filterBuf,
         convWorkspace2,
-        this->inTilesXYSize,
+        inTileXYSize,
         &res
       );
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
@@ -1393,7 +1392,7 @@ struct ConvLayer {
         winogradOutputTransformDS,
         convWorkspace2,
         output,
-        nnYLen, nnXLen,
+        nnYLen, nnXLen, paddedNNXYLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
         outChannels, handle->getXGemmNPaddingMult(),
         &res
@@ -1461,7 +1460,7 @@ struct ConvLayer {
     std::printf("[%s] metadata batchSize=%d inCh=%d outCh=%d nnXLen=%d nnYLen=%d convX=%d convY=%d numTilesX=%d numTilesY=%d\n",
       name.c_str(), batchSize, inChannels, outChannels, nnXLen, nnYLen, convXSize, convYSize, numTilesX, numTilesY);
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-    int icPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXgemmKPaddingMult());
+    int icPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
     int ocPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
     int ntxtyPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
 
@@ -1730,6 +1729,7 @@ struct NormActConv {
     VulkanBuffer* convWorkspace = nullptr,
     VulkanBuffer* convWorkspace2 = nullptr
   ) {
+    // NOTE: fused kernel disabled, performance issue. maybe porting something wrong.
     // if ( conv.isBNActFusedPossible() ) {
       // conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
       // vk_helper::barrierCommandBufferForBuffer(cb, output);
@@ -1737,8 +1737,8 @@ struct NormActConv {
       bn.forward(cb, batchSize, input, mask, inputScratchOrInput);
       vk_helper::barrierCommandBufferForBuffer(cb, inputScratchOrInput);
       conv.forward(cb, batchSize, inputScratchOrInput, output, convWorkspace, convWorkspace2);
-      vk_helper::barrierCommandBufferForBuffer(cb, output);
     // }
+      vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 
 
@@ -2157,25 +2157,25 @@ void performValueHeadPool(
 struct ResidualBlock {
   ComputeHandleInternal *handle;
   const std::string name;
-  const int nnXLen;
-  const int nnYLen;
   NormActConv *normActConv;
   NormActConv *normActConv2;
-  // std::vector<VkCommandBuffer> commandBuffers;
-  // VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
+  const int nnXLen; // TODO: remove this after paddedNNXY apply
+  const int nnYLen; // TODO: remove this after paddedNNXY apply
+  const int paddedNNXYLen;
   VkDescriptorSet addPointWiseDS = VK_NULL_HANDLE;
 
   ResidualBlock(
     ComputeHandleInternal *handle_,
     const ResidualBlockDesc* desc,
-    int nnXLen_,
-    int nnYLen_,
+    int nnXLen,
+    int nnYLen,
     bool useFP16
   ):
     handle(handle_),
     name(desc->name),
-    nnXLen(nnXLen_),
-    nnYLen(nnYLen_)
+    nnXLen(nnXLen),
+    nnYLen(nnYLen),
+    paddedNNXYLen(handle_->paddedNNXYLen)
   {
     // TODO: FP16 support
     normActConv = new NormActConv(

@@ -126,6 +126,7 @@ void convInputsToWinogradDomain(
   VulkanBuffer* convWorkspace,
   uint32_t nnYLen,
   uint32_t nnXLen,
+  uint32_t xyStride,
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
   uint32_t convSize,
@@ -161,8 +162,9 @@ void convInputsToWinogradDomain(
   params.numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
   params.numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
   params.inChannels = inChannels;
-  params.inChannelsPadded = static_cast<uint32_t>(inChannelsPadded);
-  params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
+  params.inChannelsPadded = inChannelsPadded;
+  params.ntxtySizePadded = batchNumTilesPadded;
+  params.xyStride = xyStride;
   // };
   // std::printf("convInputsToWinogradDomain: batchSize = %d nnYLen = %d nnXLen = %d numTilesY = %d numTilesX = %d inChannels = %d inChannelsPadded = %d batchNumTilesPadded = %d\n",
     // params.batchSize, params.nnYLen, params.nnXLen, params.numTilesY, params.numTilesX, params.inChannels, params.inChannelsPadded, params.ntxtySizePadded
@@ -265,7 +267,7 @@ void winogradOutputToSpatialDomain(
   VkDescriptorSet descriptorSet,
   const VulkanBuffer* convWorkspace2,
   VulkanBuffer* output,
-  uint32_t nnYLen, uint32_t nnXLen,
+  uint32_t nnYLen, uint32_t nnXLen, uint32_t xyStride,
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t outChannels, uint32_t outChannelsPadMultiple,
   VkResult *result
@@ -287,6 +289,7 @@ void winogradOutputToSpatialDomain(
   params.outChannels = static_cast<int>(outChannels);
   params.outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
   params.ntxtySizePadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
+  params.xyStride = xyStride;
 
   // std::printf(
   //   "winogradOutputToSpatialDomain: batchSize=%d ySize=%d xSize=%d numTilesY=%d numTilesX=%d outChannels=%d outChannelsPadded=%d ntxtySizePadded=%d\n",

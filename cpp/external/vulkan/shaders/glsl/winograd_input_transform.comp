@@ -20,16 +20,17 @@ layout(constant_id = 8) const int INTILE_XOFFSET = -1;
 layout(constant_id = 9) const int CONV_YSIZE = 3;
 layout(constant_id = 10) const int CONV_XSIZE = 3;
     
-layout(push_constant) uniform WinogradInputTransformParams {
+layout(push_constant) uniform WinogradInputTransform{
   int nSize;
-  int ySize;
   int xSize;
-  int numTilesY;
+  int ySize;
   int numTilesX;
+  int numTilesY;
   int icSize;
   int icSizePadded;
   int ntxtySizePadded;
-} params;
+  int xyStride;
+};
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer {
     real _input[];
@@ -45,16 +46,17 @@ void main()
 {
   int id0 = GlobalId0();
   const int ntxty = id0;
-  const int tileX = id0 % params.numTilesX;
-  id0 = int(id0 / params.numTilesX);
-  const int tileY = id0 % params.numTilesY;
-  id0 = int(id0 / params.numTilesY);
+  const int tileX = id0 % numTilesX;
+  id0 = int(id0 / numTilesX);
+  const int tileY = id0 % numTilesY;
+  id0 = int(id0 / numTilesY);
   const int n = id0;
   const int ic = GlobalId1();
-  const int nic = n * params.icSize + ic;
-  const int xySize = params.xSize * params.ySize;
+  const int nic = n * icSize + ic;
+  const int xySize = xSize * ySize;
 
-  #define INPUT(_nic,_xy) LOAD(_input,((_nic) * xySize) + (_xy))
+  // #define INPUT(_nic,_xy) LOAD(_input,((_nic) * xyStride) + (_xy))
+  #define INPUT(_nic,_xy) LOAD(_input,((_nic) * xyStride) + (_xy))
   #define WTILE(_y,_x) wTile[(_y)*INTILE_XSIZE + (_x)]
 
   real wTile[INTILE_XSIZE * INTILE_YSIZE];
@@ -65,8 +67,8 @@ void main()
     for(int subX = 0; subX < INTILE_XSIZE; subX++) {
       int x = tileX * OUTTILE_XSIZE + subX + INTILE_XOFFSET;
       real value = ZERO;
-      if(y >= 0 && y < params.ySize && x >= 0 && x < params.xSize && n < params.nSize && ic < params.icSize) {
-        int xy = y * params.xSize + x;
+      if(y >= 0 && y < ySize && x >= 0 && x < xSize && n < nSize && ic < icSize) {
+        int xy = y * xSize + x;
         value = INPUT(nic,xy);
       }
       WTILE(subY,subX) = value;
@@ -137,13 +139,6 @@ void main()
       real z3 = WTILE(3,subX);
       real z4 = WTILE(4,subX);
       real z5 = WTILE(5,subX);
-      // Low error winograd
-      // WTILE(0,subX) = z0 - TWOP5*z2 + z4;
-      // WTILE(1,subX) = - SQRT2*z1 - TWO*z2 + SQRTHALF*z3 + z4;
-      // WTILE(2,subX) =   SQRT2*z1 - TWO*z2 - SQRTHALF*z3 + z4;
-      // WTILE(3,subX) = - SQRTHALF*z1 - HALF*z2 + SQRT2*z3 + z4;
-      // WTILE(4,subX) =   SQRTHALF*z1 - HALF*z2 - SQRT2*z3 + z4;
-      // WTILE(5,subX) = z1 - TWOP5*z3 + z5;
       WTILE(0,subX) = FOUR*z0 - FIVE*z2 + z4;
       WTILE(1,subX) = - FOUR*z1 - FOUR*z2 + z3 + z4;
       WTILE(2,subX) =   FOUR*z1 - FOUR*z2 - z3 + z4;
@@ -169,9 +164,9 @@ void main()
   } else {
     // 
   }
-  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*params.icSizePadded + (_ic))*params.ntxtySizePadded + (_ntile),_value)
+  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*icSizePadded + (_ic))*ntxtySizePadded + (_ntile),_value)
 
-  if(ntxty < params.ntxtySizePadded && ic < params.icSizePadded) {
+  if(ntxty < ntxtySizePadded && ic < icSizePadded) {
     //Copy private tile out to transformed output
     for(int subY = 0; subY < INTILE_YSIZE; subY++) {
       for(int subX = 0; subX < INTILE_XSIZE; subX++) {

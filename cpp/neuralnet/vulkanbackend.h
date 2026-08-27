@@ -175,7 +175,7 @@ struct ComputeHandleInternal {
     return tuneParams.xgemm.NWG;
   }
 
-  int getXgemmKPaddingMult() const {
+  int getXGemmKPaddingMult() const {
     return tuneParams.xgemm.KWG;
   }
 };

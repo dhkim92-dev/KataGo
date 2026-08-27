@@ -32,7 +32,7 @@ layout(set=0, binding = 1) writeonly buffer OutputBuffer {
     real _output[];
 };
 
-layout(push_constant) uniform WinogradOutputRecoverParams {
+layout(push_constant) uniform WinogradOutputRecover{
     int batchSize;
     int ySize;
     int xSize;
@@ -41,25 +41,27 @@ layout(push_constant) uniform WinogradOutputRecoverParams {
     int outChannels;
     int outChannelsPadded;
     int ntxtySizePadded;
-} params;
+    int xyStride;
+};
 
 #define WTILE(_y, _x) wTile[(_y)*INTILE_XSIZE + (_x)]
-#define TRANS(_suby, _subx, _oc, _ntile) LOAD(_input, ((((_suby) * INTILE_XSIZE + (_subx)) * params.outChannelsPadded + (_oc)) * params.ntxtySizePadded + (_ntile)))
-#define WRITEOUTPUT(_noc, _y, _x, _value) STORE(_output, (((_noc) * params.ySize + (_y)) * params.xSize + (_x)), _value)
+#define TRANS(_suby, _subx, _oc, _ntile) LOAD(_input, ((((_suby) * INTILE_XSIZE + (_subx)) * outChannelsPadded + (_oc)) * ntxtySizePadded + (_ntile)))
+// #define WRITEOUTPUT(_noc, _y, _x, _value) STORE(_output, (((_noc) * xyStride + (_y)) * xSize + (_x)), _value)
+#define WRITEOUTPUT(_noc,_y,_x,_value) STORE(_output,(_noc) * xyStride + (_y) * xSize + (_x),_value)
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in; 
 
 void main() {
     const int tileX = GlobalId0();
     const int tileY = GlobalId1();
     const int batchOutC = GlobalId2();
-    const int batch = batchOutC / params.outChannels;
-    const int outC = batchOutC % params.outChannels;
-    const int nTiles = (batch * params.numTilesY + tileY) * params.numTilesX + tileX;
+    const int batch = batchOutC / outChannels;
+    const int outC = batchOutC % outChannels;
+    const int nTiles = (batch * numTilesY + tileY) * numTilesX + tileX;
 
     real wTile[INTILE_YSIZE * INTILE_XSIZE];
     // load output tile from winograd domain to wTile
 
-    if ( tileY < params.numTilesY && tileX < params.numTilesX && batch < params.batchSize) {
+    if ( tileY < numTilesY && tileX < numTilesX && batch < batchSize) {
         for ( int subY = 0 ; subY < INTILE_YSIZE ; ++subY ) {
             for ( int subX = 0 ; subX < INTILE_XSIZE ; ++subX ) {
                 WTILE(subY, subX) = TRANS(subY, subX, outC, nTiles);
@@ -148,11 +150,11 @@ void main() {
         for ( int subX = 0 ; subX < OUTTILE_XSIZE ; ++subX ) {
             int x = tileX * OUTTILE_XSIZE + subX;
 
-            if ( y >= 0 && y < params.ySize 
-                 && x >= 0 && x < params.xSize 
-                 && batch < params.batchSize 
-                 && tileX < params.numTilesX 
-                 && tileY < params.numTilesY ) {
+            if ( y >= 0 && y < ySize 
+                 && x >= 0 && x < xSize 
+                 && batch < batchSize 
+                 && tileX < numTilesX 
+                 && tileY < numTilesY ) {
                     real result = WTILE(subY, subX);
                     WRITEOUTPUT( batchOutC, y, x, result );
             }
@@ -166,14 +168,14 @@ void main() {
     // if (batch == 0 && outC == 0 && tileX == 0 && tileY == 0 && LocalId0() == 0 && LocalId1() == 0 && LocalId2() == 0) {
     //     // Linear stores into the output buffer (overwrites the first few output elements).
     //     // Values captured: batchSize, ySize, xSize, numTilesY, numTilesX, outChannels, outChannelsPadded, ntxtySizePadded, nTiles
-    //     STORE(_output, 0, real(params.batchSize));
-    //     STORE(_output, 1, real(params.ySize));
-    //     STORE(_output, 2, real(params.xSize));
-    //     STORE(_output, 3, real(params.numTilesY));
-    //     STORE(_output, 4, real(params.numTilesX));
-    //     STORE(_output, 5, real(params.outChannels));
-    //     STORE(_output, 6, real(params.outChannelsPadded));
-    //     STORE(_output, 7, real(params.ntxtySizePadded));
+    //     STORE(_output, 0, real(batchSize));
+    //     STORE(_output, 1, real(ySize));
+    //     STORE(_output, 2, real(xSize));
+    //     STORE(_output, 3, real(numTilesY));
+    //     STORE(_output, 4, real(numTilesX));
+    //     STORE(_output, 5, real(outChannels));
+    //     STORE(_output, 6, real(outChannelsPadded));
+    //     STORE(_output, 7, real(ntxtySizePadded));
     //     STORE(_output, 8, real(nTiles));
     //     // Also record the raw transformed tile values (up to 16 entries) so
     //     // we can compare what the shader loaded from the transformed buffer.

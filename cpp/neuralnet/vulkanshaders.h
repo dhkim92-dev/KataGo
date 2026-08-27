@@ -453,14 +453,15 @@ namespace vk_shader {
     };
 
     struct WinogradInputTransformParams {
-      uint32_t batchSize;
-      uint32_t nnYLen;
-      uint32_t nnXLen;
-      uint32_t numTilesY;
-      uint32_t numTilesX;
-      uint32_t inChannels;
-      uint32_t inChannelsPadded;
-      uint32_t ntxtySizePadded;
+      int batchSize;
+      int nnYLen;
+      int nnXLen;
+      int numTilesY;
+      int numTilesX;
+      int inChannels;
+      int inChannelsPadded;
+      int ntxtySizePadded;
+      int xyStride;
     };
 
     struct WinogradOutputTransformParams {
@@ -472,6 +473,7 @@ namespace vk_shader {
       int outChannels;
       int outChannelsPadded;
       int ntxtySizePadded;
+      int xyStride;
     };
 
     /**

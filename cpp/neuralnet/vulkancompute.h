@@ -42,6 +42,7 @@ namespace vkcompute {
     VulkanBuffer* convWorkspace,
     uint32_t nnYLen,
     uint32_t nnXLen,
+    uint32_t xyStride,
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
     uint32_t convSize,
@@ -74,7 +75,7 @@ namespace vkcompute {
     VkDescriptorSet descriptorSet,
     const VulkanBuffer* convWorkspace2,
     VulkanBuffer* output,
-    uint32_t nnYLen, uint32_t nnXLen,
+    uint32_t nnYLen, uint32_t nnXLen, uint32_t xyStride,
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t outChannels, uint32_t outChannelsPadMultiple,
     VkResult *result
