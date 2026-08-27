@@ -129,6 +129,11 @@ extern "C" {
   extern const unsigned char* _binary_add_channel_bias_nc_mish_scale8_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_mish_scale8_fp32_size;
 
+  // add_channel_bias_nc_silu_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_silu_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_silu_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_silu_fp32_size;
+
   // extract channel0_nchw_fp32.glsl
   extern const unsigned char _binary_extract_channel0_nchw_fp32_start[];
   extern const unsigned char* _binary_extract_channel0_nchw_fp32_end;
@@ -256,6 +261,10 @@ namespace vk_shader {
   extern const unsigned char* spirv_add_channel_bias_nc_mish_scale8_fp32;
   extern size_t spirv_add_channel_bias_nc_mish_scale8_fp32_size;
 
+  // add_channel_bias_nc_relu_fp32 - Add channel bias + ReLU
+  extern const unsigned char* spirv_add_channel_bias_nc_silu_fp32;
+  extern size_t spirv_add_channel_bias_nc_silu_fp32_size;
+
   // Extract channel 0 from NCHW fp32
   extern const unsigned char* spirv_extract_channel0_nchw_fp32;
   extern size_t spirv_extract_channel0_nchw_fp32_size;
@@ -331,8 +340,8 @@ namespace vk_shader {
     };
 
     struct AddChannelBiasNCSpec {
-      uint32_t localSizeX = 256;
-      uint32_t localSizeY = 1;
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 4;
       uint32_t localSizeZ = 1;
     };
 
@@ -413,13 +422,14 @@ namespace vk_shader {
 
   namespace push {
     struct Conv2DPushConstantParams {
-      uint32_t batchSize; // Batch size
-      uint32_t inChannels; // Input channels
-      uint32_t outChannels; // Output channels
-      uint32_t nnYLen;
-      uint32_t nnXLen;
-      uint32_t filterH; // Filter height
-      uint32_t filterW; // Filter width
+      int nSize;
+      int xSize;
+      int ySize;
+      int ocSize;
+      int icSize;
+      int filterXRadius;
+      int filterYRadius;
+      int xyStride;
     };
 
     struct Conv2DTiledBnActParams {
@@ -545,7 +555,7 @@ namespace vk_shader {
     /**
      * @brief MatBias Push Constant Parameters
      */
-    struct MatBiasFp32Params {
+    struct MatBiasPushParams {
       uint32_t batchSize;
       uint32_t numChannels;
     };
@@ -816,10 +826,11 @@ namespace vk_shader {
     std::vector<Pipeline> sumChannels;
 
     Pipeline addChannelBiasNCHWFp32;
-    Pipeline addChannelBiasNCIdentityFp32;
-    Pipeline addChannelBiasNCReluFp32;
-    Pipeline addChannelBiasNCMishFp32;
-    Pipeline addChannelBiasNCMishScale8Fp32;
+    Pipeline addChannelBiasNCIdentity;
+    Pipeline addChannelBiasNCRelu;
+    Pipeline addChannelBiasNCMish;
+    Pipeline addChannelBiasNCMishScale8;
+    Pipeline addChannelBiasNCSilu;
     Pipeline extractChannel0NCHWFp32;
 
     ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_);
@@ -848,17 +859,17 @@ namespace vk_shader {
     /**
      * @brief Create a Conv2d Fp32 object
     */
-    void createConv2dFp32();
+    // void createConv2dFp32();
 
     /**
      * @brief Create Conv2d Tiled Bn + Activation 3x3 Fp32 object
      */
-    void createConv2dTiledBnAct3x3Fp32();
+    // void createConv2dTiledBnAct3x3Fp32();
 
     /**
      * @brief Create Conv2d Tiled Bn + Activation 5x5 Fp32 object
      */
-    void createConv2dTiledBnAct5x5Fp32();
+    // void createConv2dTiledBnAct5x5Fp32();
 
     void createWinogradInputTransform();
 
@@ -966,24 +977,29 @@ namespace vk_shader {
     void createAddChannelBiasNCHWFp32();
 
     /**
-     * @brief Create a Add Channel Bias NC Fp32 object
+     * @brief Create a Add Channel Bias NC
      */
-    void createAddChannelBiasNCIdentityFp32();
+    void createAddChannelBiasNCIdentity();
 
     /**
-     * @brief Create a Add Channel Bias NC + ReLU Fp32 object
+     * @brief Create a Add Channel Bias NC + ReLU
      */
-    void createAddChannelBiasNCReluFp32();
+    void createAddChannelBiasNCRelu();
 
     /**
-     * @brief Create a Add Channel Bias NC + Mish Fp32 object
+     * @brief Create a Add Channel Bias NC + Mish
      */
-    void createAddChannelBiasNCMishFp32();
+    void createAddChannelBiasNCMish();
 
     /**
-     * @brief Create a Add Channel Bias NC + Mish + Scale8 Fp32 object
+     * @brief Create a Add Channel Bias NC + Mish + Scale8
      */
-    void createAddChannelBiasNCMishScale8Fp32();
+    void createAddChannelBiasNCMishScale8();
+
+    /**
+     * @brief Create a Add Channel Bias NC + Silu
+     */
+    void createAddChannelBiasNCSilu();
     
     /**
      * @brief Create a Extract Channel 0 NCHW Fp32 object

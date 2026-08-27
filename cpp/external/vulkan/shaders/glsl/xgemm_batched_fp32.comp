@@ -68,7 +68,7 @@ shared real4 blm[(_NWG * _KWG) / VWN];
 #define STRM 0
 #define STRN 0
 
-#include "xgemm.h"
+#include "xgemm.glsl"
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 // layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;

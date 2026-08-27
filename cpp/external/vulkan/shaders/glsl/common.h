@@ -239,6 +239,11 @@
   #define READ_WRITE_GLOBAL(__set, __no, __type, __name) layout(set = __set, binding = __no) buffer __name##Buffer { __type __name[]; }
 #endif
 
+// #define log1p(x) log(1.0 + exp(x))
+#define log1p(x) log(1.0 + (x))
+#define fmax(a, b) max(a, b)
+
+
 real soft_plus(real x) {
   const float T = 20.0;
   if ( x > T ) {

@@ -1,5 +1,5 @@
 #version 450
 #define PRECISION 32
 #define PRECISION_STORAGE 32
-#define ACTIVATION 0
+#define ACTIVATION 3
 #include "add_channel_bias_nc.glsl"

@@ -119,6 +119,12 @@ namespace vk_shader {
   const unsigned char* spirv_add_channel_bias_nc_mish_scale8_fp32 = _binary_add_channel_bias_nc_mish_scale8_fp32_start;
   size_t spirv_add_channel_bias_nc_mish_scale8_fp32_size = _binary_add_channel_bias_nc_mish_scale8_fp32_size;
 
+
+  // add_channel_bias_nc_silu_fp32
+  const unsigned char* spirv_add_channel_bias_nc_silu_fp32 = _binary_add_channel_bias_nc_silu_fp32_start;
+  size_t spirv_add_channel_bias_nc_silu_fp32_size = _binary_add_channel_bias_nc_silu_fp32_size;
+
+
   // extract_channel0_nchw_fp32
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;
   size_t spirv_extract_channel0_nchw_fp32_size = _binary_extract_channel0_nchw_fp32_size;
@@ -152,9 +158,10 @@ namespace vk_shader {
   }
 
   void ComputePipelines::createPipelines() {
-    createConv2dFp32();
-    createConv2dTiledBnAct3x3Fp32();
-    createConv2dTiledBnAct5x5Fp32();
+    // Tile base conv no longer used.
+    // createConv2dFp32();
+    // createConv2dTiledBnAct3x3Fp32();
+    // createConv2dTiledBnAct5x5Fp32();
     createWinogradInputTransform();
     createWinogradInputTransformBnAct();
     createWinogradOutputTransform();
@@ -177,10 +184,11 @@ namespace vk_shader {
     createValueHeadPoolingChannelsFp32();
     createSumChannelsFp32();
     createAddChannelBiasNCHWFp32();
-    createAddChannelBiasNCIdentityFp32();
-    createAddChannelBiasNCReluFp32();
-    createAddChannelBiasNCMishFp32();
-    createAddChannelBiasNCMishScale8Fp32();
+    createAddChannelBiasNCIdentity();
+    createAddChannelBiasNCRelu();
+    createAddChannelBiasNCMish();
+    createAddChannelBiasNCMishScale8();
+    createAddChannelBiasNCSilu();
     createExtractChannel0NCHWFp32();
   }
 
@@ -222,10 +230,11 @@ namespace vk_shader {
     }
     sumChannels.clear();
     destroyPipeline(addChannelBiasNCHWFp32);
-    destroyPipeline(addChannelBiasNCIdentityFp32);
-    destroyPipeline(addChannelBiasNCReluFp32);
-    destroyPipeline(addChannelBiasNCMishFp32);
-    destroyPipeline(addChannelBiasNCMishScale8Fp32);
+    destroyPipeline(addChannelBiasNCIdentity);
+    destroyPipeline(addChannelBiasNCRelu);
+    destroyPipeline(addChannelBiasNCMish);
+    destroyPipeline(addChannelBiasNCMishScale8);
+    destroyPipeline(addChannelBiasNCSilu);
     destroyPipeline(extractChannel0NCHWFp32);
   }
 
@@ -339,23 +348,23 @@ namespace vk_shader {
   /**
    * @brief Create a Conv2d Fp32 object
   */
-  void ComputePipelines::createConv2dFp32() {
-    auto spec = Conv2DSpec();
-    SpecializationData specData(spec);
-    createPipeline("Conv2dFp32", vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  }
+  // void ComputePipelines::createConv2dFp32() {
+    // auto spec = Conv2DSpec();
+    // SpecializationData specData(spec);
+    // createPipeline("Conv2dFp32", vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  // }
 
-  void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
-    auto spec = Conv2DTiledBnAct3x3Spec();
-    SpecializationData specData(spec);
-    createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  }
+  // void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
+    // auto spec = Conv2DTiledBnAct3x3Spec();
+    // SpecializationData specData(spec);
+    // createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  // }
 
-  void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
-    auto spec = Conv2DTiledBnAct5x5Spec();
-    SpecializationData specData(spec);
-    createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  }
+  // void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
+    // auto spec = Conv2DTiledBnAct5x5Spec();
+    // SpecializationData specData(spec);
+    // createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  // }
 
   void ComputePipelines::createWinogradInputTransform() {
     WinogradInputTransformSpec spec;
@@ -657,28 +666,34 @@ namespace vk_shader {
     createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCIdentityFp32() {
+  void ComputePipelines::createAddChannelBiasNCIdentity() {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCIdentityFp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCIdentityFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddChannelBiasNCIdentity", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCIdentity, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCReluFp32() {
+  void ComputePipelines::createAddChannelBiasNCRelu() {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCReluFp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCReluFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddChannelBiasNCRelu", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCRelu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCMishFp32() {
+  void ComputePipelines::createAddChannelBiasNCMish() {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCMishFp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddChannelBiasNCMish", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMish, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCMishScale8Fp32() {
+  void ComputePipelines::createAddChannelBiasNCMishScale8() {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCMishScale8Fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishScale8Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddChannelBiasNCMishScale8", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishScale8, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createAddChannelBiasNCSilu() {
+    auto spec = AddChannelBiasNCSpec();
+    SpecializationData specData(spec);
+    createPipeline("AddChannelBiasNCSilu", vk_shader::spirv_add_channel_bias_nc_silu_fp32, vk_shader::spirv_add_channel_bias_nc_silu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCSilu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createExtractChannel0NCHWFp32() {

@@ -1040,71 +1040,71 @@ struct ConvLayer {
     vk_helper::barrierCommandBuffer(cb);
   }
 
-  void doConv2DTiledFp32(
-    VkCommandBuffer& cb,
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-    // Implement convolution logic here if needed
-    VkResult res;
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+  // void doConv2DTiledFp32(
+  //   VkCommandBuffer& cb,
+  //   int batchSize,
+  //   VulkanBuffer* input,
+  //   VulkanBuffer* output
+  // ) {
+  //   // Implement convolution logic here if needed
+  //   VkResult res;
+  //   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+  //   vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
 
-    if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice,
-        pipelines->conv2dFp32.descriptorSetLayout,
-        &res
-      );
-      CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
-    }
-    // update descriptor set
-    std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
-    };
-    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  //   if ( descriptorSet == VK_NULL_HANDLE ) {
+  //     descriptorSet = vk_helper::allocateDescriptorSet(
+  //       handle->vulkanDevice,
+  //       pipelines->conv2dFp32.descriptorSetLayout,
+  //       &res
+  //     );
+  //     CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
+  //   }
+  //   // update descriptor set
+  //   std::vector<WriteDescriptorSet> writeDescriptorSets = {
+  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
+  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
+  //   };
+  //   vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
-    vkCmdBindDescriptorSets(
-      cb,
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipelines->conv2dFp32.layout,
-      0,
-      1,
-      &descriptorSet,
-      0,
-      nullptr
-    );
-    auto pushConstants = Conv2DPushConstantParams();
-    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-    pushConstants.inChannels = static_cast<uint32_t>(inChannels);
-    pushConstants.outChannels = static_cast<uint32_t>(outChannels);
-    pushConstants.filterH = static_cast<uint32_t>(convYSize);
-    pushConstants.filterW = static_cast<uint32_t>(convXSize);
-    pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
-    pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
-    vkCmdPushConstants(
-      cb,
-      pipelines->conv2dFp32.layout,
-      VK_SHADER_STAGE_COMPUTE_BIT,
-      0,
-      sizeof(Conv2DPushConstantParams),
-      &pushConstants
-    );
+  //   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
+  //   vkCmdBindDescriptorSets(
+  //     cb,
+  //     VK_PIPELINE_BIND_POINT_COMPUTE,
+  //     pipelines->conv2dFp32.layout,
+  //     0,
+  //     1,
+  //     &descriptorSet,
+  //     0,
+  //     nullptr
+  //   );
+  //   auto pushConstants = Conv2DPushConstantParams();
+  //   pushConstants.batchSize = static_cast<uint32_t>(batchSize);
+  //   pushConstants.inChannels = static_cast<uint32_t>(inChannels);
+  //   pushConstants.outChannels = static_cast<uint32_t>(outChannels);
+  //   pushConstants.filterH = static_cast<uint32_t>(convYSize);
+  //   pushConstants.filterW = static_cast<uint32_t>(convXSize);
+  //   pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
+  //   pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
+  //   vkCmdPushConstants(
+  //     cb,
+  //     pipelines->conv2dFp32.layout,
+  //     VK_SHADER_STAGE_COMPUTE_BIT,
+  //     0,
+  //     sizeof(Conv2DPushConstantParams),
+  //     &pushConstants
+  //   );
 
-    uint32_t wgCountX = (pushConstants.nnXLen + pipelines->conv2dFp32.localSizeX - 1u) / pipelines->conv2dFp32.localSizeX;
-    uint32_t wgCountY = (pushConstants.nnYLen + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
-    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
-    uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
-    SHADER_PROFILE_START("CONV2D_TILED_FP32", cb);
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    SHADER_PROFILE_END("CONV2D_TILED_FP32", cb);
-    vk_helper::barrierCommandBufferForBuffer(cb, output);
-    vk_helper::barrierCommandBuffer(cb);
-  }
+  //   uint32_t wgCountX = (pushConstants.nnXLen + pipelines->conv2dFp32.localSizeX - 1u) / pipelines->conv2dFp32.localSizeX;
+  //   uint32_t wgCountY = (pushConstants.nnYLen + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
+  //   uint32_t ocGroupsPerBatch = (pushConstants.outChannels + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
+  //   uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
+  //   SHADER_PROFILE_START("CONV2D_TILED_FP32", cb);
+  //   vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  //   SHADER_PROFILE_END("CONV2D_TILED_FP32", cb);
+  //   vk_helper::barrierCommandBufferForBuffer(cb, output);
+  //   vk_helper::barrierCommandBuffer(cb);
+  // }
 
   void doConv1x1AsMatmulFp32(
     VkCommandBuffer& cb,
@@ -1423,7 +1423,8 @@ struct ConvLayer {
       assert(convWorkspace2 != nullptr);
       doWinogradConvolution(cb, batchSize, input, convWorkspace1, convWorkspace2, output);
     } else {
-      doConv2DTiledFp32(cb, batchSize,  input, output);
+      // katago only support 3x3 or 5x5. no required this block.
+      // doConv2DTiledFp32(cb, batchSize,  input, output);
     }
   }
 
@@ -1562,6 +1563,7 @@ struct MatBiasLayer {
     activation(activation_)
   {
     if ( numChannels > 0 ) {
+      // TODO: add FP16 buffer allocation
       assert(desc->weights.size() == static_cast<size_t>(numChannels));
       std::vector<float> weights = desc->weights;
       VkResult res;
@@ -1587,16 +1589,19 @@ struct MatBiasLayer {
 
     switch ( activation ) {
       case ACTIVATION_IDENTITY:
-        targetPipeline = pipelines->addChannelBiasNCIdentityFp32;
+        targetPipeline = pipelines->addChannelBiasNCIdentity;
         break;
       case ACTIVATION_RELU:
-        targetPipeline = pipelines->addChannelBiasNCReluFp32;
+        targetPipeline = pipelines->addChannelBiasNCRelu;
         break;
       case ACTIVATION_MISH:
-        targetPipeline = pipelines->addChannelBiasNCMishFp32;
+        targetPipeline = pipelines->addChannelBiasNCMish;
         break;
       case ACTIVATION_MISH_SCALE8:
-        targetPipeline = pipelines->addChannelBiasNCMishScale8Fp32;
+        targetPipeline = pipelines->addChannelBiasNCMishScale8;
+        break;
+      case ACTIVATION_SILU:
+        targetPipeline = pipelines->addChannelBiasNCSilu;
         break;
       default:
         Global::fatalError("Unsupported activation in MatBiasLayer: " + name);
@@ -1639,16 +1644,17 @@ struct MatBiasLayer {
     );
 
     // 1D dispatch: total elements = batchSize * numChannels
-    uint32_t totalSize = static_cast<uint32_t>(batchSize) * static_cast<uint32_t>(numChannels);
-    uint32_t wgCountX = (totalSize + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
-    uint32_t wgCountY = 1u;
+    uint32_t globalSizeX = vk_helper::powerOf2ify(numChannels);
+    uint32_t globalSizeY = vk_helper::powerOf2ify(batchSize);
+    // uint32_t wgCountX = (totalSize + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+    uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+    uint32_t wgCountY = (globalSizeY + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
     uint32_t wgCountZ = 1u;
-    SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NC_FP32", cb);
+    SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NC", cb);
     vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NC_FP32", cb);
+    SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NC", cb);
     vk_helper::barrierCommandBuffer(cb);
-      vk_helper::barrierCommandBufferForBuffer(cb, input);
-    // res = vk_helper::endCommandBuffer(commandBuffer);
+    vk_helper::barrierCommandBufferForBuffer(cb, input);
     // CHECK_VK_MSG("End command buffer for MatBiasLayer: " + name, res);
   }
 
