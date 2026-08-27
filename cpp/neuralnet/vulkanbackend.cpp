@@ -2401,7 +2401,8 @@ struct NestedResidualBlock {
     ComputeHandleInternal *handle_,
     const NestedBottleneckResidualBlockDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
@@ -2409,7 +2410,7 @@ struct NestedResidualBlock {
     nnYLen(nnYLen_)
   {
     normActConv = new NormActConv(handle, &desc->preConv, &desc->preBN, &desc->preActivation, nnXLen, nnYLen);
-    blocks = new BlockStack(handle, desc->blocks, desc->numBlocks, desc->preConv.outChannels, nnXLen, nnYLen);
+    blocks = new BlockStack(handle, desc->blocks, desc->numBlocks, desc->preConv.outChannels, nnXLen, nnYLen, useFP16);
     normActConv2 = new NormActConv(handle, &desc->postConv, &desc->postBN, &desc->postActivation, nnXLen, nnYLen);
   }
 
@@ -2480,7 +2481,8 @@ BlockStack::BlockStack(
   int numBlocks_,
   int trunkNumChannels_,
   int nnXLen_,
-  int nnYLen_
+  int nnYLen_,
+  bool useFP16
 ):
   handle(handle_),
   numBlocks(numBlocks_),
@@ -2522,7 +2524,8 @@ BlockStack::BlockStack(
           handle,
           nestedDesc,
           nnXLen,
-          nnYLen
+          nnYLen,
+          useFP16
         )
       );
       blocks.push_back(std::make_pair(blockType, std::move(blockPtr)));
@@ -2715,15 +2718,19 @@ struct Trunk {
   const int midNumChannels;
   const int regularNumChannels;
   const int gpoolNumChannels;
+  const int trunkNormKind;
 
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
 
   std::unique_ptr<ConvLayer> initialConv;
   std::unique_ptr<MatmulLayer> initialMatmul;
   std::unique_ptr<SGFMetadataEncoder> sgfMetadataEncoder;
   BlockStack blockStack;
   std::unique_ptr<BatchNormLayer> trunkTipBN;
+  // std::unique_ptr<RMSNormLayer> trunkTipRMSNorm = nullptr;
+  void* trunkTipRMSNorm = nullptr;
   VkDescriptorSet addChannelBiasDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelBiasDS2 = VK_NULL_HANDLE;
 
@@ -2736,7 +2743,8 @@ struct Trunk {
     const TrunkDesc* desc,
     int maxBatchSize_,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
@@ -2745,9 +2753,11 @@ struct Trunk {
     midNumChannels(desc->midNumChannels),
     regularNumChannels(desc->regularNumChannels),
     gpoolNumChannels(desc->gpoolNumChannels),
+    trunkNormKind(desc->trunkNormKind),
     nnXLen(nnXLen_),
     nnYLen(nnYLen_),
-    blockStack( handle, desc->blocks, desc->numBlocks, trunkNumChannels, nnXLen_, nnYLen_)
+    paddedNNXYLen(handle->paddedNNXYLen),
+    blockStack(handle, desc->blocks, desc->numBlocks, trunkNumChannels, nnXLen_, nnYLen_, useFP16)
   {
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,trunkNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,midNumChannels);
@@ -2760,7 +2770,12 @@ struct Trunk {
       sgfMetadataEncoder = std::make_unique<SGFMetadataEncoder>(handle, &desc->sgfMetadataEncoder);
       testAssert(sgfMetadataEncoder->matmul3->outChannels == initialMatmul->outChannels);
     }
-    trunkTipBN = std::make_unique<BatchNormLayer>(handle, &desc->trunkTipBN, &desc->trunkTipActivation, nnXLen, nnYLen);
+
+    if ( desc->trunkNormKind == TRUNK_NORM_KIND_STANDARD  ){
+      trunkTipBN = std::make_unique<BatchNormLayer>(handle, &desc->trunkTipBN, &desc->trunkTipActivation, nnXLen, nnYLen);
+    } else {
+      throw StringError("[Trunk::Trunk()] transformer features not implemented yet");
+    }
   }
 
   ~Trunk() {
@@ -2771,10 +2786,16 @@ struct Trunk {
     ComputeHandleInternal* handle,
     int maxBatchSize
   ) const {
-    return ConvWorkspaceEltsNeeded::getMax(
-      initialConv->requiredConvWorkspaceElts(handle, maxBatchSize),
-      blockStack.requiredConvWorkspaceElts(handle, maxBatchSize)
+    ConvWorkspaceEltsNeeded maxElts = ConvWorkspaceEltsNeeded::getMax(
+      initialConv->requiredConvWorkspaceElts(handle,maxBatchSize),
+      blockStack.requiredConvWorkspaceElts(handle,maxBatchSize)
     );
+
+    if(trunkTipRMSNorm){
+      throw StringError("[Trunk::requiredConvWorkspaceElts] trunkTipRMSNorm not supported yet.");
+      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunkTipRMSNorm->requiredConvWorkspaceElts(handle,maxBatchSize));
+    }
+    return maxElts;
   }
 
   void forward(
@@ -2799,9 +2820,12 @@ struct Trunk {
     if ( sgfMetadataEncoder != nullptr ) {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->forward(cb, batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
-      performAddChannelBiases(handle, cb, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, nnXLen * nnYLen, false);
+      performAddChannelBiases(handle, cb, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, handle->paddedNNXYLen, false);
     }
-    blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
+
+    if ( trunkNormKind == TRUNK_NORM_KIND_STANDARD ) {
+      blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
+    }
     trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
   }
 
@@ -2876,7 +2900,8 @@ struct PolicyHead {
     ComputeHandleInternal *handle,
     const PolicyHeadDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle),
     name(desc->name),
@@ -3021,7 +3046,8 @@ struct ValueHead {
     ComputeHandleInternal *handle_,
     const ValueHeadDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
@@ -3305,9 +3331,10 @@ struct Model {
 
     // TODO: Check required workspaces sizes
     // TODO: Check partial models constructor parameters
-    trunk = std::make_unique<Trunk>(handle, &desc.trunk, maxBatchSize, nnXLen, nnYLen);
-    policyHead = std::make_unique<PolicyHead>(handle, &desc.policyHead, nnXLen, nnYLen);
-    valueHead = std::make_unique<ValueHead>(handle, &desc.valueHead, nnXLen, nnYLen);
+    bool useFP16 = handle->usingFP16Storage;
+    trunk = std::make_unique<Trunk>(handle, &desc.trunk, maxBatchSize, nnXLen, nnYLen, useFP16);
+    policyHead = std::make_unique<PolicyHead>(handle, &desc.policyHead, nnXLen, nnYLen, useFP16);
+    valueHead = std::make_unique<ValueHead>(handle, &desc.valueHead, nnXLen, nnYLen, useFP16);
 
     VkResult res = VK_SUCCESS;
     fence = vk_helper::createFence(handle->vulkanDevice, &res);

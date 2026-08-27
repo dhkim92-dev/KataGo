@@ -261,6 +261,8 @@ struct ConvWorkspaceEltsNeeded {
   }
 };
 
+struct RMSNormLayer;
+
 /**
  * @brief NN Block Stack structure
  */
@@ -287,7 +289,8 @@ struct BlockStack {
     int numBlocks_,
     int trunkNumChannels_,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   );
   BlockStack() = delete;
   BlockStack(const BlockStack&) = delete;
