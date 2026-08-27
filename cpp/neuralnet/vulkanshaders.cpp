@@ -71,9 +71,9 @@ namespace vk_shader {
   const unsigned char* spirv_xgemm_strided_batched_nn_fp32 = _binary_xgemm_strided_batched_nn_fp32_start;
   size_t spirv_xgemm_strided_batched_nn_fp32_size = _binary_xgemm_strided_batched_nn_fp32_size;
 
-  // bn_mask_fp32
-  const unsigned char* spirv_bn_mask_fp32 = _binary_bn_mask_fp32_start;
-  size_t spirv_bn_mask_fp32_size = _binary_bn_mask_fp32_size;
+  // bn_mask_identity_fp32
+  const unsigned char* spirv_bn_mask_identity_fp32 = _binary_bn_mask_identity_fp32_start;
+  size_t spirv_bn_mask_identity_fp32_size = _binary_bn_mask_identity_fp32_size;
 
   // bn_mask_relu_fp32
   const unsigned char* spirv_bn_mask_relu_fp32 = _binary_bn_mask_relu_fp32_start;
@@ -86,6 +86,10 @@ namespace vk_shader {
   // bn_mask_mish_scale8_fp32
   const unsigned char* spirv_bn_mask_mish_scale8_fp32 = _binary_bn_mask_mish_scale8_fp32_start;
   size_t spirv_bn_mask_mish_scale8_fp32_size = _binary_bn_mask_mish_scale8_fp32_size;
+
+  // bn_mask_silu_fp32
+  const unsigned char* spirv_bn_mask_silu_fp32 = _binary_bn_mask_silu_fp32_start;
+  size_t spirv_bn_mask_silu_fp32_size = _binary_bn_mask_silu_fp32_size;
 
   // sum_channels_fp32
   const unsigned char* spirv_sum_channels_fp32 = _binary_sum_channels_fp32_start;
@@ -176,10 +180,11 @@ namespace vk_shader {
     createXGEMMBatchedFp32();
     createXGEMMStridedBatchedFp32();
     // createMatmulTiled4x4x32Fp32();
-    createBatchNormMaskFp32();
-    createBatchNormMaskReluFp32();
-    createBatchNormMaskMishFp32();
-    createBatchNormMaskMishScale8Fp32();
+    createBatchNormMaskIdentity();
+    createBatchNormMaskRelu();
+    createBatchNormMaskMish();
+    createBatchNormMaskMishScale8();
+    createBatchNormMaskSilu();
     createGlobalPoolingChannelsFp32();
     createValueHeadPoolingChannelsFp32();
     createSumChannelsFp32();
@@ -219,10 +224,11 @@ namespace vk_shader {
     destroyPipeline(xgemmStridedBatchedFp32);
     destroyPipeline(xgemmBatchedFp32);
     // destroyPipeline(matmulTiledChw4x4x32Fp32);
-    destroyPipeline(batchNormMaskFp32);
-    destroyPipeline(batchNormMaskReluFp32);
-    destroyPipeline(batchNormMaskMishFp32);
-    destroyPipeline(batchNormMaskMishScale8Fp32);
+    destroyPipeline(batchNormMaskIdentity);
+    destroyPipeline(batchNormMaskRelu);
+    destroyPipeline(batchNormMaskMish);
+    destroyPipeline(batchNormMaskMishScale8);
+    destroyPipeline(batchNormMaskSilu);
     destroyPipeline(globalPoolingChannelsFp32);
     destroyPipeline(valueHeadPoolingChannelsFp32);
     for ( Pipeline& pipeline : sumChannels ) {
@@ -607,28 +613,34 @@ namespace vk_shader {
     createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskFp32() {
+  void ComputePipelines::createBatchNormMaskIdentity() {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_fp32, vk_shader::spirv_bn_mask_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_identity_fp32, vk_shader::spirv_bn_mask_identity_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskIdentity, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskReluFp32() {
+  void ComputePipelines::createBatchNormMaskRelu() {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskReluFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskRelu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskMishFp32() {
+  void ComputePipelines::createBatchNormMaskMish() {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMish, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskMishScale8Fp32() {
+  void ComputePipelines::createBatchNormMaskMishScale8() {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishScale8Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishScale8, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createBatchNormMaskSilu() {
+    auto spec = BatchNormMaskSpec();
+    SpecializationData specData(spec);
+    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_silu_fp32, vk_shader::spirv_bn_mask_silu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskSilu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createGlobalPoolingChannelsFp32() {

@@ -595,15 +595,16 @@ struct BatchNormLayer {
   const int numChannels;
   const float epsilon;
   const int activation;
+  const int paddedNNXYLen;
 
-  const int nnXLen;
-  const int nnYLen;
-  const int nnXYLen;
+  uint32_t globalSizeX;
+  uint32_t globalSizeY;
 
   VulkanBuffer* mergedScaleBuf;
   VulkanBuffer* mergedBiasBuf;
-
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  Pipeline pipeline;
+  BatchNormMaskParams pushParams = {};
 
   ~BatchNormLayer() {
     #ifdef VULKAN_API_DEBUG
@@ -628,25 +629,23 @@ struct BatchNormLayer {
     ComputeHandleInternal *handle_,
     const BatchNormLayerDesc* desc,
     const ActivationLayerDesc* actDesc,
-    int nnXLen_,
-    int nnYLen_
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
     numChannels(desc->numChannels),
     epsilon(desc->epsilon),
     activation(actDesc->activation),
-    nnXLen(nnXLen_),
-    nnYLen(nnYLen_),
-    nnXYLen(nnXLen_ * nnYLen_)
+    paddedNNXYLen(handle_->paddedNNXYLen)
   {
-    assert(desc->scale.size() == static_cast<size_t>(numChannels));
-    assert(desc->bias.size() == static_cast<size_t>(numChannels));
     assert(desc->mean.size() == static_cast<size_t>(numChannels));
     assert(desc->variance.size() == static_cast<size_t>(numChannels));
+    assert(desc->scale.size() == static_cast<size_t>(numChannels));
+    assert(desc->bias.size() == static_cast<size_t>(numChannels));
     assert(desc->mergedScale.size() == static_cast<size_t>(numChannels));
     assert(desc->mergedBias.size() == static_cast<size_t>(numChannels));
 
+    // TODO: FP16 support
     // Precompute merged scale and bias
     std::vector<float> mergedScale = desc->mergedScale;
     std::vector<float> mergedBias = desc->mergedBias;
@@ -670,6 +669,34 @@ struct BatchNormLayer {
       &res
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+
+    switch ( activation ) {
+      case ACTIVATION_IDENTITY:
+        pipeline = pipelines->batchNormMaskIdentity;
+        break;
+      case ACTIVATION_RELU:
+        pipeline = pipelines->batchNormMaskRelu;
+        break;
+      case ACTIVATION_MISH:
+        pipeline = pipelines->batchNormMaskMish;
+        break;
+      case ACTIVATION_MISH_SCALE8:
+        pipeline = pipelines->batchNormMaskMishScale8;
+        break;
+      case ACTIVATION_SILU:
+        pipeline = pipelines->batchNormMaskSilu;
+        break;
+      default:
+        Global::fatalError("Unsupported activation in BatchNormLayer: " + name);
+    }
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
+    pushParams.numChannels = static_cast<uint32_t>(numChannels);
+    pushParams.nnXYLen = static_cast<uint32_t>(paddedNNXYLen);
+    globalSizeX = vk_helper::powerOf2ify(paddedNNXYLen);
+    globalSizeY = vk_helper::powerOf2ify(numChannels);
 
   }
 
@@ -681,65 +708,33 @@ struct BatchNormLayer {
     VulkanBuffer* output
   ) {
     assert(cb != VK_NULL_HANDLE);
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
-    Pipeline targetPipeline;
-    VkResult res = VK_ERROR_UNKNOWN;
-
-    switch ( activation ) {
-      case ACTIVATION_IDENTITY:
-        targetPipeline = pipelines->batchNormMaskFp32;
-        break;
-      case ACTIVATION_RELU:
-        targetPipeline = pipelines->batchNormMaskReluFp32;
-        break;
-      case ACTIVATION_MISH:
-        targetPipeline = pipelines->batchNormMaskMishFp32;
-        break;
-      case ACTIVATION_MISH_SCALE8:
-        targetPipeline = pipelines->batchNormMaskMishScale8Fp32;
-        break;
-      default:
-        Global::fatalError("Unsupported activation in BatchNormLayer: " + name);
-    }
-
-    if (descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice,
-        targetPipeline.descriptorSetLayout,
-        &res
-      );
-      CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
-    }
+    
       // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, mask),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mergedScaleBuf),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, mergedBiasBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, output)
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask)
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-    BatchNormMaskParams pushConstants = {};
-    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-    pushConstants.numChannels = static_cast<uint32_t>(numChannels);
-    pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BatchNormMaskParams), &pushConstants);
+    pushParams.batchSize = static_cast<uint32_t>(batchSize);
+    
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BatchNormMaskParams), &pushParams);
     // Dispatch: x=spatial, y=channels, z=batch (optimized for memory coalescing in NCHW layout)
-    const uint32_t localSizeX = targetPipeline.localSizeX;
-    const uint32_t localSizeY = targetPipeline.localSizeY;
-    uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + localSizeX - 1u) / localSizeX;
-    uint32_t wgCountY = (static_cast<uint32_t>(numChannels) + localSizeY - 1u) / localSizeY;
-    uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
+    const uint32_t localSizeX = pipeline.localSizeX;
+    const uint32_t localSizeY = pipeline.localSizeY;
+    uint32_t wgCountX = static_cast<uint32_t>((globalSizeX + localSizeX - 1u) / localSizeX);
+    uint32_t wgCountY = static_cast<uint32_t>((globalSizeY + localSizeY - 1u) / localSizeY);
+    uint32_t wgCountZ = static_cast<uint32_t>(1);
     SHADER_PROFILE_START("BATCHNORM_MASK_FP32", cb);
     vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("BATCHNORM_MASK_FP32", cb);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     // res = vk_helper::endCommandBuffer(cb);
-
     // CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
   }
 
@@ -756,13 +751,13 @@ struct BatchNormLayer {
     VulkanBuffer* mask,
     VulkanBuffer* output
   ) {
-    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
-    std::vector<float> inputCopy(static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
-    forward(commandBuffer, batchSize, input, mask, output);
-    res = vk_helper::endCommandBuffer(commandBuffer);
-    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
-    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
+    // VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    // VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    // std::vector<float> inputCopy(static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
+    // forward(commandBuffer, batchSize, input, mask, output);
+    // res = vk_helper::endCommandBuffer(commandBuffer);
+    // vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    // printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
   }
 };
 
@@ -813,7 +808,8 @@ struct ConvLayer {
     ComputeHandleInternal *handle_,
     const ConvLayerDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
@@ -1700,11 +1696,12 @@ struct NormActConv {
     const BatchNormLayerDesc* bnDesc,
     const ActivationLayerDesc* actDesc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
-    conv(handle_, convDesc, nnXLen_, nnYLen_),
-    bn(handle_, bnDesc, actDesc, nnXLen_, nnYLen_),
+    conv(handle_, convDesc, nnXLen_, nnYLen_, useFP16),
+    bn(handle_, bnDesc, actDesc, useFP16),
     inChannels(convDesc->inChannels),
     outChannels(convDesc->outChannels)
   {
@@ -2172,20 +2169,23 @@ struct ResidualBlock {
     ComputeHandleInternal *handle_,
     const ResidualBlockDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
     nnXLen(nnXLen_),
     nnYLen(nnYLen_)
   {
+    // TODO: FP16 support
     normActConv = new NormActConv(
       handle,
       &desc->regularConv,
       &desc->preBN,
       &desc->preActivation,
       nnXLen,
-      nnYLen
+      nnYLen,
+      useFP16
     );
     normActConv2 = new NormActConv(
       handle,
@@ -2193,7 +2193,8 @@ struct ResidualBlock {
       &desc->midBN,
       &desc->midActivation,
       nnXLen,
-      nnYLen
+      nnYLen,
+      useFP16
     );
   }
 
@@ -2268,6 +2269,7 @@ struct GlobalPoolingResidualBlock {
   const int nnXLen;
   const int nnYLen;
   const int nnXYLen;
+  const int paddedNNXYLen;
   const int regularChannels;
   const int gpoolChannels;
 
@@ -2282,7 +2284,8 @@ struct GlobalPoolingResidualBlock {
     ComputeHandleInternal *handle_,
     const GlobalPoolingResidualBlockDesc* desc,
     int nnXLen_,
-    int nnYLen_
+    int nnYLen_,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name),
@@ -2290,14 +2293,15 @@ struct GlobalPoolingResidualBlock {
     nnYLen(nnYLen_),
     nnXYLen(nnXLen_ * nnYLen_),
     regularChannels(desc->regularConv.outChannels),
-    gpoolChannels(desc->gpoolConv.outChannels)
+    gpoolChannels(desc->gpoolConv.outChannels),
+    paddedNNXYLen(handle->paddedNNXYLen)
   {
-    preBN = new BatchNormLayer(handle, &desc->preBN, &desc->preActivation, nnXLen, nnYLen);
-    regularConv = new ConvLayer(handle, &desc->regularConv, nnXLen, nnYLen);
-    gpoolConv = new ConvLayer(handle, &desc->gpoolConv, nnXLen, nnYLen);
-    gpoolBN = new BatchNormLayer(handle, &desc->gpoolBN, &desc->gpoolActivation, nnXLen, nnYLen);
+    preBN = new BatchNormLayer(handle, &desc->preBN, &desc->preActivation, useFP16);
+    regularConv = new ConvLayer(handle, &desc->regularConv, nnXLen, nnYLen, useFP16);
+    gpoolConv = new ConvLayer(handle, &desc->gpoolConv, nnXLen, nnYLen, useFP16);
+    gpoolBN = new BatchNormLayer(handle, &desc->gpoolBN, &desc->gpoolActivation, useFP16);
     gpoolToBiasMul = new MatmulLayer(handle, &desc->gpoolToBiasMul);
-    normActConv2 = new NormActConv(handle, &desc->finalConv, &desc->midBN, &desc->midActivation, nnXLen, nnYLen);
+    normActConv2 = new NormActConv(handle, &desc->finalConv, &desc->midBN, &desc->midActivation, nnXLen, nnYLen, useFP16);
   }
 
   ~GlobalPoolingResidualBlock() {
@@ -2409,9 +2413,9 @@ struct NestedResidualBlock {
     nnXLen(nnXLen_),
     nnYLen(nnYLen_)
   {
-    normActConv = new NormActConv(handle, &desc->preConv, &desc->preBN, &desc->preActivation, nnXLen, nnYLen);
+    normActConv = new NormActConv(handle, &desc->preConv, &desc->preBN, &desc->preActivation, nnXLen, nnYLen, useFP16);
     blocks = new BlockStack(handle, desc->blocks, desc->numBlocks, desc->preConv.outChannels, nnXLen, nnYLen, useFP16);
-    normActConv2 = new NormActConv(handle, &desc->postConv, &desc->postBN, &desc->postActivation, nnXLen, nnYLen);
+    normActConv2 = new NormActConv(handle, &desc->postConv, &desc->postBN, &desc->postActivation, nnXLen, nnYLen, useFP16);
   }
 
   ~NestedResidualBlock() {
@@ -2502,7 +2506,8 @@ BlockStack::BlockStack(
           handle,
           resDesc,
           nnXLen,
-          nnYLen
+          nnYLen,
+          useFP16
         )
       );
       blocks.push_back(std::make_pair(blockType, std::move(blockPtr)));
@@ -2513,7 +2518,8 @@ BlockStack::BlockStack(
           handle,
           gpoolDesc,
           nnXLen,
-          nnYLen
+          nnYLen,
+          useFP16
         )
       );
       blocks.push_back(std::make_pair(blockType, std::move(blockPtr)));
@@ -2529,8 +2535,24 @@ BlockStack::BlockStack(
         )
       );
       blocks.push_back(std::make_pair(blockType, std::move(blockPtr)));
-    } else {
-      Global::fatalError("Unsupported block type in BlockStack");
+    } else if ( blockType == TRANSFORMER_ATTENTION_BLOCK_KIND ) {
+      // TODO: implement transformer attention block
+      // TransformerAttentionDesc* blockDesc = (TransformerAttentionDesc*)descBlocks[i].second.get();
+      // unique_ptr_void blockPtr = make_unique_void(
+      //   new TransformerAttentionBlock(handle, blockDesc, nnXLen, nnYLen)
+      // );
+      // blocks.emplace_back(TRANSFORMER_ATTENTION_BLOCK_KIND, std::move(blockPtr));
+      throw StringError("[BlockStack::BlockStack()] Transformer Attention block not supported");
+    } else if ( blockType == TRANSFORMER_FFN_BLOCK_KIND ) {
+      // TODO: implement transformer ffn block 
+      // TransformerFFNDesc* blockDesc = (TransformerFFNDesc*)descBlocks[i].second.get();
+      // unique_ptr_void blockPtr = make_unique_void(
+      //   new TransformerFFNBlock(handle, blockDesc)
+      // );
+      // blocks.emplace_back(TRANSFORMER_FFN_BLOCK_KIND, std::move(blockPtr));
+      throw StringError("[BlockStack::BlockStack()] Transformer FFN block required");
+    }else {
+      ASSERT_UNREACHABLE;
     }
   }
 }
@@ -2554,6 +2576,19 @@ ConvWorkspaceEltsNeeded BlockStack::requiredConvWorkspaceElts(ComputeHandleInter
       NestedResidualBlock* block = (NestedResidualBlock*)blocks[i].second.get();
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
     }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      // TODO: uncomment this after implement layer.
+      // TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
+      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+      throw StringError("Not Implemented Yet");
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      // TODO: uncomment this after implement layer.
+      // TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
+      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+      throw StringError("Not Implemented Yet");
+    }
+
     else {
       ASSERT_UNREACHABLE;
     }
@@ -2632,7 +2667,17 @@ void BlockStack::forward(
         Global::fatalError("BlockStack::forward: NestedResidualBlock pointer is null at index " + Global::intToString(i));
       }
       blockPtr->forward(cb, batchSize, scratch, trunk, trunkScratch, mask, maskSum, convWorkspace, convWorkspace2);
-    } else {
+    } else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      throw StringError("Not implemented yet.");
+      // TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
+      // block->apply(handle, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      throw StringError("Not implemented yet.");
+      // TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
+      // block->apply(handle, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
+    }
+    else {
       ASSERT_UNREACHABLE;
     }
   }
@@ -2649,7 +2694,8 @@ struct SGFMetadataEncoder {
 
   SGFMetadataEncoder(
     ComputeHandleInternal *handle_,
-    const SGFMetadataEncoderDesc* desc
+    const SGFMetadataEncoderDesc* desc,
+    bool useFP16
   ):
     handle(handle_),
     name(desc->name)
@@ -2764,15 +2810,15 @@ struct Trunk {
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,regularNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,gpoolNumChannels);
 
-    initialConv = std::make_unique<ConvLayer>(handle, &desc->initialConv, nnXLen, nnYLen);
+    initialConv = std::make_unique<ConvLayer>(handle, &desc->initialConv, nnXLen, nnYLen, useFP16);
     initialMatmul = std::make_unique<MatmulLayer>(handle, &desc->initialMatMul);
     if ( desc->metaEncoderVersion >0) {
-      sgfMetadataEncoder = std::make_unique<SGFMetadataEncoder>(handle, &desc->sgfMetadataEncoder);
+      sgfMetadataEncoder = std::make_unique<SGFMetadataEncoder>(handle, &desc->sgfMetadataEncoder, useFP16);
       testAssert(sgfMetadataEncoder->matmul3->outChannels == initialMatmul->outChannels);
     }
 
     if ( desc->trunkNormKind == TRUNK_NORM_KIND_STANDARD  ){
-      trunkTipBN = std::make_unique<BatchNormLayer>(handle, &desc->trunkTipBN, &desc->trunkTipActivation, nnXLen, nnYLen);
+      trunkTipBN = std::make_unique<BatchNormLayer>(handle, &desc->trunkTipBN, &desc->trunkTipActivation, useFP16);
     } else {
       throw StringError("[Trunk::Trunk()] transformer features not implemented yet");
     }
@@ -2821,12 +2867,17 @@ struct Trunk {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->forward(cb, batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
       performAddChannelBiases(handle, cb, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, handle->paddedNNXYLen, false);
+    } else {
+      testAssert(inputMeta == NULL);
     }
 
-    if ( trunkNormKind == TRUNK_NORM_KIND_STANDARD ) {
-      blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
+    blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
+
+    if (trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
+      trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
+    } else {
+      throw StringError("[Trunk::forward()] trunkTipRMSNorm required");
     }
-    trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
   }
 
   void debug(
@@ -2912,12 +2963,12 @@ struct PolicyHead {
     g1Channels(desc->g1Conv.outChannels),
     p2Channels(desc->p2Conv.outChannels)
   {
-    p1Conv = std::make_unique<ConvLayer>(handle, &desc->p1Conv, nnXLen, nnYLen);
-    g1Conv = std::make_unique<ConvLayer>(handle, &desc->g1Conv, nnXLen, nnYLen);
-    g1BN = std::make_unique<BatchNormLayer>(handle, &desc->g1BN, &desc->g1Activation, nnXLen, nnYLen);
+    p1Conv = std::make_unique<ConvLayer>(handle, &desc->p1Conv, nnXLen, nnYLen, useFP16);
+    g1Conv = std::make_unique<ConvLayer>(handle, &desc->g1Conv, nnXLen, nnYLen, useFP16);
+    g1BN = std::make_unique<BatchNormLayer>(handle, &desc->g1BN, &desc->g1Activation, useFP16);
     gpoolToBiasMul = std::make_unique<MatmulLayer>(handle, &desc->gpoolToBiasMul);
-    p1BN = std::make_unique<BatchNormLayer>(handle, &desc->p1BN, &desc->p1Activation, nnXLen, nnYLen);
-    p2Conv = std::make_unique<ConvLayer>(handle, &desc->p2Conv, nnXLen, nnYLen);
+    p1BN = std::make_unique<BatchNormLayer>(handle, &desc->p1BN, &desc->p1Activation, useFP16);
+    p2Conv = std::make_unique<ConvLayer>(handle, &desc->p2Conv, nnXLen, nnYLen, useFP16);
     gpoolToPassMul = std::make_unique<MatmulLayer>(handle, &desc->gpoolToPassMul);
     gpoolToPassBias = std::make_unique<MatBiasLayer>(handle, &desc->gpoolToPassBias, desc->passActivation.activation);
     gpoolToPassMul2 = std::make_unique<MatmulLayer>(handle, &desc->gpoolToPassMul2);
@@ -3060,15 +3111,15 @@ struct ValueHead {
     scoreValueChannels(desc->sv3Mul.outChannels),
     ownershipChannels(desc->vOwnershipConv.outChannels)
   {
-    v1Conv = std::make_unique<ConvLayer>(handle, &desc->v1Conv, nnXLen, nnYLen);
-    v1BN = std::make_unique<BatchNormLayer>(handle, &desc->v1BN, &desc->v1Activation, nnXLen, nnYLen);
+    v1Conv = std::make_unique<ConvLayer>(handle, &desc->v1Conv, nnXLen, nnYLen, useFP16);
+    v1BN = std::make_unique<BatchNormLayer>(handle, &desc->v1BN, &desc->v1Activation, useFP16);
     v2Mul = std::make_unique<MatmulLayer>(handle, &desc->v2Mul);
     v2Bias = std::make_unique<MatBiasLayer>(handle, &desc->v2Bias, desc->v2Activation.activation);
     v3Mul = std::make_unique<MatmulLayer>(handle, &desc->v3Mul);
     v3Bias = std::make_unique<MatBiasLayer>(handle, &desc->v3Bias, ACTIVATION_IDENTITY);
     sv3Mul = std::make_unique<MatmulLayer>(handle, &desc->sv3Mul);
     sv3Bias = std::make_unique<MatBiasLayer>(handle, &desc->sv3Bias, ACTIVATION_IDENTITY);
-    vOwnershipConv = std::make_unique<ConvLayer>(handle, &desc->vOwnershipConv, nnXLen, nnYLen);
+    vOwnershipConv = std::make_unique<ConvLayer>(handle, &desc->vOwnershipConv, nnXLen, nnYLen, useFP16);
   }
 
   ~ValueHead() {
@@ -4347,7 +4398,7 @@ bool NeuralNet::testEvaluateConv(
   // std::cout << "[testEvaluateConv] Created compute context" << std::endl;
   ComputeHandleInternal* handle = new ComputeHandleInternal(ctx,static_cast<int>(gpuId), useNHWC, useNHWC);
   const VulkanDevice* device = handle->vulkanDevice;
-  ConvLayer *layer = new ConvLayer(handle, desc, nnXLen, nnYLen);
+  ConvLayer *layer = new ConvLayer(handle, desc, nnXLen, nnYLen, false);
   size_t numInputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->inChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
   size_t numOutputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
 
@@ -4469,7 +4520,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     // BatchNormLayer *layer = new BatchNormLayer(handle, desc, nnXLen
     ActivationLayerDesc actDesc;
     actDesc.activation = ACTIVATION_IDENTITY;
-    BatchNormLayer *layer = new BatchNormLayer(handle, desc, &actDesc, nnXLen, nnYLen);
+    BatchNormLayer *layer = new BatchNormLayer(handle, desc, &actDesc, false);
     size_t numInputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->numChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
     size_t numOutputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->numChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
     size_t numMaskFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
@@ -4579,7 +4630,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     useNHWC = false; // TODO: enable NHWC testing later.
     ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, false, false);
     ComputeHandleInternal* handle = new ComputeHandleInternal(ctx,static_cast<int>(gpuId), useNHWC, useNHWC);
-    ResidualBlock *layer = new ResidualBlock(handle, desc, nnXLen, nnYLen);
+    ResidualBlock *layer = new ResidualBlock(handle, desc, nnXLen, nnYLen, false);
 
     size_t numTrunkFloats =  static_cast<size_t>(batchSize * nnXLen * nnYLen * desc->preBN.numChannels);
     size_t numMaskFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen);
@@ -4696,7 +4747,7 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, useFP16, useNHWC);
     ComputeHandleInternal* handle = new ComputeHandleInternal(ctx,static_cast<int>(gpuId), useNHWC, useNHWC);
-    GlobalPoolingResidualBlock *layer = new GlobalPoolingResidualBlock(handle, desc, nnXLen, nnYLen);
+    GlobalPoolingResidualBlock *layer = new GlobalPoolingResidualBlock(handle, desc, nnXLen, nnYLen, false);
 
     size_t numTrunkFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen * desc->preBN.numChannels);
     size_t numMaskFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen);

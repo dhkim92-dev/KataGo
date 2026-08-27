@@ -69,10 +69,10 @@ extern "C" {
   extern const unsigned char* _binary_xgemm_strided_batched_nn_fp32_end;
   extern const size_t _binary_xgemm_strided_batched_nn_fp32_size;
 
-  // bn_mask_fp32.glsl
-  extern const unsigned char _binary_bn_mask_fp32_start[];
-  extern const unsigned char* _binary_bn_mask_fp32_end;
-  extern const size_t _binary_bn_mask_fp32_size;
+  // bn_mask_identity_fp32.glsl
+  extern const unsigned char _binary_bn_mask_identity_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_identity_fp32_end;
+  extern const size_t _binary_bn_mask_identity_fp32_size;
 
   // bn_mask_relu_fp32.glsl
   extern const unsigned char _binary_bn_mask_relu_fp32_start[];
@@ -88,6 +88,11 @@ extern "C" {
   extern const unsigned char _binary_bn_mask_mish_scale8_fp32_start[];
   extern const unsigned char* _binary_bn_mask_mish_scale8_fp32_end;
   extern const size_t _binary_bn_mask_mish_scale8_fp32_size;
+
+  // bn_mask_silu_fp32.glsl
+  extern const unsigned char _binary_bn_mask_silu_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_silu_fp32_end;
+  extern const size_t _binary_bn_mask_silu_fp32_size;
 
   // global_pooling_channels_fp32.glsl
   extern const unsigned char _binary_global_pooling_channels_fp32_start[];
@@ -214,8 +219,8 @@ namespace vk_shader {
   // extern size_t spirv_matmul_tiled_chw_4x4x32_fp32_size;
 
   // bn_mask_fp32 - Batch normalization with mask (identity activation)
-  extern const unsigned char* spirv_bn_mask_fp32;
-  extern size_t spirv_bn_mask_fp32_size;
+  extern const unsigned char* spirv_bn_mask_identity_fp32;
+  extern size_t spirv_bn_mask_identity_fp32_size;
 
   // bn_mask_relu_fp32 - Batch normalization with mask + ReLU
   extern const unsigned char* spirv_bn_mask_relu_fp32;
@@ -228,6 +233,10 @@ namespace vk_shader {
   // bn_mask_mish_scale8_fp32 - Batch normalization with mask + Mish + Scale8
   extern const unsigned char* spirv_bn_mask_mish_scale8_fp32;
   extern size_t spirv_bn_mask_mish_scale8_fp32_size;
+
+  // bn_mask_silu_fp32 - Batch normalization with mask + silu
+  extern const unsigned char* spirv_bn_mask_silu_fp32;
+  extern size_t spirv_bn_mask_silu_fp32_size;
 
   // sum_channels_fp32 - Sum over channels
   extern const unsigned char* spirv_sum_channels_fp32;
@@ -813,10 +822,11 @@ namespace vk_shader {
     // Batch Normalization pipelines
     // note that prediction phase does not need batch normalization operation separately
     // as the parameters can be folded into convolution scale and bias.
-    Pipeline batchNormMaskFp32;
-    Pipeline batchNormMaskReluFp32;
-    Pipeline batchNormMaskMishFp32;
-    Pipeline batchNormMaskMishScale8Fp32;
+    Pipeline batchNormMaskIdentity;
+    Pipeline batchNormMaskRelu;
+    Pipeline batchNormMaskMish;
+    Pipeline batchNormMaskMishScale8;
+    Pipeline batchNormMaskSilu;
 
     // Pooling pipelines
     Pipeline globalPoolingChannelsFp32;
@@ -939,22 +949,24 @@ namespace vk_shader {
     /**
      * @brief Create a BatchNorm Mask Fp32 object
      */
-    void createBatchNormMaskFp32();
+    void createBatchNormMaskIdentity();
 
     /**
-     * @brief Create a BatchNorm Mask + ReLU Fp32 object
+     * @brief Create a BatchNorm Mask + ReLU object
      */
-    void createBatchNormMaskReluFp32();
+    void createBatchNormMaskRelu();
 
     /**
-     * @brief Create a BatchNorm Mask + Mish Fp32 object
+     * @brief Create a BatchNorm Mask + Mish object
      */
-    void createBatchNormMaskMishFp32();
+    void createBatchNormMaskMish();
 
     /**
-     * @brief Create a BatchNorm Mask + Mish + Scale8 Fp32 object
+     * @brief Create a BatchNorm Mask + Mish + Scale8 object
      */
-    void createBatchNormMaskMishScale8Fp32();
+    void createBatchNormMaskMishScale8();
+
+    void createBatchNormMaskSilu();
 
     /**
      * @brief Create a Global Average Pool Fp32 object

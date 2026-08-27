@@ -1,6 +1,6 @@
 #version 450
 #define PRECISION 32
 #define PRECISION_STORAGE 32
-#define ACTIVATION 12
+#define ACTIVATION 0
 
 #include "bn_mask.glsl"
