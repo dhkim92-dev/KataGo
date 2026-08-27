@@ -217,8 +217,8 @@ namespace vk_shader {
     destroyPipeline(batchNormMaskMishScale8Fp32);
     destroyPipeline(globalPoolingChannelsFp32);
     destroyPipeline(valueHeadPoolingChannelsFp32);
-    for ( int bs =1 ; bs <= 4 ; bs++ ) {
-      destroyPipeline(sumChannels[bs]);
+    for ( Pipeline& pipeline : sumChannels ) {
+      destroyPipeline(pipeline);
     }
     sumChannels.clear();
     destroyPipeline(addChannelBiasNCHWFp32);
