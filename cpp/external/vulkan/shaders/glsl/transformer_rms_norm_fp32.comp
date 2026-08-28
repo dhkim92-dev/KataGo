@@ -1,0 +1,4 @@
+#version 450
+#define PRECISION 32
+#define PRECISION 32
+#include "transformer_rms_norm.glsl"

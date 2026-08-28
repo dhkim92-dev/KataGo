@@ -133,6 +133,9 @@ namespace vk_shader {
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;
   size_t spirv_extract_channel0_nchw_fp32_size = _binary_extract_channel0_nchw_fp32_size;
 
+  const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
+  size_t spirv_transformer_rms_norm_fp32_size = _binary_transformer_rms_norm_fp32_size;
+
   ComputePipelines::ComputePipelines(
     VkDevice device_,
     const vk_shader::tune::VulkanTuneParams& params
@@ -195,6 +198,7 @@ namespace vk_shader {
     createAddChannelBiasNCMishScale8();
     createAddChannelBiasNCSilu();
     createExtractChannel0NCHWFp32();
+    createTransformerRMSNorm();
   }
 
   void ComputePipelines::destroyPipelines() {
@@ -242,6 +246,8 @@ namespace vk_shader {
     destroyPipeline(addChannelBiasNCMishScale8);
     destroyPipeline(addChannelBiasNCSilu);
     destroyPipeline(extractChannel0NCHWFp32);
+
+    destroyPipeline(transformerRmsNorm);
   }
 
   /**
@@ -727,5 +733,15 @@ namespace vk_shader {
     createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(ExtractChannel0NCHWParams), extractChannel0NCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-
+  void ComputePipelines::createTransformerRMSNorm() {
+    auto spec = TransformerRMSNormSpec();
+    spec.localSizeX = tuneParams.rmsNorm.WG_C_SIZE * tuneParams.rmsNorm.WG_XY_SIZE;
+    spec.localSizeY = 1;
+    spec.localSizeZ = 1;
+    spec.C_PER_THREAD = tuneParams.rmsNorm.C_PER_THREAD;
+    spec.WG_C_SIZE = tuneParams.rmsNorm.WG_C_SIZE;
+    spec.WG_XY_SIZE = tuneParams.rmsNorm.WG_XY_SIZE;
+    SpecializationData specData(spec);
+    createPipeline("createRMSNormFP32", vk_shader::spirv_transformer_rms_norm_fp32, vk_shader::spirv_transformer_rms_norm_fp32_size, 5, sizeof(TransformerRMSNormPushParams), transformerRmsNorm, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
 }

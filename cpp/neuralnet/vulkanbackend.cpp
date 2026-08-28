@@ -2178,6 +2178,97 @@ void performValueHeadPool(
   }
 }
 
+
+struct TransformerRMSNormLayer {
+  // TODO: Require to complete implementation
+
+  const ComputeHandleInternal* handle;
+  const std::string name;
+  const int numChannels;
+  const float eps;
+  const int paddedNNXYLen;
+  VulkanBuffer* weightBuf;
+  VulkanBuffer* zeroBetaBuf;
+  vk_shader::push::TransformerRMSNormPushParams params;
+  Pipeline pipeline;
+  VkDescriptorSet descriptorSet;
+
+  TransformerRMSNormLayer(
+    ComputeHandleInternal *handle_,
+    const TransformerRMSNormDesc* desc
+  ) : 
+    handle(handle_),
+    name(desc->name),
+    numChannels(desc->numChannels),
+    eps(desc->epsilon),
+    paddedNNXYLen(handle->paddedNNXYLen) 
+  {
+    testAssert(desc->weight.size() == numChannels);
+    std::vector<float> weight = desc->weight;
+    bool useFP16 = false; // keep weights in FP32
+    VkResult res = VK_ERROR_UNKNOWN;
+    weightBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weight, useFP16, &res);
+    CHECK_VK_MSG("[TransformerRMSLayer::TransformerRMSLayer() weightBuf]", res);
+    vector<float> zeroBeta(numChannels, 0.0f);
+    zeroBetaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeroBeta, useFP16, &res);
+    CHECK_VK_MSG("[TransformerRMSLayer::TransformerRMSLayer() zeroBetaBuf]", res);
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    pipeline = handle->context->pipelinesPerDev.at(gpuId)->transformerRmsNorm;
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerRMSLayer::TransformerRMSLayer() allocate descriptor set", res);
+    params.epsilon = eps;
+    params.xySize = paddedNNXYLen;
+    params.cSize = numChannels;
+  }
+
+  ~TransformerRMSNormLayer() {
+    if ( weightBuf ) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, weightBuf);
+      delete weightBuf;
+    }
+    if ( zeroBetaBuf ) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, zeroBetaBuf);
+      delete zeroBetaBuf;
+    }
+  }
+
+  void forward(
+    VkCommandBuffer cb,
+    uint32_t batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    params.nSize = batchSize;
+    auto writeDescriptors = {
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, weightBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, zeroBetaBuf),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
+    };
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+
+    uint32_t wgXYSize = handle->tuneParams.rmsNorm.WG_XY_SIZE;
+    uint32_t numXYGroups = (paddedNNXYLen + wgXYSize - 1) / wgXYSize;
+
+    uint32_t globalSizes[3] = {pipeline.localSizeX * numXYGroups, batchSize, 1};
+
+    uint32_t wgCounts[3] = {
+      (globalSizes[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
+      (globalSizes[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
+      (globalSizes[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ
+    };
+
+    SHADER_PROFILE_START("TransformerRMSNorm", cb);
+    vkCmdDispatch(cb, wgCounts[0], wgCounts[1], wgCounts[2]);
+    SHADER_PROFILE_END("TransformerRMSNorm", cb);
+  }
+};
+
 /**
  * @brief Basic Residual Block, Consist of two conv layers with BN and Activation and one skip connection
  */

@@ -14,9 +14,12 @@
 #define VMA_IMPLEMENTATION
 #include "../external/vulkan/vk_mem_alloc.h"
 #endif
+#include "../external/half-2.2.0/include/half.hpp"
 #include "../core/global.h"
 #include "../core/logger.h"
 #include "../neuralnet/vulkanhelpers.h"
+
+using half_t = half_float::half;
 
 VulkanDevice::~VulkanDevice() {
     // std::cout << "[VulkanDevice::~VulkanDevice] Destroying Vulkan device " << this->info.deviceName << std::endl;
@@ -732,6 +735,63 @@ void vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
   vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
 }
 
+
+VulkanBuffer* vk_helper::createReadOnlyBuffer(
+  const VulkanDevice* device,
+  const std::vector<float>& data,
+  const bool useFP16,
+  VkResult* result
+) {
+  if ( useFP16 ) {
+    std::vector<half_t> dataHalf(data.size());
+    for ( size_t i = 0 ; i < data.size() ; ++i ) {
+      dataHalf[i] = half_float::half_cast<half_t>(data[i]);
+    }
+    return createDeviceBufferWithData(
+        device,
+        sizeof(half_t) * dataHalf.size(),
+        dataHalf.data(),
+        true,
+        result
+      );
+  }
+  return createDeviceBufferWithData(
+    device,
+    sizeof(float) * data.size(),
+    data.data(),
+    true,
+    result
+  );
+}
+
+
+VulkanBuffer* vk_helper::createReadWriteBuffer(
+  const VulkanDevice* device,
+  const std::vector<float>& data,
+  const bool useFP16,
+  VkResult* result
+) {
+  if ( useFP16 ) {
+    std::vector<half_t> halfData(data.size());
+    for(size_t i = 0 ; i < data.size() ; ++i ) {
+      halfData[i] = half_float::half_cast<half_t>(data[i]);
+    }
+    return createDeviceBufferWithData(
+      device,
+      sizeof(half_t) * halfData.size(),
+      halfData.data(),
+      false,
+      result
+    );
+  }
+  return createDeviceBufferWithData(
+    device,
+    sizeof(float) * data.size(),
+    data.data(),
+    false,
+    result
+  );
+}
 
 VulkanBuffer* vk_helper::createDeviceBuffer(
   const VulkanDevice *device,

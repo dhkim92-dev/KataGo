@@ -2,13 +2,10 @@
 * Vulkan ported transformer RMSNorm kernel.
 * Based on openclkernels.cpp, transformerRMSNorm kernel function
 */
-#version 450
-#define PRECISION 32
-#define PRECISION_STORAGE 32
 #include "common.glsl"
 
-layout(constant_id = 4) const int WG_C_SIZE = 64;
-layout(constant_id = 3) const int WG_XY_SIZE = 1;
+layout(constant_id = 3) const int WG_C_SIZE = 64;
+layout(constant_id = 4) const int WG_XY_SIZE = 1;
 layout(constant_id = 5) const int C_PER_THREAD = 4;
 
 layout(push_constant) uniform TransformerRMSNormParams {

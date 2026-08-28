@@ -14,6 +14,8 @@
 #include "../core/global.h"
 #include "../core/logger.h"
 
+using half_t = half_float::half;
+
 struct VulkanDeviceInfo {
   uint32_t deviceId;
   VkPhysicalDevice physicalDevice;
@@ -236,6 +238,21 @@ namespace vk_helper {
   void submitSingleTimeCommandBufferAndWaitIdle(
     const VulkanDevice *device,
     VkCommandBuffer commandBuffer
+  );
+
+
+  VulkanBuffer* createReadOnlyBuffer(
+    const VulkanDevice* device,
+    const std::vector<float>& data,
+    const bool useFP16,
+    VkResult* result
+  );
+
+  VulkanBuffer* createReadWriteBuffer(
+    const VulkanDevice* device,
+    const std::vector<float>& data,
+    const bool useFP16,
+    VkResult* result
   );
 
   VulkanBuffer* createDeviceBuffer(
