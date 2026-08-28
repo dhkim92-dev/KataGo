@@ -646,7 +646,14 @@ namespace vk_shader {
   }
 
   void ComputePipelines::createGlobalPoolingChannelsFp32() {
+    // TODO: create multiple local sizes pipelines to optimize performance.
     auto spec = GlobalPoolingChannelsSpec();
+    spec.localSizeX = tuneParams.gPool.XYSTRIDE;
+    spec.localSizeY = tuneParams.gPool.CHANNELSTRIDE;
+    spec.localSizeZ = tuneParams.gPool.BATCHSTRIDE;
+    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
+    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
+    spec.LOCALSIZE_TOTAL = spec.XYSTRIDE * spec.CHANNELSTRIDE * tuneParams.gPool.BATCHSTRIDE;
     SpecializationData specData(spec);
     createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), globalPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }

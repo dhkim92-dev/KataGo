@@ -320,6 +320,9 @@ namespace vk_shader {
       uint32_t localSizeX = 128;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
     };
 
     struct ValueHeadPoolingChannelsSpec {
@@ -576,9 +579,9 @@ namespace vk_shader {
       * @brief Global Pooling Channels Push Constant Parameters
       */
     struct GlobalPoolingChannelsParams {
-      uint32_t batchSize;
-      uint32_t gpoolChannels;
-      uint32_t nnXYLen;
+      int nSize;
+      int cSize;
+      int xySize;
     };
 
     /**

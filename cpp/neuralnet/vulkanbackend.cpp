@@ -2013,6 +2013,7 @@ void performGpoolMask(
 ) {
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  Pipeline pipeline = pipelines->globalPoolingChannelsFp32;
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
@@ -2022,11 +2023,7 @@ void performGpoolMask(
     CHECK_VK_MSG("Begin command buffer for GlobalPoolingMask", res);
   }
   if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice,
-      pipelines->globalPoolingChannelsFp32.descriptorSetLayout,
-      &res
-    );
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice,  pipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("Allocate descriptor set for GlobalPoolingMask", res);
   }
   // update descriptor set
@@ -2038,11 +2035,11 @@ void performGpoolMask(
   };
   vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->globalPoolingChannelsFp32.pipeline);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
     VK_PIPELINE_BIND_POINT_COMPUTE,
-    pipelines->globalPoolingChannelsFp32.layout,
+    pipeline.layout,
     0,
     1,
     &descriptorSet,
@@ -2050,9 +2047,9 @@ void performGpoolMask(
     nullptr
   );
   GlobalPoolingChannelsParams pushConstants = {};
-  pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-  pushConstants.gpoolChannels = static_cast<uint32_t>(gpoolChannels);
-  pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+  pushConstants.nSize = static_cast<uint32_t>(batchSize);
+  pushConstants.cSize = static_cast<uint32_t>(gpoolChannels);
+  pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
   vkCmdPushConstants(
     commandBuffer,
     pipelines->globalPoolingChannelsFp32.layout,
@@ -2062,12 +2059,23 @@ void performGpoolMask(
     &pushConstants
   );
 
-  // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
-  // Each workgroup of 128 threads processes one (batch, channel) pair with parallel reduction
-  // Since Vulkan shader has fixed numthreads with Y,Z=1, dispatch Y,Z directly equals channel and batch counts
-  uint32_t wgCountX = 1u;
-  uint32_t wgCountY = static_cast<uint32_t>(gpoolChannels);
-  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
+  auto tuneParams = handle->tuneParams.gPool;
+  // TODO: Dynamic local size required for Y, Z
+  uint32_t localSizeX = pipeline.localSizeX;
+  uint32_t localSizeY = pipeline.localSizeY;
+  uint32_t localSizeZ = pipeline.localSizeZ;
+
+  uint32_t globalSizeX = localSizeX;
+  uint32_t globalSizeY = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(gpoolChannels, localSizeY)
+  );
+  uint32_t globalSizeZ = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(batchSize, localSizeZ)
+  );
+
+  uint32_t wgCountX = globalSizeX / localSizeX;
+  uint32_t wgCountY = globalSizeY / localSizeY;
+  uint32_t wgCountZ = globalSizeZ / localSizeZ;
   SHADER_PROFILE_START("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
