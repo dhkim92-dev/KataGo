@@ -188,7 +188,7 @@ namespace vk_shader {
     createGlobalPoolingChannelsFp32();
     createValueHeadPoolingChannelsFp32();
     createSumChannelsFp32();
-    createAddChannelBiasNCHWFp32();
+    createAddChannelBiasNCHW();
     createAddChannelBiasNCIdentity();
     createAddChannelBiasNCRelu();
     createAddChannelBiasNCMish();
@@ -235,7 +235,7 @@ namespace vk_shader {
       destroyPipeline(pipeline);
     }
     sumChannels.clear();
-    destroyPipeline(addChannelBiasNCHWFp32);
+    destroyPipeline(addChannelBiasNCHW);
     destroyPipeline(addChannelBiasNCIdentity);
     destroyPipeline(addChannelBiasNCRelu);
     destroyPipeline(addChannelBiasNCMish);
@@ -681,10 +681,14 @@ namespace vk_shader {
     }
   }
 
-  void ComputePipelines::createAddChannelBiasNCHWFp32() {
+  void ComputePipelines::createAddChannelBiasNCHW() {
     auto spec = AddChannelBiasNCHWSpec();
+    spec.XY_ELTS_PER_THREAD = tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
+    spec.NC_ELTS_PER_THREAD = tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
+    spec.localSizeX=32;
+    spec.localSizeY=1;
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCHWFp32", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddChannelBiasNCHW", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHW, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createAddChannelBiasNCIdentity() {

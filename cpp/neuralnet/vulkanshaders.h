@@ -347,9 +347,11 @@ namespace vk_shader {
     };
 
     struct AddChannelBiasNCHWSpec {
-      uint32_t localSizeX = 16;
-      uint32_t localSizeY = 16;
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      int XY_ELTS_PER_THREAD = 1;
+      int NC_ELTS_PER_THREAD = 1;
     };
 
     struct AddChannelBiasNCSpec {
@@ -643,6 +645,11 @@ namespace vk_shader {
       int ELTS_PER_THREAD=1;
     };
 
+    struct AddChannelBiasesNCHWTuneParams {
+      int XY_ELTS_PER_THREAD=4;
+      int NC_ELTS_PER_THREAD=2;
+    };
+
     struct GPoolTuneParams {
       int XYSTRIDE=32;
       int CHANNELSTRIDE=1;
@@ -683,6 +690,7 @@ namespace vk_shader {
     };
 
     struct VulkanTuneParams {
+      AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
       GPoolTuneParams gPool;
       ConvTuneParams conv3x3;
@@ -847,7 +855,7 @@ namespace vk_shader {
     // Element wise operations
     std::vector<Pipeline> sumChannels;
 
-    Pipeline addChannelBiasNCHWFp32;
+    Pipeline addChannelBiasNCHW;
     Pipeline addChannelBiasNCIdentity;
     Pipeline addChannelBiasNCRelu;
     Pipeline addChannelBiasNCMish;
@@ -998,7 +1006,7 @@ namespace vk_shader {
     /**
      * @brief Create a Add Channel Bias NCHW Fp32 object
      */
-    void createAddChannelBiasNCHWFp32();
+    void createAddChannelBiasNCHW();
 
     /**
      * @brief Create a Add Channel Bias NC

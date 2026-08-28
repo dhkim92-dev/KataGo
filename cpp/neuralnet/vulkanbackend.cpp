@@ -1867,7 +1867,7 @@ void performAddChannelBiases(
 ) {
   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
   vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
-  Pipeline targetPipeline = pipelines->addChannelBiasNCHWFp32;
+  Pipeline targetPipeline = pipelines->addChannelBiasNCHW;
 
   if( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
@@ -1903,6 +1903,12 @@ void performAddChannelBiases(
     0,
     nullptr
   );
+
+  int xyEltsPerThread = handle->tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
+  int ncEltsPerThread = handle->tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
+  int xyThreads = (nnXYLen + xyEltsPerThread-1) / xyEltsPerThread;
+  int ncThreads = (ncSize + ncEltsPerThread - 1) / ncEltsPerThread;
+
   AddChannelBiasNCHWParams pushConstants = {};
   pushConstants.ncSize = static_cast<uint32_t>(ncSize);
   pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
@@ -1914,12 +1920,16 @@ void performAddChannelBiases(
     sizeof(AddChannelBiasNCHWParams),
     &pushConstants
   );
-  uint32_t wgCountX = (static_cast<uint32_t>(nnXYLen) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
-  uint32_t wgCountY = (static_cast<uint32_t>(ncSize) + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
+  uint32_t globalSizeX = vk_helper::roundUpToMultiple(xyThreads, 32);
+  uint32_t globalSizeY = ncThreads;
+  uint32_t localSizeX = targetPipeline.localSizeX;
+  uint32_t localSizeY = targetPipeline.localSizeY; // 1 
+  uint32_t wgCountX = (globalSizeX + localSizeX - 1) / localSizeX;
+  uint32_t wgCountY = globalSizeY;
   uint32_t wgCountZ = 1u;
-  SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
+  SHADER_PROFILE_START("ADD_CHANNEL_BIAS_NCHW", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
-  SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NCHW_FP32", commandBuffer);
+  SHADER_PROFILE_END("ADD_CHANNEL_BIAS_NCHW", commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, input);
   if ( begin ) {
     vk_helper::endCommandBuffer(commandBuffer);
@@ -2363,9 +2373,9 @@ struct GlobalPoolingResidualBlock {
     gpoolConv->forward(cb, batchSize, trunkScratch, gpoolOut.buf, convWorkspace, convWorkspace2);
     gpoolBN->forward(cb, batchSize, gpoolOut. buf,mask, gpoolOut.buf);
     VkResult res;;
-    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, nnXYLen, &res, false);
+    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
-    performAddChannelBiases(handle, cb, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen, false);
+    performAddChannelBiases(handle, cb, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, paddedNNXYLen, false);
     normActConv2->forward(cb, batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
   }
@@ -2393,11 +2403,11 @@ struct GlobalPoolingResidualBlock {
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
     VkCommandBuffer addChannelCB = VK_NULL_HANDLE;
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
-    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, nnXYLen, &res);
+    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, &res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record GlobalPoolingResidualBlock gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
-    performAddChannelBiases(handle, addChannelCB, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen);
+    performAddChannelBiases(handle, addChannelCB, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelCB});
     normActConv2->debug(batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"));
@@ -2881,7 +2891,7 @@ struct Trunk {
 
     initialConv->forward(cb, batchSize, input, trunk, convWorkspace, convWorkspace2);
     initialMatmul->forward(cb, batchSize, inputGlobal, trunkScratch.buf);
-    performAddChannelBiases(handle, cb, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen, false);
+    performAddChannelBiases(handle, cb, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, paddedNNXYLen, false);
     if ( sgfMetadataEncoder != nullptr ) {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->forward(cb, batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
@@ -2923,7 +2933,7 @@ struct Trunk {
     initialConv->debug(batchSize, input, trunk, nullptr, nullptr, convWorkspace, convWorkspace2);
     initialMatmul->debug(batchSize, inputGlobal, trunkScratch.buf);
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
-    performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
+    performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
     {
       printDeviceBuffer(name  + "/add_channel_bias0 Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(trunkNumChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
@@ -2932,7 +2942,7 @@ struct Trunk {
       VkCommandBuffer addChannelBiasCB2 = VK_NULL_HANDLE;
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->debug(batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
-      performAddChannelBiases(handle, addChannelBiasCB2, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, nnXLen * nnYLen);
+      performAddChannelBiases(handle, addChannelBiasCB2, addChannelBiasDS2, trunk, sgfEncodedMeta.buf, batchSize * trunkNumChannels, paddedNNXYLen);
       vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB2});
     }
     blockStack.debug(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
@@ -2946,6 +2956,7 @@ struct PolicyHead {
   const int modelVersion;
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
   const int p1Channels;
   const int g1Channels;
   const int p2Channels;
@@ -2980,7 +2991,8 @@ struct PolicyHead {
     nnYLen(nnYLen_),
     p1Channels(desc->p1Conv.outChannels),
     g1Channels(desc->g1Conv.outChannels),
-    p2Channels(desc->p2Conv.outChannels)
+    p2Channels(desc->p2Conv.outChannels),
+    paddedNNXYLen(handle->paddedNNXYLen)
   {
     p1Conv = std::make_unique<ConvLayer>(handle, &desc->p1Conv, nnXLen, nnYLen, useFP16);
     g1Conv = std::make_unique<ConvLayer>(handle, &desc->g1Conv, nnXLen, nnYLen, useFP16);
@@ -3030,7 +3042,7 @@ struct PolicyHead {
     VkResult res;;
     performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
-    performAddChannelBiases(handle, cb, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, nnXLen * nnYLen, false);
+    performAddChannelBiases(handle, cb, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, paddedNNXYLen, false);
     p1BN->forward(cb, batchSize, p1Out.buf, mask, p1Out.buf);
     p2Conv->forward(cb, batchSize, p1Out.buf, policy, convWorkspace, convWorkspace2);
 
@@ -3070,7 +3082,7 @@ struct PolicyHead {
     CHECK_VK_MSG("Record PolicyHead gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
-    performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, nnXLen * nnYLen);
+    performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
     p1BN->debug(batchSize, p1Out.buf, mask, p1Out.buf);
     p2Conv->debug(batchSize, p1Out.buf, policy, nullptr, nullptr, convWorkspace, convWorkspace2);
