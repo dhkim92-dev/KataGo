@@ -9,6 +9,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vector>
+#include "../external/half-2.2.0/include/half.hpp"
 #include "../external/vulkan/vk_mem_alloc.h"
 #include "../core/global.h"
 #include "../core/logger.h"

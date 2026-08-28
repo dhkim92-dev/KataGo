@@ -203,11 +203,13 @@ void convInputToWinogradDomainBnActMask(
   const VulkanBuffer* mask,
   uint32_t nnYLen,
   uint32_t nnXLen,
+  uint32_t xyStride,
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
   uint32_t convSize,
   VkResult *result
 ) {
+  throw StringError("winogradTransformBnAct is inactivated");
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace),
@@ -245,6 +247,7 @@ void convInputToWinogradDomainBnActMask(
   params.inChannels = inChannels;
   params.inChannelsPadded = static_cast<uint32_t>(inChannelsPadded);
   params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
+  params.xyStride = xyStride;
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   const uint32_t localSizeX = pipeline->localSizeX;

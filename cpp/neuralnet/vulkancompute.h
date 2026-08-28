@@ -62,6 +62,7 @@ namespace vkcompute {
     const VulkanBuffer* mask,
     uint32_t nnYLen,
     uint32_t nnXLen,
+    uint32_t xyStride,
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
     uint32_t convSize,

@@ -1129,8 +1129,8 @@ struct ConvLayer {
     }
 
     int filterStride = 0;
-    int inputStride = nnXLen * nnYLen * inChannels;
-    int outputStride = nnXLen * nnYLen * outChannels;
+    int inputStride = paddedNNXYLen * inChannels;
+    int outputStride = paddedNNXYLen * outChannels;
 
     vkcompute::xgemmStridedBatchedNN(
       handle->vulkanDevice,
@@ -1138,7 +1138,7 @@ struct ConvLayer {
       &targetPipeline,
       cb,
       descriptorSet,
-      nnXLen * nnYLen, outChannels, inChannels,
+      paddedNNXYLen, outChannels, inChannels,
       inputStride, filterStride, outputStride,
       input, filterBuf, output,
       static_cast<uint32_t>(batchSize), &res
@@ -1234,7 +1234,7 @@ struct ConvLayer {
         bnScale,
         bnBias,
         mask,
-        nnYLen, nnXLen,
+        nnYLen, nnXLen, paddedNNXYLen,
         batchSize, numTilesY, numTilesX, handle->getXGemmMPaddingMult(),
         inChannels, handle->getXGemmKPaddingMult(),
         convYSize,
@@ -3344,6 +3344,7 @@ struct Model {
   const int numOwnershipChannels;
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
 
   std::unique_ptr<Trunk> trunk;
   std::unique_ptr<PolicyHead> policyHead;
@@ -3377,7 +3378,8 @@ struct Model {
     numScoreValueChannels(desc.numScoreValueChannels),
     numOwnershipChannels(desc.numOwnershipChannels),
     nnXLen(nnXLen_),
-    nnYLen(nnYLen_)
+    nnYLen(nnYLen_),
+    paddedNNXYLen(handle->paddedNNXYLen)
   {
 
     if ( nnXLen > NNPos::MAX_BOARD_LEN ) {
@@ -3498,16 +3500,16 @@ struct Model {
       printDeviceBuffer("First Input: ", handle->vulkanDevice, input, batchSize * numInputChannels * nnXLen * nnYLen, false);
     }
 
-    performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, nnXLen * nnYLen);
+    performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, handle->paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {extractChannel0CB});
-    printDeviceBuffer("Model::debug Extract Channel 0 Result", handle->vulkanDevice, mask, batchSize * nnXLen * nnYLen);
+    printDeviceBuffer("Model::debug Extract Channel 0 Result", handle->vulkanDevice, mask, batchSize * handle->paddedNNXYLen);
     computeMaskSums(handle, computeMaskSumCB, computeMaskSumDS, batchSize, mask, maskSum);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {computeMaskSumCB});
     printDeviceBuffer("Model::debug Mask Sum Result", handle->vulkanDevice, maskSum, batchSize);
     trunk->debug(batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
-    printDeviceBuffer("Model::debug Trunk Output", handle->vulkanDevice, trunkBuf, batchSize * trunk->trunkNumChannels * nnXLen * nnYLen);
+    printDeviceBuffer("Model::debug Trunk Output", handle->vulkanDevice, trunkBuf, batchSize * trunk->trunkNumChannels * handle->paddedNNXYLen);
     policyHead->debug(batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
-    printDeviceBuffer("Model::debug Policy Output", handle->vulkanDevice, policy, batchSize * policyHead->p2Channels * nnXLen * nnYLen);
+    printDeviceBuffer("Model::debug Policy Output", handle->vulkanDevice, policy, batchSize * policyHead->p2Channels * handle->paddedNNXYLen);
     valueHead->debug(batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership, convWorkspace, convWorkspace2);
     printDeviceBuffer("Model::debug Value Output", handle->vulkanDevice, value, batchSize * valueHead->valueChannels);
   }
@@ -3627,7 +3629,7 @@ struct Buffers {
     ComputeHandleInternal* handle,
     const Model& m
   ) {
-    size_t batchXYElts = (size_t)m.maxBatchSize * m.nnXLen * m.nnYLen;
+    size_t batchXYElts = (size_t)m.maxBatchSize * m.paddedNNXYLen;
     size_t batchElts = (size_t)m.maxBatchSize;
 
     bool useFP16 = handle->usingFP16Storage;
@@ -3757,9 +3759,7 @@ struct ComputeHandle {
   {
     scratch = std::make_unique<ScratchBuffers>(
       handle.get(),
-      model->maxBatchSize,
-      model->nnXLen,
-      model->nnYLen
+      model->maxBatchSize
     );
     // // Buffers* ptr = new Buffers(handle.get(), *model);
     // // buffers = std::make_unique<Buffers>(handle.get(), *model);
@@ -3909,17 +3909,17 @@ struct InputBuffers {
   size_t ownershipResultBufferElts;
 
   float* userInputBuffer; //Host pointer
-  // half_t* userInputBufferHalf; //Host pointer
+  half_t* userInputBufferHalf; //Host pointer
   float* userInputGlobalBuffer; //Host pointer
   float* userInputMetaBuffer; //Host pointer
 
   float* policyPassResults; //Host pointer
   float* policyResults; //Host pointer
-  // half_t* policyResultsHalf; //Host pointer
+  half_t* policyResultsHalf; //Host pointer
   float* valueResults; //Host pointer
   float* scoreValueResults; //Host pointer
   float* ownershipResults; //Host pointer
-  // half_t* ownershipResultsHalf; //Host pointer
+  half_t* ownershipResultsHalf; //Host pointer
 
   InputBuffers(
     const LoadedModel* loadedModel,
@@ -3955,32 +3955,52 @@ struct InputBuffers {
     scoreValueResultBufferElts = static_cast<size_t>( maxBatchSize ) * m.numScoreValueChannels;
     ownershipResultBufferElts = static_cast<size_t>( maxBatchSize ) * m.numOwnershipChannels * nnXLen * nnYLen;
 
-    userInputBuffer = new float[userInputBufferElts];
-    userInputGlobalBuffer = new float[userInputGlobalBufferElts];
-    if ( m.numInputMetaChannels > 0 ) {
-      userInputMetaBuffer = new float[userInputMetaBufferElts];
-    } else {
+    // userInputBuffer = new float[userInputBufferElts];
+    userInputBuffer = new float[(size_t)m.numInputChannels * maxBatchSize * nnXLen * nnYLen];
+    int maxPaddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, 16); // TODO: check max subgroup
+    userInputBufferHalf = new half_t[(size_t)m.numInputChannels * maxBatchSize * maxPaddedNNXYLen];
+    userInputGlobalBuffer = new float[(size_t)m.numInputGlobalChannels * maxBatchSize];
+    if(m.numInputMetaChannels > 0)
+      userInputMetaBuffer = new float[(size_t)m.numInputMetaChannels * maxBatchSize];
+    else
       userInputMetaBuffer = nullptr;
-    }
 
-    policyPassResults = new float[ static_cast<size_t>( m.numPolicyChannels * maxBatchSize ) ];
-    policyResults = new float[ static_cast<size_t>( m.numPolicyChannels * nnXLen * nnYLen * maxBatchSize ) ];
-    valueResults = new float[ static_cast<size_t>( m.numValueChannels * maxBatchSize ) ];
-    scoreValueResults = new float[ static_cast<size_t>( m.numScoreValueChannels * maxBatchSize ) ];
-    ownershipResults = new float[ static_cast<size_t>( m.numOwnershipChannels * nnXLen * nnYLen * maxBatchSize ) ];
+    policyPassResults = new float[(size_t)maxBatchSize * m.numPolicyChannels];
+    policyResults = new float[(size_t)maxBatchSize * m.numPolicyChannels * nnXLen * nnYLen];
+    policyResultsHalf = new half_t[(size_t)maxBatchSize * m.numPolicyChannels * maxPaddedNNXYLen];
+    valueResults = new float[(size_t)maxBatchSize * m.numValueChannels];
+
+    scoreValueResults = new float[(size_t)maxBatchSize * m.numScoreValueChannels];
+    ownershipResults = new float[(size_t)maxBatchSize * nnXLen * nnYLen * m.numOwnershipChannels];
+    ownershipResultsHalf = new half_t[(size_t)maxBatchSize * maxPaddedNNXYLen * m.numOwnershipChannels];
+    // userInputGlobalBuffer = new float[userInputGlobalBufferElts];
+    // if ( m.numInputMetaChannels > 0 ) {
+    //   userInputMetaBuffer = new float[userInputMetaBufferElts];
+    // } else {
+    //   userInputMetaBuffer = nullptr;
+    // }
+
+    // policyPassResults = new float[ static_cast<size_t>( m.numPolicyChannels * maxBatchSize ) ];
+    // policyResults = new float[ static_cast<size_t>( m.numPolicyChannels * nnXLen * nnYLen * maxBatchSize ) ];
+    // valueResults = new float[ static_cast<size_t>( m.numValueChannels * maxBatchSize ) ];
+    // scoreValueResults = new float[ static_cast<size_t>( m.numScoreValueChannels * maxBatchSize ) ];
+    // ownershipResults = new float[ static_cast<size_t>( m.numOwnershipChannels * nnXLen * nnYLen * maxBatchSize ) ];
   }
 
   ~InputBuffers() {
     delete[] userInputBuffer;
+    delete[] userInputBufferHalf;
     delete[] userInputGlobalBuffer;
     if ( userInputMetaBuffer != nullptr ) {
       delete[] userInputMetaBuffer;
     }
     delete[] policyPassResults;
     delete[] policyResults;
+    delete[] policyResultsHalf;
     delete[] valueResults;
     delete[] scoreValueResults;
     delete[] ownershipResults;
+    delete[] ownershipResultsHalf;
   }
 
   InputBuffers() = delete;
@@ -4013,6 +4033,8 @@ void NeuralNet::getOutput(
   const int batchSize = numBatchEltsFilled;
   const int nnXLen = computeHandle->nnXLen;
   const int nnYLen = computeHandle->nnYLen;
+  const int nnXYLen = nnXLen * nnYLen;
+  const int paddedNNXYLen = computeHandle->handle->paddedNNXYLen;
   const int modelVersion = computeHandle->model->modelVersion;
   // globalBatchCount = batchSize;
 
@@ -4046,10 +4068,10 @@ void NeuralNet::getOutput(
   }
   Buffers* buffers = computeHandle->buffers.get();
 
-  assert(inputBuffers->userInputBufferElts == buffers->inputElts);
+  // assert(inputBuffers->userInputBufferElts == buffers->inputElts);
   assert(inputBuffers->userInputGlobalBufferElts == buffers->inputGlobalElts);
   assert(inputBuffers->userInputMetaBufferElts == buffers->inputMetaElts);
-  assert(inputBuffers->policyResultBufferElts == buffers->policyElts);
+  // assert(inputBuffers->policyResultBufferElts == buffers->policyElts);
   assert(inputBuffers->valueResultBufferElts == buffers->valueElts);
   assert(inputBuffers->singlePolicyPassResultElts == numPolicyChannels);
   assert(inputBuffers->singlePolicyResultElts == numPolicyChannels * nnXLen * nnYLen);
@@ -4064,17 +4086,42 @@ void NeuralNet::getOutput(
   VkResult res = VK_ERROR_UNKNOWN;
 
   if ( useFP16Storage ) {
-    // TODO: implement fp16 storage path
+    size_t paddedInputElts = static_cast<size_t>(numSpatialFeatures) * paddedNNXYLen * batchSize;
+    size_t totalChannels = static_cast<size_t>(numSpatialFeatures * batchSize);
+
+    // Convert float to half with padding
+    if(paddedNNXYLen == nnXYLen) {
+      for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i ) {
+        inputBuffers->userInputBufferHalf[i] = half_float::half_cast<half_t>(inputBuffers->userInputBuffer[i]);
+      }
+    } else {
+      for (size_t c = 0 ; c < totalChannels ; ++c ) {
+        for ( int xy = 0 ; xy < nnXYLen ; xy++) {
+          inputBuffers->userInputBufferHalf[c * paddedNNXYLen + xy] = half_float::half_cast<half_t>(inputBuffers->userInputBuffer[c * nnXYLen + xy]);
+        }
+        for(int xy = nnXYLen; xy < paddedNNXYLen; xy++) {
+          inputBuffers->userInputBufferHalf[c * paddedNNXYLen + xy] = half_float::half_cast<half_t>(0.0f);
+        }
+      }
+    }
+
+    // TODO: complete fp16 device memory allocation for inputs.
+
   } else {
-    vk_helper::copyHostToDeviceBuffer(
-      handle->vulkanDevice,
-      inputBuffers->userInputBuffer, // Host pointer
-      buffers->input,
-      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputElts),
-      false,
-      &res
-    );
-    CHECK_VK_MSG("Copy input buffer to device", res);
+
+    if ( paddedNNXYLen == nnXYLen ) {
+      vk_helper::copyHostToDeviceBuffer(
+        handle->vulkanDevice,
+        inputBuffers->userInputBuffer, // Host pointer
+        buffers->input,
+        static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputElts),
+        false,
+        &res
+      );
+      CHECK_VK_MSG("Copy input buffer to device", res);
+    } else {
+      ASSERT_UNREACHABLE;
+    }
 
     vk_helper::copyHostToDeviceBuffer(
       handle->vulkanDevice,
@@ -4161,18 +4208,23 @@ void NeuralNet::getOutput(
 
 
     // Read back Policy result
+    size_t paddedPolicyElts = static_cast<size_t>(numPolicyChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
       // TODO: implement fp16 storage path
     } else {
-      vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice,
-        buffers->policy,
-        static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singlePolicyResultElts)),
-        inputBuffers->policyResults,
-        true,
-        &res
-      );
-      CHECK_VK_MSG("Copy policy results buffer to host", res);
+      if ( paddedNNXYLen == nnXYLen ) {
+        vk_helper::copyDeviceBufferToHost(
+          handle->vulkanDevice,
+          buffers->policy,
+          static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singlePolicyResultElts)),
+          inputBuffers->policyResults,
+          true,
+          &res
+        );
+        CHECK_VK_MSG("Copy policy results buffer to host", res);
+      } else {
+        ASSERT_UNREACHABLE;
+      }
       #ifdef VULKAN_API_DEBUG
       printHostBuffer(
         "[NeuralNet::getOutput] policy results",
@@ -4222,18 +4274,23 @@ void NeuralNet::getOutput(
     #endif
 
     // Read back Ownership result
+    size_t paddedOwnershipElts = static_cast<size_t>(computeHandle->model->numOwnershipChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
       // TODO: implement fp16 storage path
     } else {
-      vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice,
-        buffers->ownership,
-        static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singleOwnershipResultElts)),
-        inputBuffers->ownershipResults,
-        true,
-        &res
-      );
-      CHECK_VK_MSG("Copy ownership results buffer to host", res);
+      if ( paddedNNXYLen == nnXYLen ) {
+        vk_helper::copyDeviceBufferToHost(
+          handle->vulkanDevice,
+          buffers->ownership,
+          static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singleOwnershipResultElts)),
+          inputBuffers->ownershipResults,
+          true,
+          &res
+        );
+        CHECK_VK_MSG("Copy ownership results buffer to host", res);
+      } else {
+        ASSERT_UNREACHABLE;
+      }
       #ifdef VULKAN_API_DEBUG
       printHostBuffer(
         "[NeuralNet::getOutput] ownership results",
@@ -4682,7 +4739,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     }
 
     outputBuffer.resize(numTrunkFloats);
-    ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize, nnXLen, nnYLen);
+    ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
     std::vector<float> inputTmp = inputBuffer;
     std::vector<float> maskTmp = maskBuffer;
     VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(
@@ -4802,7 +4859,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     // printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Mask", maskBuffer.data(), maskBuffer.size(), batchSize, 1, nnYLen, nnXLen);
 
     outputBuffer.resize(numTrunkFloats);
-    ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize, nnXLen, nnYLen);
+    ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
     std::vector<float> inputTmp = inputBuffer;
     std::vector<float> maskTmp = maskBuffer;
     VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(

@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <cstdint>
 #include <iomanip>
+#include "../external/half-2.2.0/include/half.hpp"
 #include "../core/simpleallocator.h"
 #include "../neuralnet/activations.h"
 #include "../neuralnet/nninputs.h"
@@ -18,6 +19,8 @@
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkancompute.h"
 #include "../neuralnet/vulkanshaders.h"
+
+using half_t = half_float::half;
 
 // #define SHADER_PROFILE
 #ifdef SHADER_PROFILE
@@ -199,15 +202,13 @@ struct ScratchBuffers {
 
   ScratchBuffers(
     ComputeHandleInternal* handle_,
-    int maxBatchSize,
-    int nnXLen,
-    int nnYLen
+    int maxBatchSize
   ): 
-    handle(handle_),
-    batchXYFloatBytes(sizeof(float) * maxBatchSize * nnXLen * nnYLen),
-    batchFloatBytes(sizeof(float) * maxBatchSize),
-    batchXYBytes( (handle_->usingFP16Storage ? FLOAT16_SIZE_IN_BYTES : sizeof(float)) * maxBatchSize * nnXLen * nnYLen),
-    batchBytes((handle_->usingFP16Storage ? FLOAT16_SIZE_IN_BYTES : sizeof(float))  * maxBatchSize)
+    batchXYFloatBytes((size_t)maxBatchSize * handle_->paddedNNXYLen * sizeof(float)),
+    batchFloatBytes((size_t)maxBatchSize * sizeof(float)),
+    batchXYBytes((size_t)maxBatchSize * handle_->paddedNNXYLen * (handle_->usingFP16Storage ? sizeof(half_t) : sizeof(float))),
+    batchBytes((size_t)maxBatchSize * (handle_->usingFP16Storage ? sizeof(half_t) : sizeof(float))),
+    handle(handle_)
   {
     // std::cout << "Allocating ScratchBuffers for max batch size " << maxBatchSize << ", nnXLen " << nnXLen << ", nnYLen " << nnYLen << std::endl;
     std::function<VulkanBuffer*(size_t)> allocFunc = [this](size_t size) {

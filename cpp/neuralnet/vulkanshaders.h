@@ -460,10 +460,10 @@ namespace vk_shader {
 
     struct WinogradInputTransformParams {
       int batchSize;
-      int nnYLen;
       int nnXLen;
-      int numTilesY;
+      int nnYLen;
       int numTilesX;
+      int numTilesY;
       int inChannels;
       int inChannelsPadded;
       int ntxtySizePadded;
