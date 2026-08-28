@@ -3040,7 +3040,7 @@ struct PolicyHead {
     g1Conv->forward(cb, batchSize, trunk, gpoolOut.buf, convWorkspace, convWorkspace2);
     g1BN->forward(cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf);
     VkResult res;;
-    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res, false);
+    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(handle, cb, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, paddedNNXYLen, false);
     p1BN->forward(cb, batchSize, p1Out.buf, mask, p1Out.buf);
@@ -3077,7 +3077,7 @@ struct PolicyHead {
     g1BN->debug(batchSize, gpoolOut.buf, mask, gpoolOut.buf);
     VkResult res;;
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
-    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, nnXLen * nnYLen, &res);
+    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record PolicyHead gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
@@ -3103,6 +3103,7 @@ struct ValueHead {
   const int modelVersion;
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
   const int v1Channels;
   const int v2Channels;
   const int valueChannels;
@@ -3136,6 +3137,7 @@ struct ValueHead {
     modelVersion(desc->modelVersion),
     nnXLen(nnXLen_),
     nnYLen(nnYLen_),
+    paddedNNXYLen(handle->paddedNNXYLen),
     v1Channels(desc->v1Conv.outChannels),
     v2Channels(desc->v2Mul.outChannels),
     valueChannels(desc->v3Mul.outChannels),
@@ -3185,7 +3187,7 @@ struct ValueHead {
     v1Conv->forward(cb, batchSize, trunk, v1Out.buf, convWorkspace, convWorkspace2);
     v1BN->forward(cb, batchSize, v1Out.buf, mask, v1Out.buf);
     VkResult res;;
-    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, nnXLen * nnYLen, false);
+    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels,  paddedNNXYLen, false);
 
     v2Mul->forward(cb, batchSize, v1Mean.buf, v2Out.buf);
     v2Bias->forward(cb, batchSize, v2Out.buf);
@@ -3217,7 +3219,7 @@ struct ValueHead {
     v1BN->debug(batchSize, v1Out.buf, mask, v1Out.buf);
     VkResult res;
     VkCommandBuffer gpoolCB =  VK_NULL_HANDLE;
-    performValueHeadPool(handle, gpoolCB, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, nnXLen * nnYLen);
+    performValueHeadPool(handle, gpoolCB, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
 
     v2Mul->debug(batchSize, v1Mean.buf, v2Out.buf);
