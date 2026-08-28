@@ -5,7 +5,7 @@
 #version 450
 #define PRECISION 32
 #define PRECISION_STORAGE 32
-#include "common.h"
+#include "common.glsl"
 // #include "functions.h"
 
 // SPECIALIZATION_CONSTANT(0, uint, LOCAL_SIZE_X, 1);

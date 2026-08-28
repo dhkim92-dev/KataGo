@@ -1,6 +1,6 @@
 
 #version 450
-#include "common.h"
+#include "common.glsl"
 
 layout(set=0, binding=0) buffer input_buffer{
     realstore data[]; // N, numBufHeads, headDim, HW - modified in place

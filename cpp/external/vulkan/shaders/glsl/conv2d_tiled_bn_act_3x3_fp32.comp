@@ -22,8 +22,8 @@
  *  - Mask cache with unrolled loading
  */
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 // 3x3 kernel constants - enables compiler optimizations
 #define FILTER_SIZE 3

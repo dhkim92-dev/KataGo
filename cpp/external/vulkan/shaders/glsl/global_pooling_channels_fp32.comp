@@ -22,8 +22,8 @@
 *   XYSTRIDE - power of 2 reduction stride (e.g., 64)
 */
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 layout(push_constant) uniform GlobalPoolingChannelsParams {
     uint batchSize;

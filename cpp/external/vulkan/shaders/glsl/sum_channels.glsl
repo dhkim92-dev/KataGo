@@ -9,7 +9,7 @@
 *  - CHANNELSTRIDE
 *  - LOCALSIZE_TOTAL
 */
-#include "common.h"
+#include "common.glsl"
 
 layout(constant_id = 3) const int XYSTRIDE = 32;
 layout(constant_id = 4) const int CHANNELSTRIDE = 1;

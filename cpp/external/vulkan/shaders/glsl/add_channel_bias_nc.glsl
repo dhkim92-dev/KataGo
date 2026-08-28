@@ -1,8 +1,8 @@
 // @author dhkim92.dev@gmail.com
 // Add Channel Bias NC - GLSL compute shader
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 layout(push_constant) uniform AddChannelBiasesNCParams {
     uint nSize;

@@ -10,7 +10,7 @@
  * effectively reducing the tensor from (N, C, H, W) to (N, H, W).
  */
 
-#include "common.h"
+#include "common.glsl"
 
 layout(push_constant) uniform ExtractChannel0NCHWParams {
     uint nSize;        // N: number of batches

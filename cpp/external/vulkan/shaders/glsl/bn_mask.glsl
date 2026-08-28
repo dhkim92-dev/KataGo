@@ -8,8 +8,8 @@
 *   z -> batch
 */
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 layout(push_constant) uniform BatchNormMaskFp32Params {
     int nSize;

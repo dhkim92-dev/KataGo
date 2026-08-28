@@ -1,17 +1,3 @@
-// Spatial RMSNorm for trunk tip (rsnh suffix).
-// Three-kernel approach for deterministic parallel reduction:
-//   Pass 1 (SumSq): Compute masked sum of squares from NCHW input, producing partial sums.
-//   Pass 2 (Reduce): Reduce partial sums to a single sum per batch element.
-//   Apply: Normalize with gamma, beta, mask using the computed RMS.
-//
-// The two reduction kernels share the same structure, parametrized by TILE_SIZE.
-// Each workgroup handles a contiguous chunk of TILE_SIZE * tilesPerGroup elements.
-// Threads accumulate, then reduce in local memory; the leader writes one output.
-
-// Pass 1: Square + mask reduction from NCHW input to partial sums.
-// Input: [N, C, xySize] (NCHW), Mask: [N, xySize]
-// Output: [N, numWorkgroups] partial sums of squares.
-
 #version 450
 #define PRECISION 32
 #define PRECISION_STORAGE 32
@@ -19,7 +5,7 @@
 //Defines:
 //TILE_SIZE - workgroup size (power of two)
 
-#include "common.h"
+#include "common.glsl"
 
 layout(constant_id = 4) const int APPLY_ELTS_PER_THREAD = 1;
 

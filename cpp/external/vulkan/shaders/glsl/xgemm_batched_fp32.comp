@@ -44,7 +44,7 @@ layout(constant_id = 7) const int _NDIMC = 16; //
 layout(constant_id = 8) const int _MDIMA = 16; // Re-shaped tile dimension of matrix A = KDIMA x MDIMA
 layout(constant_id = 9) const int _NDIMB = 16; // Re-shaped tile dimension of matrix B =
 
-#include "common.h"
+#include "common.glsl"
 
 layout(push_constant) uniform BatchedXGEMMParams {
     int kSizeM;

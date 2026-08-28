@@ -1,5 +1,5 @@
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 //Spatial size of tile loaded into local memory, not counting filterRadius
 #ifndef TILE_XSIZE

@@ -301,6 +301,7 @@ namespace vk_shader {
       uint32_t localSizeX = 256;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      int ELTS_PER_THREAD = 1;
     };
 
     struct MatmulSpec {
@@ -590,10 +591,10 @@ namespace vk_shader {
     };
 
     /**
-      *  @brief Add Point Wise Push Constant Parameters
-      **/
+    *  @brief Add Point Wise Push Constant Parameters
+    **/
     struct AddPointWiseParams {
-      uint32_t totalSize;
+      uint32_t size;
     };
 
     /**
@@ -633,6 +634,11 @@ namespace vk_shader {
   };
 
   namespace tune {
+
+    struct AddPointWiseTuneParams {
+      int LOCAL_SIZE=32;
+      int ELTS_PER_THREAD=1;
+    };
 
     struct GPoolTuneParams {
       int XYSTRIDE=32;
@@ -674,6 +680,7 @@ namespace vk_shader {
     };
 
     struct VulkanTuneParams {
+      AddPointWiseTuneParams pointwise;
       GPoolTuneParams gPool;
       ConvTuneParams conv3x3;
       ConvTuneParams conv5x5;
@@ -810,7 +817,7 @@ namespace vk_shader {
     Pipeline winogradOutputTransform3x3;
     Pipeline winogradOutputTransform5x5;
 
-    Pipeline addPointWiseFp32;  // operation for skipping connections
+    Pipeline addPointWise;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
     Pipeline matmulFp32; 
@@ -926,7 +933,7 @@ namespace vk_shader {
     /**
      * @brief Create a Add Point Wise Fp32 object
      */
-    void createAddPointWiseFp32();
+    void createAddPointWise();
 
     /**
      * @brief Create a Matmul Fp32 object

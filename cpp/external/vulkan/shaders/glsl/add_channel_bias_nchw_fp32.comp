@@ -10,8 +10,8 @@
 * Binding 1: bias       - bias vector [NC]
 */
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 layout(push_constant) uniform AddChannelBiasNCHWParams {
     uint ncSize;

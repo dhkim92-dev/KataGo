@@ -4,7 +4,7 @@
 * Ignore complex number.
 * Apache License
 */
-#include "common.h"
+#include "common.glsl"
 
 #ifndef WGD 
 #define WGD _WGD 

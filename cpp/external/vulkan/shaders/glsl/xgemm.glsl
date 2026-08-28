@@ -1,6 +1,4 @@
-#include "common.h"
-
-
+#include "common.glsl"
 #ifndef VWM
   #define VWM 4
 #endif

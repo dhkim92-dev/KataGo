@@ -5,7 +5,7 @@
 #version 450
 #define PRECISION 32
 #define PRECISION_STORAGE 32
-#include "common.h"
+#include "common.glsl"
 
 layout(constant_id = 4) const int WG_C_SIZE = 64;
 layout(constant_id = 3) const int WG_XY_SIZE = 1;

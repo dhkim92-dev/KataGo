@@ -904,7 +904,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
   # Collect GLSL compute shader files (.comp)
   file(GLOB VK_GLSL_FILES "${VK_SHADER_SRC_DIR}/*.comp")
   # Collect header dependencies for proper rebuilds
-  file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.h")
+  file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.glsl")
 
   # List to collect all shader object libraries
   set(SHADER_OBJECT_LIBS)

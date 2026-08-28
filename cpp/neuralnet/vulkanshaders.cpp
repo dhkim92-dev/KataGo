@@ -174,7 +174,7 @@ namespace vk_shader {
     // createConv2d5x5BnFp32();
     // createConv2d5x5BnReluFp32();
     // createConv2d5x5BnMishFp32();
-    createAddPointWiseFp32();
+    createAddPointWise();
     createMatmulFp32();
     createBatchedXgemmDirect();
     createXGEMMBatchedFp32();
@@ -206,7 +206,7 @@ namespace vk_shader {
     // destroyPipeline(conv2d5x5BnFp32);
     // destroyPipeline(conv2d5x5BnReluFp32);
     // destroyPipeline(conv2d5x5BnMishFp32);
-    destroyPipeline(addPointWiseFp32);
+    destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
     destroyPipeline(winogradInputTransform3x3_bnact_identity);
@@ -542,12 +542,14 @@ namespace vk_shader {
   // }
 
   /**
-   * @brief Create a Add Point Wise Fp32 object
+   * @brief Create a Add Point Wise object
    */
-  void ComputePipelines::createAddPointWiseFp32() {
+  void ComputePipelines::createAddPointWise() {
     auto spec = AddPointWiseSpec();
+    spec.ELTS_PER_THREAD = tuneParams.pointwise.ELTS_PER_THREAD;
+    spec.localSizeX = tuneParams.pointwise.LOCAL_SIZE;
     SpecializationData specData(spec);
-    createPipeline("AddPointWiseFp32", vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWiseFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("AddPointWise", vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWise, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createMatmulFp32() {

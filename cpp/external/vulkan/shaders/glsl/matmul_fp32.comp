@@ -8,8 +8,8 @@
 // Globals: input tensor (A), weight tensor (B), output tensor (C)
 // Push constants match KatagoVulkan::MatmulFp32: M,K,N,numBatchElts,cTranspose
 
-#include "common.h"
-#include "functions.h"
+#include "common.glsl"
+#include "functions.glsl"
 
 // Push constants - mapped by host as push constants
 layout(push_constant) uniform MatmulPushConstants {

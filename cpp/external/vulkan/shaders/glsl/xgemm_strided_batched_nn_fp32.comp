@@ -10,7 +10,7 @@ layout(constant_id = 8) const int _KWID = 1;
 layout(constant_id = 9) const int _PADA = 1;
 layout(constant_id = 10) const int _PADB = 1;
 
-#include "common.h"
+#include "common.glsl"
 
 layout(set = 0, binding = 0) readonly buffer Agm {
     real4 agm[];

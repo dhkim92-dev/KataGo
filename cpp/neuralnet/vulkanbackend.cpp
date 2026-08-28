@@ -28,6 +28,15 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 using namespace vk_shader::push;
 
+static int checkedTotalElts(int64_t a, int64_t b, int64_t c, const char* whatKernel) {
+  int64_t total = a * b * c;
+  if(total >= (int64_t)2147483647)
+    throw StringError(
+      std::string(whatKernel) + ": total element count " + Global::int64ToString(total) +
+      " exceeds the 32-bit index limit used by this kernel");
+  return (int)total;
+}
+
 std::vector<float> makeInputDataFromFile(const std::string& filePath)
 {
     std::ifstream inFile(filePath);
@@ -1942,7 +1951,7 @@ void performAddPointWise(
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
-      pipelines->addPointWiseFp32.descriptorSetLayout,
+      pipelines->addPointWise.descriptorSetLayout,
       &res
     );
   }
@@ -1953,11 +1962,11 @@ void performAddPointWise(
   };
   vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
 
-  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWiseFp32.pipeline);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWise.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
     VK_PIPELINE_BIND_POINT_COMPUTE,
-    pipelines->addPointWiseFp32.layout,
+    pipelines->addPointWise.layout,
     0,
     1,
     &descriptorSet,
@@ -1965,16 +1974,16 @@ void performAddPointWise(
     nullptr
   );
   AddPointWiseParams pushConstants = {};
-  pushConstants.totalSize = static_cast<uint32_t>(totalSize);
+  pushConstants.size = static_cast<uint32_t>(totalSize);
   vkCmdPushConstants(
     commandBuffer,
-    pipelines->addPointWiseFp32.layout,
+    pipelines->addPointWise.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
     sizeof(AddPointWiseParams),
     &pushConstants
   );
-  const Pipeline& targetPipeline = pipelines->addPointWiseFp32;
+  const Pipeline& targetPipeline = pipelines->addPointWise;
   uint32_t wgCountX = (static_cast<uint32_t>(totalSize) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
   uint32_t wgCountY = 1u;
   uint32_t wgCountZ = 1u;
@@ -2231,7 +2240,7 @@ struct ResidualBlock {
     );
     normActConv->forward(cb, batchSize, trunk, trunkScratch, mid.buf , mask, convWorkspace, convWorkspace2);
     normActConv2->forward(cb, batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
-    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen), false);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
   }
 
   void debug(
@@ -2250,7 +2259,7 @@ struct ResidualBlock {
     normActConv->debug(batchSize, trunk, trunkScratch, mid.buf , mask, convWorkspace, convWorkspace2);
     normActConv2->debug(batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
-    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen));
+    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), true);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " RB Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }
@@ -2350,7 +2359,7 @@ struct GlobalPoolingResidualBlock {
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(handle, cb, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen, false);
     normActConv2->forward(cb, batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
-    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, batchSize * normActConv2->outChannels * nnXLen * nnYLen, false);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
   }
 
   void debug(
@@ -2383,7 +2392,7 @@ struct GlobalPoolingResidualBlock {
     performAddChannelBiases(handle, addChannelCB, addChannelDS, regularOut.buf, gpoolBias.buf, batchSize * regularChannels, nnXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelCB});
     normActConv2->debug(batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
-    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, batchSize * normActConv2->outChannels * nnXLen * nnYLen);
+    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"));
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " GPRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }
@@ -2397,6 +2406,7 @@ struct NestedResidualBlock {
   NormActConv *normActConv2;
   const int nnXLen;
   const int nnYLen;
+  const int paddedNNXYLen;
   // std::vector<VkCommandBuffer> commandBuffers;
   // VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
   VkDescriptorSet addPointWiseDS = VK_NULL_HANDLE;
@@ -2411,7 +2421,8 @@ struct NestedResidualBlock {
     handle(handle_),
     name(desc->name),
     nnXLen(nnXLen_),
-    nnYLen(nnYLen_)
+    nnYLen(nnYLen_),
+    paddedNNXYLen(handle->paddedNNXYLen)
   {
     normActConv = new NormActConv(handle, &desc->preConv, &desc->preBN, &desc->preActivation, nnXLen, nnYLen, useFP16);
     blocks = new BlockStack(handle, desc->blocks, desc->numBlocks, desc->preConv.outChannels, nnXLen, nnYLen, useFP16);
@@ -2454,7 +2465,7 @@ struct NestedResidualBlock {
     normActConv->forward(cb, batchSize, trunk, trunkScratch, mid.buf , mask, convWorkspace, convWorkspace2);
     blocks->forward(cb, batchSize, scratch, mid.buf, midScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
     normActConv2->forward(cb, batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
-    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen), false);
+    performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
   }
 
   void debug(
@@ -2473,7 +2484,7 @@ struct NestedResidualBlock {
     normActConv->debug(batchSize, trunk, trunkScratch, mid.buf , mask, convWorkspace, convWorkspace2);
     blocks->debug(batchSize, scratch, mid.buf, midScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
     normActConv2->debug(batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
-    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, static_cast<int>(batchSize * normActConv2->outChannels * nnXLen * nnYLen));
+    performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"));
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
     printDeviceBuffer(name + " NestedRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
   }

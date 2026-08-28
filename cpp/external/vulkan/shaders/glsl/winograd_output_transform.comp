@@ -15,7 +15,7 @@
 #define PRECISION 32
 #define PRECISION_STORAGE 32
 
-#include "common.h"
+#include "common.glsl"
 
 layout(constant_id=3) const int INTILE_YSIZE = 4;
 layout(constant_id=4) const int INTILE_XSIZE = 4;
