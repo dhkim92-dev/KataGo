@@ -63,10 +63,10 @@ struct ShaderExecutionInfo {
 struct ComputeHandleInternal {
   const ComputeContext* context;
   const VulkanDevice* vulkanDevice;
+  const vk_shader::ComputePipelines* pipelines;
   const vk_shader::tune::VulkanTuneParams& tuneParams;
   VkDevice device;
   VkQueue queue;
-
 
   int nnXLen;
   int nnYLen;

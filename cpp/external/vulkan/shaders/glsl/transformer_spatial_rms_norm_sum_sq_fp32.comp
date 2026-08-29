@@ -2,5 +2,4 @@
 #define PRECISION 32
 #define PRECISION_STORAGE 32
 
-#include "transformer_swiglu.glsl"
-
+#include "transformer_spatial_rms_norm_sum_sq.glsl"

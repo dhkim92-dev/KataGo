@@ -1,7 +1,3 @@
-#version 450
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-
 //Defines:
 //TILE_SIZE - workgroup size (power of two)
 

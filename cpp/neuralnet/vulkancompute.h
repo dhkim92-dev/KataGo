@@ -121,6 +121,14 @@ namespace vkcompute {
     int numBatchElts,
     VkResult* result
   );
+
+  struct SpatialRMSNormSizing {
+    int numCHWWorkgroups;   // workgroups per batch element for pass 1
+    int tilesPerGroupPass1; // tiles per group for pass 1
+    int tilesPerGroupPass2; // tiles per group for pass 2 (reduces numCHWWorkgroups values -> 1)
+  };
+  
+  SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize);
 }
 
 #endif

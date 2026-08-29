@@ -150,6 +150,22 @@ namespace vk_shader {
   const unsigned char* spirv_transformer_scale_dot_product_naive_fp32 = _binary_transformer_scale_dot_product_naive_fp32_start;
   size_t spirv_transformer_scale_dot_product_naive_fp32_size = _binary_transformer_scale_dot_product_naive_fp32_size;
 
+  // transformer_swiglu_fp32
+  const unsigned char* spirv_transformer_swiglu_fp32 = _binary_transformer_swiglu_fp32_start;
+  size_t spirv_transformer_swiglu_fp32_size = _binary_transformer_swiglu_fp32_size;
+
+  // transformer_spatial_rms_norm_apply_fp32
+  const unsigned char* spirv_transformer_spatial_rms_norm_apply_fp32 = _binary_transformer_spatial_rms_norm_apply_fp32_start;
+  size_t spirv_transformer_spatial_rms_norm_apply_fp32_size = _binary_transformer_spatial_rms_norm_apply_fp32_size;
+
+  // transformer_spatial_rms_norm_reduce_fp32
+  const unsigned char* spirv_transformer_spatial_rms_norm_reduce_fp32 = _binary_transformer_spatial_rms_norm_reduce_fp32_start;
+  size_t spirv_transformer_spatial_rms_norm_reduce_fp32_size = _binary_transformer_spatial_rms_norm_reduce_fp32_size;
+
+  // transformer_spatial_rms_norm_sum_sq_fp32
+  const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32 = _binary_transformer_spatial_rms_norm_sum_sq_fp32_start;
+  size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size = _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
+
 
   ComputePipelines::ComputePipelines(
     VkDevice device_,
@@ -216,6 +232,10 @@ namespace vk_shader {
     createExtractChannel0NCHWFp32();
     createTransformerRMSNorm();
     createTransformerApplyRoPE();
+    createTransformerSwiGLU();
+    createTransformerSpatialRMSNormApply();
+    createTransformerSpatialRMSNormReduce();
+    createTransformerSpatialRMSNormSumSq();
 
     if ( qHeadDim != -1 && vHeadDim != -1 ) {
       createTransformerScaleDotProduct(qHeadDim, vHeadDim);
@@ -273,6 +293,10 @@ namespace vk_shader {
     destroyPipeline(transformerApplyRoPE);
     destroyPipeline(transformerScaleDotProduct);
     destroyPipeline(transformerScaleDotProductNaive);
+    destroyPipeline(transformerSwiGLU);
+    destroyPipeline(transformerSpatialRMSNormApply);
+    destroyPipeline(transformerSpatialRMSNormReduce);
+    destroyPipeline(transformerSpatialRMSNormSumSq);
   }
 
   /**
@@ -799,5 +823,36 @@ namespace vk_shader {
     spec.localSizeZ = 1;
     SpecializationData specData(spec);
     createPipeline("TransformerScaleDotProductNaive", vk_shader::spirv_transformer_scale_dot_product_naive_fp32, vk_shader::spirv_transformer_scale_dot_product_naive_fp32_size, 5, sizeof(ScaleDotProductPushParam), transformerScaleDotProductNaive, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerSwiGLU() {
+    auto spec = TransformerSwiGLUSpec();
+    spec.ELTS_PER_THREAD = tuneParams.pointwise.ELTS_PER_THREAD;
+    spec.localSizeX = tuneParams.pointwise.LOCAL_SIZE;
+    SpecializationData specData(spec);
+    createPipeline("TransformerSwiGLU", vk_shader::spirv_transformer_swiglu_fp32, vk_shader::spirv_transformer_swiglu_fp32_size, 3, sizeof(TransformerSwiGLUPushParams), transformerSwiGLU, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerSpatialRMSNormApply() {
+    auto spec = TransformerSpatialRMSNormApplySpec();
+    spec.APPLY_ELTS_PER_THREAD = tuneParams.spatialRMSNorm.APPLY_ELTS_PER_THREAD;
+    SpecializationData specData(spec);
+    createPipeline("TransformerSpatialRMSNormApply", vk_shader::spirv_transformer_spatial_rms_norm_apply_fp32, vk_shader::spirv_transformer_spatial_rms_norm_apply_fp32_size, 7, sizeof(TransformerSpatialRMSNormApplyPushParams), transformerSpatialRMSNormApply, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerSpatialRMSNormReduce() {
+    auto spec = TransformerSpatialRMSNormReduceSpec();
+    spec.TILE_SIZE = tuneParams.spatialRMSNorm.TILE_SIZE;
+    spec.localSizeX = spec.TILE_SIZE;
+    SpecializationData specData(spec);
+    createPipeline("TransformerSpatialRMSNormReduce", vk_shader::spirv_transformer_spatial_rms_norm_reduce_fp32, vk_shader::spirv_transformer_spatial_rms_norm_reduce_fp32_size, 2, sizeof(TransformerSpatialRMSNormReducePushParams), transformerSpatialRMSNormReduce, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerSpatialRMSNormSumSq() {
+    auto spec = TransformerSpatialRMSNormSumSqSpec();
+    spec.TILE_SIZE = tuneParams.spatialRMSNorm.TILE_SIZE;
+    spec.localSizeX = spec.TILE_SIZE;
+    SpecializationData specData(spec);
+    createPipeline("TransformerSpatialRMSNormSumSq", vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32, vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), transformerSpatialRMSNormSumSq, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 }

@@ -504,6 +504,22 @@ void batchedXGemmDirect_MK_NK_MN(
     vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
+SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
+  SpatialRMSNormSizing sizing;
+  // Choose numCHWWorkgroups for pass 1 such that:
+  // 1. Each workgroup handles a reasonable chunk (tileSize * tilesPerGroup elements)
+  // 2. numCHWWorkgroups <= tileSize so pass 2 can reduce them in a single workgroup
+  // Start from the natural number of workgroups, then cap.
+  int naturalWorkgroups = (chwSize + tileSize - 1) / tileSize;
+  sizing.numCHWWorkgroups = std::min(naturalWorkgroups, tileSize);
+  // Compute tilesPerGroup for pass 1: each workgroup covers ceil(chwSize / (numCHWWorkgroups * tileSize)) tiles
+  sizing.tilesPerGroupPass1 = (chwSize + (sizing.numCHWWorkgroups * tileSize) - 1) / (sizing.numCHWWorkgroups * tileSize);
+  // Pass 2: reduce numCHWWorkgroups values to 1, in a single workgroup
+  sizing.tilesPerGroupPass2 = (sizing.numCHWWorkgroups + tileSize - 1) / tileSize;
+  return sizing;
+}
+
+
 };
 
 #endif

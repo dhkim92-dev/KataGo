@@ -164,6 +164,26 @@ extern "C" {
   extern const unsigned char* _binary_transformer_scale_dot_product_fp32_end;
   extern const size_t _binary_transformer_scale_dot_product_fp32_size;
 
+  // transformer_swiglu_fp32
+  extern const unsigned char _binary_transformer_swiglu_fp32_start[];
+  extern const unsigned char* _binary_transformer_swiglu_fp32_end;
+  extern const size_t _binary_transformer_swiglu_fp32_size;
+
+  // transformer_spatial_rms_norm_apply_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_fp32_size;
+
+  // transformer_spatial_rms_norm_reduce_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_fp32_size;
+
+  // transformer_spatial_rms_norm_sum_sq_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
+
 }
 
 /**
@@ -314,6 +334,22 @@ namespace vk_shader {
   // Transformer scale dot product
   extern const unsigned char* spirv_transformer_scale_dot_product_fp32;
   extern size_t spirv_transformer_scale_dot_product_fp32_size;;
+
+  // Transformer SwiGLU fp32
+  extern const unsigned char* spirv_transformer_swiglu_fp32;
+  extern size_t spirv_transformer_swiglu_fp32_size;
+
+  // Transformer spatial RMS norm apply fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_fp32_size;
+
+  // Transformer spatial RMS norm reduce fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_fp32_size;
+
+  // Transformer spatial RMS norm sum square fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size;
 
 
   namespace spec {
@@ -504,6 +540,34 @@ namespace vk_shader {
       uint32_t localSizeZ = 1;
       int ATTN_HEAD_DIM = 1;
       int ATTN_V_HEAD_DIM = 1;
+    };
+
+    struct TransformerSwiGLUSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ELTS_PER_THREAD = 1;
+    };
+
+    struct TransformerSpatialRMSNormApplySpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int APPLY_ELTS_PER_THREAD = 1;
+    };
+
+    struct TransformerSpatialRMSNormReduceSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int TILE_SIZE = 32;
+    };
+
+    struct TransformerSpatialRMSNormSumSqSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int TILE_SIZE = 32;
     };
   };
 
@@ -735,6 +799,30 @@ namespace vk_shader {
       int numKVHeads;
       float scale;
     };
+
+    struct TransformerSwiGLUPushParams {
+      int size;
+    };
+
+    struct TransformerSpatialRMSNormApplyPushParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      float eps;
+    };
+
+    struct TransformerSpatialRMSNormReducePushParams {
+      int nSize;
+      int numPartials;
+      int tilesPerGroup;
+    };
+
+    struct TransformerSpatialRMSNormSumSqPushParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      int tilesPerGroup;
+    };
   };
 
   namespace tune {
@@ -801,6 +889,11 @@ namespace vk_shader {
       int C_PER_THREAD = 4;
     };
 
+    struct TransformerSpatialRmsNormTuneParams {
+      int TILE_SIZE = 32;
+      int APPLY_ELTS_PER_THREAD = 1;
+    };
+
     struct VulkanTuneParams {
       AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
@@ -811,6 +904,7 @@ namespace vk_shader {
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
       TransformerRMSNormTuneParms rmsNorm;
+      TransformerSpatialRmsNormTuneParams spatialRMSNorm;
 
       VulkanTuneParams(const VulkanTuneParams& other) = default;
       VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
@@ -983,6 +1077,10 @@ namespace vk_shader {
     Pipeline transformerApplyRoPE;
     Pipeline transformerScaleDotProduct;
     Pipeline transformerScaleDotProductNaive;
+    Pipeline transformerSwiGLU;
+    Pipeline transformerSpatialRMSNormApply;
+    Pipeline transformerSpatialRMSNormReduce;
+    Pipeline transformerSpatialRMSNormSumSq;
 
     ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_, int qHeadDim, int vHeadDim);
     ComputePipelines() = delete;
@@ -1166,6 +1264,14 @@ namespace vk_shader {
     void createTransformerScaleDotProduct(int qHeadDim, int vHeadDim);
 
     void createTransformerScaleDotProductNaive(int qHeadDim, int vHeadDim);
+
+    void createTransformerSwiGLU();
+
+    void createTransformerSpatialRMSNormApply();
+
+    void createTransformerSpatialRMSNormReduce();
+
+    void createTransformerSpatialRMSNormSumSq();
   };
 }
 

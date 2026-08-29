@@ -1,7 +1,3 @@
-#version 450
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-
 //Defines:
 //TILE_SIZE - workgroup size (power of two)
 
@@ -9,29 +5,22 @@
 
 layout(constant_id = 4) const int TILE_SIZE = 32;
 
-
-layout(push_constant) uniform SpatialRMSNormSumSqParams{
+layout(push_constant) uniform SpatialRMSNormReduceParams{
     int nSize;
-    int cSize;
-    int xySize;
+    int numPartials;
     int tilesPerGroup;
 };
 
 layout(set=0, binding=0) buffer readonly input_buffer {
-    real d_input[];
+    float d_input[];
 };
 
-layout(set=0, binding=1) buffer readonly mask_bffer {
-    real mask[];
-};
-
-layout(set=0, binding=2) buffer writeonly output_buffer {
+layout(set=0, binding=1) buffer writeonly output_buffer {
     float d_output[];
 };
 
 shared float partials[TILE_SIZE];
 
-// workgroup [groupSize, batchSize]
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
     const int lid = int(gl_LocalInvocationID.x);
@@ -39,19 +28,13 @@ void main() {
     if(n >= nSize) return;
 
     const int groupIdx = int(gl_WorkGroupID.x);
-    const int totalElems = cSize * xySize;
     const int chunkStart = groupIdx * TILE_SIZE * tilesPerGroup;
 
     float acc = 0.0f;
-
     for(int t = 0 ; t < tilesPerGroup ; t++) {
         int idx = chunkStart + t * TILE_SIZE + lid;
-        if ( idx < totalElems ) {
-            int c = idx / xySize;
-            int xy = idx % xySize;
-            float maskVal = LOAD(mask, n * xySize + xy);
-            float val = LOAD(d_input, (n * cSize + c) * xySize + xy) * maskVal;
-            acc += val * val;
+        if( idx < numPartials ) {
+            acc += d_input[n * numPartials + idx];
         }
     }
 
