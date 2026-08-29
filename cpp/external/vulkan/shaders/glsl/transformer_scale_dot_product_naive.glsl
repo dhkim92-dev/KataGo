@@ -1,8 +1,4 @@
 
-#version 450
-#define PRECISION_STORAGE 32
-#define PRECISION 32
-
 #if PRECISION_STORAGE == 16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : enable
@@ -46,6 +42,7 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     float scale; // 1/sqrt(headDim)
 };
 
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
   const int qPos = int(gl_GlobalInvocationID.x);
   const int bh = int(gl_GlobalInvocationID.y);  // batch * numHeads + head

@@ -1,7 +1,3 @@
-#version 450
-#define PRECISION_STORAGE 32
-#define PRECISION 32
-
 #if PRECISION_STORAGE == 16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : enable

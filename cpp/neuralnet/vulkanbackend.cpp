@@ -191,7 +191,41 @@ struct ComputeContext {
   const enabled_t usingNHWCMode;
   VulkanContext* vulkanContext;
   std::unordered_map<uint32_t, vk_shader::ComputePipelines *> pipelinesPerDev;
+  std::pair<int, int> transformerHeadDims = {-1, -1};
   Logger* logger;
+
+  static void findTransformerHeadDims(
+    const std::vector<std::pair<int, unique_ptr_void>>& blocks,
+    std::pair<int, int>& headDims,
+    bool& foundHeadDims
+  ) {
+    for ( const auto& block : blocks ) {
+      if ( block.first == TRANSFORMER_ATTENTION_BLOCK_KIND ) {
+        const TransformerAttentionDesc* attentionDesc =
+          static_cast<const TransformerAttentionDesc*>(block.second.get());
+        const std::pair<int, int> currentHeadDims = {
+          attentionDesc->qHeadDim,
+          attentionDesc->vHeadDim
+        };
+
+        if ( !foundHeadDims ) {
+          headDims = currentHeadDims;
+          foundHeadDims = true;
+        } else if ( headDims != currentHeadDims ) {
+          throw StringError(
+            "Vulkan transformer attention blocks use different qHeadDim/vHeadDim combinations: ("
+            + std::to_string(headDims.first) + ", " + std::to_string(headDims.second)
+            + ") and (" + std::to_string(currentHeadDims.first) + ", "
+            + std::to_string(currentHeadDims.second) + ")"
+          );
+        }
+      } else if ( block.first == NESTED_BOTTLENECK_BLOCK_KIND ) {
+        const NestedBottleneckResidualBlockDesc* nestedDesc =
+          static_cast<const NestedBottleneckResidualBlockDesc*>(block.second.get());
+        findTransformerHeadDims(nestedDesc->blocks, headDims, foundHeadDims);
+      }
+    }
+  }
 
   ComputeContext(
     int nnXLen,
@@ -203,6 +237,7 @@ struct ComputeContext {
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
     const VulkanTuner::ModelInfoForTuning* modelInfo,
+    const ModelDesc* modelDesc,
     bool fullTuning,
     bool forceRetune)
   : nnXLen(nnXLen),
@@ -212,6 +247,11 @@ struct ComputeContext {
     gIdx(gpuIdxsToUse),
     logger(logger_)
      {
+      if ( modelDesc != nullptr ) {
+        bool foundHeadDims = false;
+        findTransformerHeadDims(modelDesc->trunk.blocks, transformerHeadDims, foundHeadDims);
+      }
+
       VkInstance instance = vk_helper::createVulkanInstance();
       std::vector<VulkanDeviceInfo> allDeviceInfos = vk_helper::enumerateVulkanDevices(instance, logger);
       std::vector<VulkanDevice *> vulkanDevices = {};
@@ -220,6 +260,8 @@ struct ComputeContext {
         if ( logger ) {
           logger->write("No GPU index specified, using default GPU 0");
         }
+
+        // TODO: select device to use using config
         gIdx[0] = 0; // use default GPU
       }
 
@@ -275,7 +317,7 @@ struct ComputeContext {
               nnXLen,nnYLen,*modelInfo,logger,fullTuning,forceRetune
             );
           }
-          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device,tuneParams);
+          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device,tuneParams, transformerHeadDims.first, transformerHeadDims.second);
         }
         catch(...) {
           delete vulkanDevice;
@@ -2269,6 +2311,275 @@ struct TransformerRMSNormLayer {
   }
 };
 
+
+struct TransformerMatMulLayer {
+  // TODO: Require to implement class definition
+  const ComputeHandleInternal* handle;
+  const std::string name;
+  const int inChannels;
+  const int outChannels;
+  const int paddedNNXYLen;
+  bool usingHGemmWmmaNHWC;
+  VkDescriptorSet descriptorSet;
+  VulkanBuffer* filter;
+
+  TransformerMatMulLayer(
+    const ComputeHandleInternal *handle,
+    const MatMulLayerDesc* desc
+  ):
+    name(desc->name),
+    inChannels(desc->inChannels),
+    outChannels(desc->outChannels),
+    paddedNNXYLen(handle->paddedNNXYLen),
+    usingHGemmWmmaNHWC(false)
+  {
+    testAssert(desc->weights.size() == static_cast<size_t>(inChannels * outChannels));
+    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    auto pipelines = handle->context->pipelinesPerDev.at(gpuId);
+    std::vector<float> weights = desc->weights;
+    bool useFP16 = handle->usingFP16Storage;
+    VkResult res = VK_ERROR_UNKNOWN;
+    filter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, useFP16, &res);
+    CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatmulLayer()] create filter vulkan buffer", res);
+    auto tuneParams = handle->tuneParams;
+
+    if ( handle->usingFP16TensorCoresFor1x1) {
+      throw StringError("vulkan backend doesn't support tensorcore yet.");
+    }   
+
+    // TODO: FP16 support and tensor cores.
+  }
+
+  ~TransformerMatMulLayer() {
+    if ( filter ) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, filter);
+      delete filter;
+    }
+  }
+
+  void forward(
+    VkCommandBuffer cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask,
+    VulkanBuffer* convWorkspace
+  ) {
+    VkResult res;
+    if (!usingHGemmWmmaNHWC) {
+      int filterStride = 0;
+      int inputStride = paddedNNXYLen * inChannels;
+      int outputStride = paddedNNXYLen * outChannels;
+      uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+      auto pipeline = handle->context->pipelinesPerDev.at(gpuId)->xgemmStridedBatchedFp32;
+
+      vkcompute::xgemmStridedBatchedNN(
+        handle->vulkanDevice,
+        handle->tuneParams,
+        &pipeline,
+        cb,
+        descriptorSet,
+        paddedNNXYLen, outChannels, inChannels,
+        inputStride, filterStride, outputStride,
+        input, filter, output,
+        static_cast<uint32_t>(batchSize), &res
+      );
+    } else {
+      throw StringError("Transformer Tensorcore not supported yet.");
+      // TODO: implement this block after cooperative_matrix support
+    }
+  }
+
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    // No separate pad buffer needed - input is pre-padded to paddedNNXYLen
+    (void)handle;
+    (void)maxBatchSize;
+    return ConvWorkspaceEltsNeeded();
+  }
+
+  TransformerMatMulLayer() = delete;
+  TransformerMatMulLayer(const TransformerMatMulLayer&) = delete;
+  TransformerMatMulLayer& operator=(const TransformerMatMulLayer&) = delete;
+};
+
+
+struct TransformerApplyRoPELayer {
+
+  ComputeHandleInternal *handle;
+  Pipeline pipeline;
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  TransformerApplyRoPEPushParams params;
+
+  TransformerApplyRoPELayer(
+    ComputeHandleInternal *handle
+  ): 
+    handle(handle)
+  {
+    int gpuId = this->handle->vulkanDevice->info.deviceId;
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    pipeline = pipelines->transformerApplyRoPE;
+    
+    VkResult res = VK_ERROR_UNKNOWN;
+    descriptorSet = vk_helper::allocateDescriptorSet(
+      handle->vulkanDevice,
+      pipeline.descriptorSetLayout,
+      &res
+    );
+    CHECK_VK_MSG("[TransformerApplyRoPE] allocate ropeDescriptorSet", res);
+  }
+
+  ~TransformerApplyRoPELayer() = default;
+
+  void forward(
+    VkCommandBuffer cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* cosTable,
+    VulkanBuffer* sinTable,
+    const int numHeads,
+    const int numKVHeads,
+    const int headDim,
+    const int seqLen,
+    const int numPairs,
+    const int learnableInt
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, cosTable),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, sinTable)
+    };
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+
+    params.nSize = batchSize; // 3
+    params.numBufHeads = numHeads; // 4
+    params.numKVHeads = numKVHeads; // 5
+    params.headDim = headDim;  // 6
+    params.xySize = seqLen; // 7
+    params.numPairs = numPairs;  //8 
+    params.learnableRope = learnableInt; //9
+
+    vkCmdPushConstants(
+      cb,
+      pipeline.layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(TransformerApplyRoPEPushParams),
+      &params
+    );
+    vkCmdBindDescriptorSets(
+      cb, 
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipeline.layout,
+      0,
+      1,
+      &descriptorSet,
+      0,
+      nullptr
+    );
+    uint32_t gs[3] = {
+      static_cast<uint32_t>(vk_helper::powerOf2ify(params.xySize)),
+      static_cast<uint32_t>(vk_helper::powerOf2ify(params.numPairs)),
+      static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize * params.numBufHeads))
+    };
+    uint32_t wgCountX = (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX;
+    uint32_t wgCountY = (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY;
+    uint32_t wgCountZ = (gs[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ;
+    SHADER_PROFILE_START("TransformerApplyRoPE", cb);
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+    SHADER_PROFILE_END("TransformerApplyRoPE", cb);
+  }
+};
+
+
+struct TransformerAttentionLayer {
+  ComputeHandleInternal* handle;
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  Pipeline pipeline;
+  ScaleDotProductPushParam params;
+  const bool useTiled;
+
+  explicit TransformerAttentionLayer(
+    ComputeHandleInternal* handle,
+    const int numHeads,
+    const int numKVHeads
+  ): 
+    handle(handle),
+    useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0)
+  {
+
+    int gpuId = handle->vulkanDevice->info.deviceId;
+    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    params.seqLen = handle->paddedNNXYLen;
+    params.numHeads = numHeads;
+    params.numKVHeads = numKVHeads;
+    params.scale = 1.0f / sqrtf(static_cast<float>(handle->qHeadDim));
+    if(useTiled) {
+      pipeline = pipelines->transformerScaleDotProduct;
+    } else {
+      pipeline = pipelines->transformerScaleDotProductNaive;
+    }
+    VkResult res = VK_SUCCESS;
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create descriptor set", res);
+  }
+
+  ~TransformerAttentionLayer()=default;
+
+  void forward(
+    VkCommandBuffer cb,
+    int batchSize,
+    VulkanBuffer* Q,
+    VulkanBuffer* K,
+    VulkanBuffer* V,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    auto writeDescriptors = {
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, Q),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, K),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, V),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, output),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
+    };
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+
+    if (useTiled) {
+      auto tuneParams = handle->tuneParams.transformer;
+      uint32_t qPerThread = tuneParams.Q_PER_THREAD;
+      uint32_t totalQPerWG = pipeline.localSizeX * qPerThread;
+      uint32_t numQGroups = (params.seqLen + totalQPerWG - 1) / totalQPerWG;
+      uint32_t gs[3] = {numQGroups * pipeline.localSizeX, (uint32_t)batchSize * params.numHeads, 1};
+      uint32_t wgCount[3] = {
+        (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
+        (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
+        (gs[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ
+      };
+      SHADER_PROFILE_START("scaleDotProductAttention", cb);
+      vkCmdDispatch(cb, wgCount[0], wgCount[1], wgCount[2]);
+      SHADER_PROFILE_END("scaleDotProductAttention", cb);
+    } else {
+      uint32_t gs[2] = {
+        static_cast<uint32_t>(vk_helper::powerOf2ify(params.seqLen)),
+        static_cast<uint32_t>(batchSize) * params.numHeads
+      };
+      uint32_t wgCount[3] = {
+        (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
+        (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
+        (1 + pipeline.localSizeZ - 1) / pipeline.localSizeZ
+      };
+      SHADER_PROFILE_START("scaleDotProductAttentionNaive", cb);
+      vkCmdDispatch(cb, wgCount[0], wgCount[1], wgCount[2]);
+      SHADER_PROFILE_END("scaleDotProductAttentionNaive", cb);
+    }
+  }
+};
+
 /**
  * @brief Basic Residual Block, Consist of two conv layers with BN and Activation and one skip connection
  */
@@ -3647,6 +3958,7 @@ ComputeContext* NeuralNet::createComputeContext(
     tunerFile,
     homeDataDirOverride,
     &modelInfo,
+    &loadedModel->modelDesc,
     fullTuning,
     forceRetune
   );
@@ -3674,6 +3986,7 @@ static ComputeContext* createComputeContextForTesting(
     logger,
     "",
     "",
+    nullptr,
     nullptr,
     false,
     false
@@ -3863,10 +4176,17 @@ struct ComputeHandle {
   ComputeHandle& operator=(const ComputeHandle&) = delete;
 };
 
-ComputeHandleInternal::ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC):
+ComputeHandleInternal::ComputeHandleInternal(
+  ComputeContext* ctx,
+  int gpuIdx,
+  bool inputsUseNHWC,
+  bool useNHWC
+):
   context(ctx),
   vulkanDevice(ctx->vulkanContext->findGpuExn(gpuIdx)),
-  tuneParams(ctx->pipelinesPerDev.at(vulkanDevice->info.deviceId)->tuneParams)
+  tuneParams(ctx->pipelinesPerDev.at(vulkanDevice->info.deviceId)->tuneParams),
+  qHeadDim(ctx->transformerHeadDims.first),
+  vHeadDim(ctx->transformerHeadDims.second)
 {
   this->queue = this->vulkanDevice->queue;
   this->device = this->vulkanDevice->device;

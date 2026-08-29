@@ -1,0 +1,7 @@
+
+#version 450
+#define PRECISION 32
+#define PRECISON_STORAGE 32
+
+#include "transformer_apply_rope.glsl"
+

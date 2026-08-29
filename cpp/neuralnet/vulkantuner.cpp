@@ -96,7 +96,7 @@ namespace {
     };
 
     try {
-      pipelines = new vk_shader::ComputePipelines(device->device, params);
+      pipelines = new vk_shader::ComputePipelines(device->device, params, -1, -1);
     } catch(const StringError& e) {
       return {CandidateStatus::Reject, 0.0, e.what()};
     }

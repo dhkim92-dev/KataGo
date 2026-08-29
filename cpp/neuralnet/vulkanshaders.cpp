@@ -133,19 +133,35 @@ namespace vk_shader {
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;
   size_t spirv_extract_channel0_nchw_fp32_size = _binary_extract_channel0_nchw_fp32_size;
 
+  // transformer_rms_norm_fp32
   const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
   size_t spirv_transformer_rms_norm_fp32_size = _binary_transformer_rms_norm_fp32_size;
 
+  // transformer_rope_fp32
+  const unsigned char* spirv_transformer_apply_rope_fp32 = _binary_transformer_apply_rope_fp32_start;
+  size_t spirv_transformer_apply_rope_fp32_size = _binary_transformer_apply_rope_fp32_size;
+
+  // transformer_scale_dot_product_fp32
+
+  const unsigned char* spirv_transformer_scale_dot_product_fp32 = _binary_transformer_scale_dot_product_fp32_start;
+  size_t spirv_transformer_scale_dot_product_fp32_size = _binary_transformer_scale_dot_product_fp32_size;
+
+  // transformer_scale_dot_product_naive_fp32
+  const unsigned char* spirv_transformer_scale_dot_product_naive_fp32 = _binary_transformer_scale_dot_product_naive_fp32_start;
+  size_t spirv_transformer_scale_dot_product_naive_fp32_size = _binary_transformer_scale_dot_product_naive_fp32_size;
+
+
   ComputePipelines::ComputePipelines(
     VkDevice device_,
-    const vk_shader::tune::VulkanTuneParams& params
+    const vk_shader::tune::VulkanTuneParams& params,
+    int qHeadDim, int vHeadDim
   ): device(device_), tuneParams(params) {
     VkResult res = VK_ERROR_UNKNOWN;
     cache = vk_helper::createPipelineCache(device, &res);
     if(res != VK_SUCCESS)
       throw StringError("Failed to create Vulkan pipeline cache: " + vk_helper::vkErrorToString(res));
     try {
-      createPipelines();
+      createPipelines(qHeadDim, vHeadDim);
     }
     catch(...) {
       destroyPipelines();
@@ -164,7 +180,7 @@ namespace vk_shader {
     }
   }
 
-  void ComputePipelines::createPipelines() {
+  void ComputePipelines::createPipelines(int qHeadDim, int vHeadDim) {
     // Tile base conv no longer used.
     // createConv2dFp32();
     // createConv2dTiledBnAct3x3Fp32();
@@ -199,6 +215,12 @@ namespace vk_shader {
     createAddChannelBiasNCSilu();
     createExtractChannel0NCHWFp32();
     createTransformerRMSNorm();
+    createTransformerApplyRoPE();
+
+    if ( qHeadDim != -1 && vHeadDim != -1 ) {
+      createTransformerScaleDotProduct(qHeadDim, vHeadDim);
+      createTransformerScaleDotProductNaive(qHeadDim, vHeadDim);
+    }
   }
 
   void ComputePipelines::destroyPipelines() {
@@ -248,6 +270,9 @@ namespace vk_shader {
     destroyPipeline(extractChannel0NCHWFp32);
 
     destroyPipeline(transformerRmsNorm);
+    destroyPipeline(transformerApplyRoPE);
+    destroyPipeline(transformerScaleDotProduct);
+    destroyPipeline(transformerScaleDotProductNaive);
   }
 
   /**
@@ -743,5 +768,36 @@ namespace vk_shader {
     spec.WG_XY_SIZE = tuneParams.rmsNorm.WG_XY_SIZE;
     SpecializationData specData(spec);
     createPipeline("createRMSNormFP32", vk_shader::spirv_transformer_rms_norm_fp32, vk_shader::spirv_transformer_rms_norm_fp32_size, 5, sizeof(TransformerRMSNormPushParams), transformerRmsNorm, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerApplyRoPE() {
+    auto spec = TransformerApplyRoPESpec();
+    SpecializationData specData(spec);
+    createPipeline("createTransformerApplyRoPE", vk_shader::spirv_transformer_apply_rope_fp32, vk_shader::spirv_transformer_apply_rope_fp32_size, 3, sizeof(TransformerApplyRoPEPushParams), transformerApplyRoPE, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerScaleDotProduct(int qHeadDim, int vHeadDim) {
+    auto spec = ScaleDotProductSpec();
+    spec.ATTN_BLOCK_KV = tuneParams.transformer.ATTN_BLOCK_KV;
+    spec.ATTN_BLOCK_Q = tuneParams.transformer.ATTN_BLOCK_Q;
+    spec.ATTN_HEAD_DIM = qHeadDim;
+    spec.ATTN_V_HEAD_DIM = vHeadDim;
+    spec.Q_PER_THREAD = tuneParams.transformer.Q_PER_THREAD;
+    spec.localSizeX = spec.ATTN_BLOCK_Q;
+    spec.localSizeY = 1;
+    spec.localSizeZ = 1;
+    SpecializationData specData(spec);
+    createPipeline("TransformerScaleDotProduct", vk_shader::spirv_transformer_scale_dot_product_fp32, vk_shader::spirv_transformer_scale_dot_product_fp32_size, 5, sizeof(ScaleDotProductPushParam), transformerScaleDotProduct, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  void ComputePipelines::createTransformerScaleDotProductNaive(int qHeadDim, int vHeadDim) {
+    auto spec = ScaleDotProductNaiveSpec();
+    spec.ATTN_HEAD_DIM = qHeadDim;
+    spec.ATTN_V_HEAD_DIM = vHeadDim;
+    spec.localSizeX = 32;
+    spec.localSizeY = 1;
+    spec.localSizeZ = 1;
+    SpecializationData specData(spec);
+    createPipeline("TransformerScaleDotProductNaive", vk_shader::spirv_transformer_scale_dot_product_naive_fp32, vk_shader::spirv_transformer_scale_dot_product_naive_fp32_size, 5, sizeof(ScaleDotProductPushParam), transformerScaleDotProductNaive, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 }

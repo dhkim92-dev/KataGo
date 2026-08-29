@@ -148,6 +148,22 @@ extern "C" {
   extern const unsigned char _binary_transformer_rms_norm_fp32_start[];
   extern const unsigned char* _binary_transformer_rms_norm_fp32_end;
   extern const size_t _binary_transformer_rms_norm_fp32_size;
+
+  // transformer_rope_fp32
+  extern const unsigned char _binary_transformer_apply_rope_fp32_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_fp32_end;
+  extern const size_t _binary_transformer_apply_rope_fp32_size;
+
+  // transformer_scale_dot_product_naive
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_fp32_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_fp32_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_fp32_size;
+
+  // transformer_scale_dot_product
+  extern const unsigned char _binary_transformer_scale_dot_product_fp32_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_fp32_end;
+  extern const size_t _binary_transformer_scale_dot_product_fp32_size;
+
 }
 
 /**
@@ -286,6 +302,19 @@ namespace vk_shader {
   // Transformer RMS Norm f32
   extern const unsigned char* spirv_transformer_rms_norm_fp32;
   extern size_t spirv_transformer_rms_norm_fp32_size;
+
+  // Transformer apply RoPE fp32
+  extern const unsigned char* spirv_transformer_apply_rope_fp32;
+  extern size_t spirv_transformer_apply_rope_fp32_size;;
+
+  // Transformer scale dot product naive
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_fp32;
+  extern size_t spirv_transformer_scale_dot_product_naive_fp32_size;
+
+  // Transformer scale dot product
+  extern const unsigned char* spirv_transformer_scale_dot_product_fp32;
+  extern size_t spirv_transformer_scale_dot_product_fp32_size;;
+
 
   namespace spec {
     struct Conv2DSpec {
@@ -450,6 +479,31 @@ namespace vk_shader {
       int WG_C_SIZE = 64;
       int WG_XY_SIZE = 1;
       int C_PER_THREAD = 4;
+    };
+
+    struct TransformerApplyRoPESpec {
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct ScaleDotProductSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ATTN_BLOCK_Q = 32;
+      int ATTN_BLOCK_KV = 32;
+      int Q_PER_THREAD = 1;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+    };
+
+    struct ScaleDotProductNaiveSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
     };
   };
 
@@ -660,6 +714,26 @@ namespace vk_shader {
       int cSize;
       int xySize;
       float epsilon;
+    };
+
+    struct TransformerApplyRoPEPushParams {
+      int nSize;
+      int numBufHeads;
+      int numKVHeads;
+      int headDim;
+      int xySize;
+      int numPairs;
+      int learnableRope;
+    };
+
+    /**
+     * Scale dot product shader params, transformer_scale_dot_product & transformer_scale_dot_product_naive both share this struct.
+     */
+    struct ScaleDotProductPushParam {
+      int seqLen;
+      int numHeads;
+      int numKVHeads;
+      float scale;
     };
   };
 
@@ -906,10 +980,11 @@ namespace vk_shader {
     // Transformer
 
     Pipeline transformerRmsNorm;
+    Pipeline transformerApplyRoPE;
     Pipeline transformerScaleDotProduct;
     Pipeline transformerScaleDotProductNaive;
 
-    ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_);
+    ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_, int qHeadDim, int vHeadDim);
     ComputePipelines() = delete;
     ComputePipelines(const ComputePipelines&) = delete;
     ComputePipelines& operator=(const ComputePipelines&) = delete;
@@ -917,7 +992,7 @@ namespace vk_shader {
     ~ComputePipelines();
 
   private :
-    void createPipelines();
+    void createPipelines(int qHeadDim, int vHeadDim);
     void destroyPipelines();
     void destroyPipeline(Pipeline& pipeline);
     void createPipeline(
@@ -1085,6 +1160,12 @@ namespace vk_shader {
     void createExtractChannel0NCHWFp32();
 
     void createTransformerRMSNorm();
+
+    void createTransformerApplyRoPE();
+
+    void createTransformerScaleDotProduct(int qHeadDim, int vHeadDim);
+
+    void createTransformerScaleDotProductNaive(int qHeadDim, int vHeadDim);
   };
 }
 

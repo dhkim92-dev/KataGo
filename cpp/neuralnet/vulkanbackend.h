@@ -67,9 +67,11 @@ struct ComputeHandleInternal {
   VkDevice device;
   VkQueue queue;
 
+
   int nnXLen;
   int nnYLen;
   int paddedNNXYLen; // nnXLen * nnYLen rounded up for spatial alignment
+  int qHeadDim=-1, vHeadDim=-1;
 
   bool usingFP16Storage = false;
   bool usingFp16Compute = false;

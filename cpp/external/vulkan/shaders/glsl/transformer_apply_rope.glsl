@@ -1,5 +1,3 @@
-
-#version 450
 #include "common.glsl"
 
 layout(set=0, binding=0) buffer input_buffer{
@@ -24,6 +22,7 @@ layout(push_constant) uniform RoPEParams {
     int learnableRope; // 1 = per-head tables, 0 = shared tables
 };
 
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
     const int xy = int(gl_GlobalInvocationID.x);
     const int pairIdx = int(gl_GlobalInvocationID.y);
