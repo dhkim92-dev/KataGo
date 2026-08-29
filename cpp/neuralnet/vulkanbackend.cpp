@@ -1231,6 +1231,7 @@ struct ConvLayer {
                         : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5_bnact_mish_scale8
                         : throw StringError("Unsupported conv size for fused Winograd convolution in layer " + name);
         break;
+        //TODO: winogradInputTransformBNAct with SILU activation required.
       default:
         throw StringError("Unsupported activation for fused Winograd convolution in layer " + name);
     }
