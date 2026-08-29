@@ -129,6 +129,18 @@ namespace vkcompute {
   };
   
   SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize);
+
+  void doSwiGLU(
+    const VulkanDevice* device,
+    const VkCommandBuffer& cb,
+    const VkDescriptorSet& descriptorSet,
+    const Pipeline& pipeline,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    VulkanBuffer* mainProj,
+    VulkanBuffer* gateProj,
+    VulkanBuffer* output,
+    int totalSize
+  );
 }
 
 #endif

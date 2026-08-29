@@ -519,6 +519,43 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
   return sizing;
 }
 
+  void doSwiGLU(
+    const VulkanDevice* device,
+    const VkCommandBuffer& cb,
+    const VkDescriptorSet& descriptorSet,
+    const Pipeline& pipeline,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    VulkanBuffer* mainProj,
+    VulkanBuffer* gateProj,
+    VulkanBuffer* output,
+    int totalSize
+  ) {
+    auto writeDescriptorSets = {
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mainProj),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gateProj),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output),
+    };
+
+    vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    auto params = vk_shader::push::TransformerSwiGLUPushParams();
+    params.size = totalSize;
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+
+    int eltsPerThread = tuneParams.pointwise.ELTS_PER_THREAD;
+    size_t numThreads = ((size_t)totalSize + eltsPerThread - 1) / eltsPerThread;
+
+    static constexpr int nKernelDims = 1;
+    size_t globalSizes[nKernelDims] = {vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX)};
+    size_t localSizes[nKernelDims] = {pipeline.localSizeX};
+    uint32_t wgCountX = ( globalSizes[0] + localSizes[0] - 1 ) / localSizes[0];
+    uint32_t wgCountY = 1;
+    uint32_t wgCountZ = 1;
+    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+  }
+
 
 };
 
