@@ -2570,6 +2570,7 @@ struct TransformerRMSNormLayer {
     SHADER_PROFILE_START("TransformerRMSNorm", cb);
     vkCmdDispatch(cb, wgCounts[0], wgCounts[1], wgCounts[2]);
     SHADER_PROFILE_END("TransformerRMSNorm", cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
 
   }
 
@@ -2982,7 +2983,7 @@ struct TransformerAttentionBlock {
     // Step 5: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
     outProj->forward(cb, batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
     // Step 6: Add residual: trunk += trunkScratch
-    performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"));
+    performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"), false);
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
@@ -3000,7 +3001,100 @@ struct TransformerAttentionBlock {
 };
 
 struct TransformerFFNBlock {
+  ComputeHandleInternal *handle;
+  const std::string name;
+  const int numChannels;
+  const int ffnChannels;
+  const bool useSwiGLU;
+  const int paddedNNXYLen;
 
+  TransformerRMSNormLayer* preLN;
+  TransformerMatMulLayer* linear1;
+  std::unique_ptr<TransformerMatMulLayer> linearGate;
+  TransformerMatMulLayer* linear2;
+
+  VkDescriptorSet pointwiseDS;
+  VkDescriptorSet swigluDS;
+
+  TransformerFFNBlock(
+    ComputeHandleInternal *handle,
+    const TransformerFFNDesc* desc
+  ) :
+    handle(handle),
+    name(desc->name),
+    numChannels(desc->numChannels),
+    ffnChannels(desc->ffnChannels),
+    useSwiGLU(desc->useSwiGLU),
+    paddedNNXYLen(handle->paddedNNXYLen),
+    preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
+    linear1(new TransformerMatMulLayer(handle, &desc->linear1)),
+    linear2(new TransformerMatMulLayer(handle, &desc->linear2)),
+    pointwiseDS(VK_NULL_HANDLE),
+    swigluDS(VK_NULL_HANDLE)
+  {
+    if(!useSwiGLU) {
+      throw StringError("Non-SwiGLU transformer FFN is not yet supported in Vulkan backend");
+    }
+    linearGate = std::make_unique<TransformerMatMulLayer>(handle, &desc->linearGate);
+    VkResult res;
+    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate pointwiseDS", res);
+    swigluDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSwiGLU.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate swigluDS", res);
+
+  }
+
+   ~TransformerFFNBlock() {
+    delete preLN;
+    delete linear1;
+    delete linear2;
+    linearGate.reset();
+  }
+
+  void forward(
+    VkCommandBuffer cb,
+    ScratchBuffers* scratch,
+    int batchSize,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace
+  ) {
+     // Step 1: RMSNorm
+    preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+
+    // Step 2: linear1 projection -> ffn buffer
+    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    linear1->forward(cb, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+
+    // Non-SwiGLU FFN is rejected at construction, so useSwiGLU is guaranteed true here.
+    // Step 2b: gate projection
+    SizedBuf<VulkanBuffer*> gateBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    linearGate->forward(cb, batchSize, trunkScratch, gateBuf.buf, mask, convWorkspace);
+
+    // Step 3: SwiGLU: output = SiLU(linear1) * gate (no mask needed, inputs already masked)
+    int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+    vkcompute::doSwiGLU(handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU, handle->tuneParams, ffnBuf.buf, gateBuf.buf, ffnBuf.buf, totalSize);
+    // Step 4: linear2 projection: ffnBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
+    linear2->forward(cb, batchSize, ffnBuf.buf, trunkScratch, mask, convWorkspace);
+
+    // Step 5: Add residual
+    performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
+  }
+
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linear1->requiredConvWorkspaceElts(handle, maxBatchSize));
+    if(linearGate)
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linearGate->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linear2->requiredConvWorkspaceElts(handle, maxBatchSize));
+    return maxElts;
+  }
+
+  TransformerFFNBlock() = delete;
+  TransformerFFNBlock(const TransformerFFNBlock&) = delete;
+  TransformerFFNBlock& operator=(const TransformerFFNBlock&) = delete;
 };
 
 /**
