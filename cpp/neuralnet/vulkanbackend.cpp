@@ -2239,6 +2239,8 @@ struct TransformerMatMulLayer {
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
     paddedNNXYLen(handle->paddedNNXYLen),
+    filter(nullptr),
+    descriptorSet(VK_NULL_HANDLE),
     usingHGemmWmmaNHWC(false)
   {
     testAssert(desc->weights.size() == static_cast<size_t>(inChannels * outChannels));
@@ -2254,6 +2256,9 @@ struct TransformerMatMulLayer {
     if ( handle->usingFP16TensorCoresFor1x1) {
       throw StringError("vulkan backend doesn't support tensorcore yet.");
     }   
+
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->xgemmStridedBatchedFp32.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate descriptorSet", res);
 
     // TODO: FP16 support and tensor cores.
   }
@@ -2278,8 +2283,7 @@ struct TransformerMatMulLayer {
       int filterStride = 0;
       int inputStride = paddedNNXYLen * inChannels;
       int outputStride = paddedNNXYLen * outChannels;
-      uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-      auto pipeline = handle->context->pipelinesPerDev.at(gpuId)->xgemmStridedBatchedFp32;
+      Pipeline pipeline = handle->pipelines->xgemmStridedBatchedFp32;
 
       vkcompute::xgemmStridedBatchedNN(
         handle->vulkanDevice,
@@ -2665,7 +2669,7 @@ struct RMSNormLayer {
     return ConvWorkspaceEltsNeeded(partialSumsFloats * floatToEltScale, finalSumFloats * floatToEltScale);
   }
 
-  void apply(
+  void forward(
     VkCommandBuffer cb,
     int batchSize,
     VulkanBuffer* input,
@@ -2717,7 +2721,7 @@ struct RMSNormLayer {
           vk_helper::writeDescriptorSetBuffer(rmsNormSumSqDS, 2, convWorkspace)
         };
         VkResult res = vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-        CHECK_VK_MSG("RMSNorm::apply() update descriptor sets for spatial rms sum sq", res);
+        CHECK_VK_MSG("RMSNorm::forward() update descriptor sets for spatial rms sum sq", res);
         auto params = TransformerSpatialRMSNormSumSqPushParams();
         params.nSize = batchSize;
         params.cSize = numChannels;
@@ -2745,7 +2749,7 @@ struct RMSNormLayer {
           vk_helper::writeDescriptorSetBuffer(rmsNormReduceDS, 1, convWorkspace2),
         };
         VkResult res = vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-        CHECK_VK_MSG("RMSNorm::apply() update descriptor sets for spatial rms reduce", res);
+        CHECK_VK_MSG("RMSNorm::forward() update descriptor sets for spatial rms reduce", res);
         auto params = TransformerSpatialRMSNormReducePushParams();
         params.nSize = batchSize;
         params.numPartials = sizing.numCHWWorkgroups;
@@ -2777,7 +2781,7 @@ struct RMSNormLayer {
           vk_helper::writeDescriptorSetBuffer(rmsNormApplyDS, 6, convWorkspace2)
         };
         VkResult res = vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-        CHECK_VK_MSG("RMSNorm::apply() update descriptor sets for spatial rms apply", res);
+        CHECK_VK_MSG("RMSNorm::forward() update descriptor sets for spatial rms apply", res);
         auto params = TransformerSpatialRMSNormApplyPushParams();
         params.nSize = batchSize;
         params.cSize = numChannels;
@@ -2833,7 +2837,166 @@ struct RMSNormLayer {
 };
 
 struct TransformerAttentionBlock {
+  ComputeHandleInternal *handle;
+  const std::string name;
+  const int numHeads;
+  const int numKVHeads;
+  const int qHeadDim;
+  const int vHeadDim;
+  const bool useRope;
+  const bool learnableRope;
+  const int nnXLen;
+  const int nnYLen;
+  const int paddedNNXYLen;
+  const int inChannels;  // = numHeads * qHeadDim (or whatever c_main is)
 
+  TransformerRMSNormLayer* preLN;
+  TransformerMatMulLayer* qProj;
+  TransformerMatMulLayer* kProj;
+  TransformerMatMulLayer* vProj;
+  TransformerMatMulLayer* outProj;
+  TransformerApplyRoPELayer* qRoPE;
+  TransformerApplyRoPELayer* kRoPE;
+  TransformerAttentionLayer* attention;
+
+  // RoPE data
+  VulkanBuffer* ropeCosTable;
+  VulkanBuffer* ropeSinTable;
+  VkDescriptorSet pointwiseDS = VK_NULL_HANDLE;
+
+  int ropeNumPairs;
+
+  TransformerAttentionBlock(
+    ComputeHandleInternal* handle,
+    const TransformerAttentionDesc* desc,
+    int nnX,
+    int nnY
+  ) : 
+    handle(handle),
+    numHeads(desc->numHeads),
+    numKVHeads(desc->numKVHeads),
+    qHeadDim(desc->qHeadDim),
+    vHeadDim(desc->vHeadDim),
+    useRope(desc->useRope),
+    learnableRope(desc->learnableRope),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    paddedNNXYLen(handle->paddedNNXYLen),
+    inChannels(desc->qProj.inChannels),
+    preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
+    qProj(new TransformerMatMulLayer(handle, &desc->qProj)),
+    kProj(new TransformerMatMulLayer(handle, &desc->kProj)),
+    vProj(new TransformerMatMulLayer(handle, &desc->vProj)),
+    outProj(new TransformerMatMulLayer(handle, &desc->outProj)),
+    ropeCosTable(nullptr),
+    ropeSinTable(nullptr),
+    ropeNumPairs(0),
+    qRoPE( useRope ? new TransformerApplyRoPELayer(handle) : nullptr ),
+    kRoPE( useRope ? new TransformerApplyRoPELayer(handle) : nullptr ),
+    attention(new TransformerAttentionLayer(handle, numHeads, numKVHeads))
+  {
+    if ( useRope ) {
+      ropeNumPairs = qHeadDim/2;
+
+      vector<float> cosTableData;
+      vector<float> sinTableData;
+      desc->computeRopeCosSin(nnXLen, nnYLen, paddedNNXYLen, cosTableData, sinTableData);
+      bool useFP16 = false;
+      VkResult res;
+      ropeCosTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, cosTableData, useFP16, &res);
+      CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeCosTalbe", res);
+      ropeSinTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, sinTableData, useFP16, &res);
+      CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeSinTalbe", res);
+    }
+
+    VkResult res;
+    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock() allocate pointwise descriptorset]", res);
+  }
+
+  ~TransformerAttentionBlock() {
+    if ( ropeCosTable != nullptr ) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, ropeCosTable);
+    } 
+    if ( ropeSinTable != nullptr ) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, ropeSinTable);
+    }
+
+    if ( kRoPE ) {
+      delete kRoPE;
+    }
+
+    if ( qRoPE) {
+      delete qRoPE;
+    }
+    delete preLN;
+    delete outProj;
+    delete qProj;
+    delete kProj;
+    delete vProj;
+  }
+
+  void forward(
+    VkCommandBuffer cb,
+    ScratchBuffers* scratch,
+    int batchSize,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace
+  ) {
+    const int seqLen = paddedNNXYLen;
+    const int qTotalDim = numHeads * qHeadDim;
+    const int kTotalDim = numKVHeads * qHeadDim;
+    const int vTotalDim = numKVHeads * vHeadDim;
+
+    // Step 1: RMSNorm
+    // preLN: trunk -> trunkScratch (normalized)
+    preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+
+    // Step 2: Q/K/V projections using tuned xgemm (same as 1x1 conv)
+    SizedBuf<VulkanBuffer*> qBuf(scratch->allocator, scratch->getBufSizeXY(qTotalDim));
+    SizedBuf<VulkanBuffer*> kBuf(scratch->allocator, scratch->getBufSizeXY(kTotalDim));
+    SizedBuf<VulkanBuffer*> vBuf(scratch->allocator, scratch->getBufSizeXY(vTotalDim));
+
+    qProj->forward(cb, batchSize, trunkScratch, qBuf.buf, mask, convWorkspace);
+    kProj->forward(cb, batchSize, trunkScratch, kBuf.buf, mask, convWorkspace);
+    vProj->forward(cb, batchSize, trunkScratch, vBuf.buf, mask, convWorkspace);
+
+    // Step 3: Apply RoPE to Q and K
+    if(useRope) {
+      int learnableInt = learnableRope ? 1 : 0;
+
+      // Apply to Q - Q is (N, numHeads*qHeadDim, HW), reshape as (N*numHeads, qHeadDim, HW)
+      qRoPE->forward(cb, batchSize, qBuf.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt );
+      vk_helper::barrierCommandBufferForBuffer(cb, qBuf.buf);
+      // Apply to K
+      kRoPE->forward(cb, batchSize, kBuf.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
+      vk_helper::barrierCommandBufferForBuffer(cb, kBuf.buf);
+    }
+    // Step 4: Scaled dot product attention
+    SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+    attention->forward(cb, batchSize, qBuf.buf, kBuf.buf, vBuf.buf, attnOut.buf, mask);
+    vk_helper::barrierCommandBufferForBuffer(cb, attnOut.buf);
+    // Step 5: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
+    outProj->forward(cb, batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
+    // Step 6: Add residual: trunk += trunkScratch
+    performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"));
+  }
+
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, qProj->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, kProj->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, vProj->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, outProj->requiredConvWorkspaceElts(handle, maxBatchSize));
+    return maxElts;
+  }
+
+  TransformerAttentionBlock() = delete;
+  TransformerAttentionBlock(const TransformerAttentionBlock&) = delete;
+  TransformerAttentionBlock& operator=(const TransformerAttentionBlock&) = delete;
 };
 
 struct TransformerFFNBlock {
