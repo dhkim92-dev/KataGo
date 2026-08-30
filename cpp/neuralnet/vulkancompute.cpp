@@ -435,21 +435,6 @@ void xgemmStridedBatchedNN(
   wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
   vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
   vk_helper::barrierCommandBufferForBuffer(cb, C);
-  // Debug: print push-constant params and dispatch sizes for strided batched gemm
-  #ifdef VULKAN_API_DEBUG
-  uint32_t localDbg[3] = { pipeline->localSizeX, pipeline->localSizeY, pipeline->localSizeZ };
-  uint32_t globalDbg[3] = { (uint32_t)mCeiled, (uint32_t)nCeiled, numBatchElts };
-  uint32_t groupX = (globalDbg[0] + localDbg[0] - 1) / localDbg[0];
-  uint32_t groupY = (globalDbg[1] + localDbg[1] - 1) / localDbg[1];
-  uint32_t groupZ = (globalDbg[2] + localDbg[2] - 1) / localDbg[2];
-
-  std::printf("[VK XGEMM STRIDED] kSizeM=%u kSizeN=%u kSizeK=%u aStride=%u bStride=%u cStride=%u numBatch=%u local=%u,%u,%u global=%u,%u,%u groups=%u,%u,%u\n",
-    (unsigned)kSizeM, (unsigned)kSizeN, (unsigned)kSizeK, (unsigned)aStride, (unsigned)bStride, (unsigned)cStride, (unsigned)numBatchElts,
-    (unsigned)localDbg[0], (unsigned)localDbg[1], (unsigned)localDbg[2],
-    (unsigned)globalDbg[0], (unsigned)globalDbg[1], (unsigned)globalDbg[2],
-    (unsigned)groupX, (unsigned)groupY, (unsigned)groupZ
-  );
-  #endif
 }
 
 void batchedXGemmDirect_MK_NK_MN(

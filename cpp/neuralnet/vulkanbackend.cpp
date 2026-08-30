@@ -72,7 +72,7 @@ std::vector<float> makeInputDataFromFile(const std::string& filePath)
     return data;
 }
 
-#ifdef VULKAN_API_DEBUG
+#ifdef VULKAN_DEBUG
 #define VK_BENCHMARK(msg, code) \
   {  \
     auto start = std::chrono::high_resolution_clock::now(); \
@@ -91,7 +91,7 @@ static void printHostBuffer(
   size_t numElts,
   bool summarized = true
 ) {
-#ifdef VULKAN_API_DEBUG
+#ifdef VULKAN_DUMP_BUFFER
   // print prefix first
   std::cout << prefix << " = " << std::endl;
   // print vector as python format, that can copy it to python code
@@ -115,7 +115,7 @@ static void printDeviceBuffer(
   size_t numElts,
   bool summarized = true
 ) {
-#ifdef VULKAN_API_DEBUG
+#ifdef VULKAN_DUMP_BUFFER
 
 if ( globalBatchCount > 1 ) {
   VkResult res;
@@ -158,7 +158,7 @@ static void printDeviceBufferIndices(
   size_t numElts,
   const std::vector<size_t>& indices
 ) {
-#ifdef VULKAN_API_DEBUG
+#ifdef VULKAN_DUMP_BUFFER
   VkResult res;
   std::vector<float> hostBuffer(numElts);
   vk_helper::copyDeviceBufferToHost(
@@ -378,7 +378,7 @@ VkDeviceSize getRequiredMemorySize(const LoadedModel* loadedModel) {
  * @param nRows Number of rows
  * @param nCols Number of columns
  */
-#ifdef VULKAN_API_DEBUG
+#ifdef VULKAN_DUMP_BUFFER
 static void printFloatBuffer(
   std::string prefix,
   const float* buffer,
@@ -478,14 +478,14 @@ struct MatmulLayer {
   }
 
   ~MatmulLayer() {
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( matBuf != nullptr ) {
       vk_helper::releaseVulkanBuffer(handle->vulkanDevice, matBuf);
       matBuf = nullptr;
     }
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] destroyed");
     #endif
   }
@@ -499,11 +499,10 @@ struct MatmulLayer {
     // printDeviceBuffer(name + " input", handle->vulkanDevice, input, batchSize * inChannels);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for MatmulLayer: " + name, res);
-    // doMatmulFp32(commandBuffer, batchSize, input, output);
-    doBatchedXGEMMDirectFP32_MK_NK_MN(commandBuffer, batchSize, input, output);
+    forward(commandBuffer, batchSize, input, output);
     res = vk_helper::endCommandBuffer(commandBuffer);
-    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     CHECK_VK_MSG("End command buffer for MatmulLayer: " + name, res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     std::printf("Debug MatmulLayer: %s, batchSize: %d, inChannels: %d, outChannels: %d\n", name.c_str(), batchSize, inChannels, outChannels);
     printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, batchSize * outChannels, true);
   }
@@ -656,7 +655,7 @@ struct BatchNormLayer {
   BatchNormMaskParams pushParams = {};
 
   ~BatchNormLayer() {
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( mergedScaleBuf != nullptr ) {
@@ -669,7 +668,7 @@ struct BatchNormLayer {
       // delete mergedBiasBuf;
       mergedBiasBuf = nullptr;
     }
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] destroyed");
     #endif
   }
@@ -800,13 +799,14 @@ struct BatchNormLayer {
     VulkanBuffer* mask,
     VulkanBuffer* output
   ) {
-    // VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-    // VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
-    // std::vector<float> inputCopy(static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
-    // forward(commandBuffer, batchSize, input, mask, output);
-    // res = vk_helper::endCommandBuffer(commandBuffer);
-    // vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
-    // printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(nnXYLen));
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for BatchNormLayer: " + name, res);
+    forward(commandBuffer, batchSize, input, mask, output);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 };
 
@@ -972,14 +972,14 @@ struct ConvLayer {
   }
 
   ~ConvLayer() {
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( filterBuf != nullptr ) {
       vk_helper::releaseVulkanBuffer(handle->vulkanDevice, filterBuf);
       filterBuf = nullptr;
     }
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] destroyed");
     #endif
   }
@@ -1504,6 +1504,8 @@ struct ConvLayer {
     VulkanBuffer* convWorkspace2
   ) {
 
+    (void)bnLayer;
+    (void)mask;
     std::printf("[%s] metadata batchSize=%d inCh=%d outCh=%d nnXLen=%d nnYLen=%d convX=%d convY=%d numTilesX=%d numTilesY=%d\n",
       name.c_str(), batchSize, inChannels, outChannels, nnXLen, nnYLen, convXSize, convYSize, numTilesX, numTilesY);
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
@@ -1513,13 +1515,10 @@ struct ConvLayer {
 
 
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
-    if ( bnLayer != nullptr && mask != nullptr ) {
-      forwardBnActConv(commandBuffer, bnLayer, batchSize, input, output, convWorkspace1, convWorkspace2, mask);
-    } else {
-      forward(commandBuffer, batchSize, input, output, convWorkspace1, convWorkspace2);
-    }
+    forward(commandBuffer, batchSize, input, output, convWorkspace1, convWorkspace2);
     res = vk_helper::endCommandBuffer(commandBuffer);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(outChannels) * static_cast<size_t>(paddedNNXYLen));
 
 
     // if ( bnLayer != nullptr ) {
@@ -1581,7 +1580,7 @@ struct MatBiasLayer {
   float bias;
 
   ~MatBiasLayer() {
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] try to destroy");
     #endif
     if ( biasBuf != nullptr ) {
@@ -1589,7 +1588,7 @@ struct MatBiasLayer {
       // delete biasBuf;
       biasBuf = nullptr;
     }
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     if(handle && handle->context && handle->context->logger) handle->context->logger->write("[" + name + "] destroyed");
     #endif
   }
@@ -1805,12 +1804,8 @@ struct NormActConv {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
-    if ( conv.isBNActFusedPossible() ) {
-      conv.debug(batchSize, input, output, &bn, mask, convWorkspace, convWorkspace2);
-    } else {
-      bn.debug(batchSize, input, mask, inputScratchOrInput);
-      conv.debug(batchSize, inputScratchOrInput, output, nullptr, nullptr, convWorkspace, convWorkspace2);
-    }
+    bn.debug(batchSize, input, mask, inputScratchOrInput);
+    conv.debug(batchSize, inputScratchOrInput, output, nullptr, nullptr, convWorkspace, convWorkspace2);
   }
 
   NormActConv() = delete;
@@ -2243,6 +2238,7 @@ struct TransformerMatMulLayer {
     const ComputeHandleInternal *handle,
     const MatMulLayerDesc* desc
   ):
+    handle(handle),
     name(desc->name),
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
@@ -2323,6 +2319,7 @@ struct TransformerMatMulLayer {
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerMatMulLayer: " + name, res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(outChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
@@ -2445,6 +2442,7 @@ struct TransformerApplyRoPELayer {
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerApplyRoPELayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer("TransformerApplyRoPELayer Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(numHeads) * static_cast<size_t>(headDim) * static_cast<size_t>(seqLen));
   }
 };
 
@@ -2550,6 +2548,7 @@ struct TransformerAttentionLayer {
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerAttentionLayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer("TransformerAttentionLayer Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(params.numHeads) * static_cast<size_t>(handle->vHeadDim) * static_cast<size_t>(params.seqLen));
   }
 };
 
@@ -2648,6 +2647,7 @@ struct TransformerRMSNormLayer {
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerRMSNormLayer: " + name, res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 
   TransformerRMSNormLayer() = delete;
@@ -2910,6 +2910,25 @@ struct RMSNormLayer {
       SHADER_PROFILE_END("batchNormMaskActSilu", cb);
       vk_helper::barrierCommandBufferForBuffer(cb, output);
     }
+  }
+
+  void debug(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace,
+    VulkanBuffer* convWorkspace2
+  ) {
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for RMSNormLayer: " + name, res);
+    forward(commandBuffer, batchSize, input, output, mask, maskSum, convWorkspace, convWorkspace2);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for RMSNormLayer: " + name, res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+    printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 };
 
@@ -3348,7 +3367,7 @@ struct ResidualBlock {
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), true);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
-    printDeviceBuffer(name + " RB Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
+    printDeviceBuffer(name + " RB Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 };
 
@@ -3481,7 +3500,7 @@ struct GlobalPoolingResidualBlock {
     normActConv2->debug(batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"));
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
-    printDeviceBuffer(name + " GPRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
+    printDeviceBuffer(name + " GPRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 };
 
@@ -3573,7 +3592,7 @@ struct NestedResidualBlock {
     normActConv2->debug(batchSize, mid.buf, mid.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     performAddPointWise(handle, addPointWiseCB, addPointWiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"));
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
-    printDeviceBuffer(name + " NestedRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
+    printDeviceBuffer(name + " NestedRB Output : " , handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(normActConv2->outChannels) * static_cast<size_t>(paddedNNXYLen));
   }
 };
 
@@ -4013,7 +4032,7 @@ struct Trunk {
     performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, trunk, trunkScratch.buf, batchSize * trunkNumChannels, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
     {
-      printDeviceBuffer(name  + "/add_channel_bias0 Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(trunkNumChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen));
+      printDeviceBuffer(name  + "/add_channel_bias0 Output : ", handle->vulkanDevice, trunk, static_cast<size_t>(batchSize) * static_cast<size_t>(trunkNumChannels) * static_cast<size_t>(paddedNNXYLen));
     }
     if ( sgfMetadataEncoder != nullptr ) {
       VkCommandBuffer addChannelBiasCB2 = VK_NULL_HANDLE;
@@ -4023,7 +4042,11 @@ struct Trunk {
       vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB2});
     }
     blockStack.debug(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
-    trunkTipBN->debug(batchSize, trunk, mask, trunk);
+    if (trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
+      trunkTipBN->debug(batchSize, trunk, mask, trunk);
+    } else {
+      trunkTipRMSNorm->debug(batchSize, trunk, trunk, mask, maskSum, convWorkspace, convWorkspace2);
+    }
   }
 };
 
@@ -4570,7 +4593,7 @@ struct Model {
 
     if ( batchSize > 1 ) {
       std::printf("numInputChannels : %d, batchSize: %d, nnXLen: %d, nnYLen: %d\n", numInputChannels, batchSize, nnXLen, nnYLen);
-      printDeviceBuffer("First Input: ", handle->vulkanDevice, input, batchSize * numInputChannels * nnXLen * nnYLen, false);
+      printDeviceBuffer("First Input: ", handle->vulkanDevice, input, batchSize * numInputChannels * paddedNNXYLen, false);
     }
 
     performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, handle->paddedNNXYLen);
@@ -5227,7 +5250,7 @@ void NeuralNet::getOutput(
     }
 
 
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DEBUG
     VK_BENCHMARK("model->debug",
       computeHandle->model->debug(
         batchSize,
@@ -5278,7 +5301,7 @@ void NeuralNet::getOutput(
     );
     CHECK_VK_MSG("Copy policy pass results buffer to host", res);
 
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
       """[NeuralNet::getOutput] policy pass results",
       inputBuffers->policyPassResults,
@@ -5306,7 +5329,7 @@ void NeuralNet::getOutput(
       } else {
         ASSERT_UNREACHABLE;
       }
-      #ifdef VULKAN_API_DEBUG
+      #ifdef VULKAN_DUMP_BUFFER
       printHostBuffer(
         "[NeuralNet::getOutput] policy results",
         inputBuffers->policyResults,
@@ -5327,7 +5350,7 @@ void NeuralNet::getOutput(
     CHECK_VK_MSG("Copy value results buffer to host", res);
     vkQueueWaitIdle(handle->queue);
 
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
       "[NeuralNet::getOutput] value results",
       inputBuffers->valueResults,
@@ -5346,7 +5369,7 @@ void NeuralNet::getOutput(
     );
     CHECK_VK_MSG("Copy score value results buffer to host", res);
 
-    #ifdef VULKAN_API_DEBUG
+    #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
       "[NeuralNet::getOutput] score value results",
       inputBuffers->scoreValueResults,
@@ -5372,7 +5395,7 @@ void NeuralNet::getOutput(
       } else {
         ASSERT_UNREACHABLE;
       }
-      #ifdef VULKAN_API_DEBUG
+      #ifdef VULKAN_DUMP_BUFFER
       printHostBuffer(
         "[NeuralNet::getOutput] ownership results",
         inputBuffers->ownershipResults,
@@ -5471,8 +5494,7 @@ void NeuralNet::getOutput(
       else {
         ASSERT_UNREACHABLE;
       }
-      // #define VULKAN_API_DEBUG
-  #ifdef VULKAN_API_DEBUG
+  #ifdef VULKAN_DEBUG && VULKAN_DUMP_BUFFER
   setvbuf(stdout, NULL, _IONBF, 0);
       // Debug: print final output for this row
       std::cout << "=== NNOutput row " << row << " ===" << std::endl;
@@ -5518,7 +5540,7 @@ void NeuralNet::getOutput(
     }
   }
 
-  #ifdef VULKAN_API_DEBUG
+  #ifdef VULKAN_DEBUG
   // exit(0);
   #endif
 }
