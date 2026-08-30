@@ -12,6 +12,7 @@
 #elif defined(USE_VULKAN_BACKEND)
 #include "../program/setup.h"
 #include "../neuralnet/nninputs.h"
+#include "../neuralnet/modelversion.h"
 #include "../neuralnet/vulkantuner.h"
 #endif
 
@@ -30,30 +31,26 @@ int MainCmds::tuner(const vector<string>& args) {
   vector<int> gpuIdxs;
   int nnXLen;
   int nnYLen;
-  bool full;
   try {
-    KataGoCommandLine cmd("Perform GPU tuning for Vulkan.");
+    KataGoCommandLine cmd("Write Vulkan default tuning parameters.");
     cmd.addConfigFileArg(KataGoCommandLine::defaultGtpConfigFileName(),"gtp_example.cfg");
     cmd.addModelFileArg();
     TCLAP::ValueArg<string> outputFileArg("","output","Filename to output tuning configuration to",false,string(),"FILE");
     TCLAP::ValueArg<string> gpuIdxsArg("","gpus","Specific GPU/device number(s) to tune, comma-separated (default all)",false,string(),"GPUS");
     TCLAP::ValueArg<int> nnXLenArg("","xsize","Width of board to tune for",false,NNPos::MAX_BOARD_LEN,"INT");
     TCLAP::ValueArg<int> nnYLenArg("","ysize","Height of board to tune for",false,NNPos::MAX_BOARD_LEN,"INT");
-    TCLAP::SwitchArg fullArg("","full","Test more possible configurations");
     cmd.setShortUsageArgLimit();
     cmd.addOverrideConfigArg();
     cmd.add(outputFileArg);
     cmd.add(gpuIdxsArg);
     cmd.add(nnXLenArg);
     cmd.add(nnYLenArg);
-    cmd.add(fullArg);
     cmd.parseArgs(args);
     modelFile = cmd.getModelFile();
     outputFileFromArg = outputFileArg.getValue();
     gpuIdxsStr = gpuIdxsArg.getValue();
     nnXLen = nnXLenArg.getValue();
     nnYLen = nnYLenArg.getValue();
-    full = fullArg.getValue();
     if(!gpuIdxsStr.empty()) {
       vector<string> pieces = Global::split(gpuIdxsStr,',');
       for(const string& piece: pieces) {
@@ -80,8 +77,8 @@ int MainCmds::tuner(const vector<string>& args) {
   Logger logger(&cfg,true);
   ModelDesc modelDesc;
   ModelDesc::loadFromFileMaybeGZipped(modelFile,modelDesc,"");
-  if(modelDesc.modelVersion > 16)
-    throw StringError("Vulkan tuner currently supports model versions through 16");
+  if(modelDesc.modelVersion > NNModelVersion::latestModelVersionImplemented)
+    throw StringError("Vulkan tuner does not support this model version");
   VulkanTuner::ModelInfoForTuning modelInfo = VulkanTuner::ModelInfoForTuning::ofDesc(modelDesc);
 
   VkInstance instance = vk_helper::createVulkanInstance();
@@ -94,37 +91,19 @@ int MainCmds::tuner(const vector<string>& args) {
     if(gpuIdx < 0 || static_cast<size_t>(gpuIdx) >= deviceInfos.size())
       throw StringError("Requested Vulkan GPU index is out of range: " + Global::intToString(gpuIdx));
     VulkanDeviceInfo deviceInfo = deviceInfos[gpuIdx];
-    vector<const char*> requiredExtensions;
-    const auto recreateDevice = [&]() {
-      return vk_helper::createVulkanDevice(instance,deviceInfo,requiredExtensions,&logger);
-    };
-    VulkanDevice* device = recreateDevice();
     try {
       string outputFile = outputFileFromArg;
       if(outputFile.empty()) {
         outputFile = VulkanTuner::defaultDirectory(true,homeDataDirOverride) + "/" +
           VulkanTuner::defaultFileName(deviceInfo.deviceName,nnXLen,nnYLen,modelInfo);
       }
-      VulkanTuneParams initialParams;
-      try {
-        initialParams = VulkanTuneParams::load(outputFile);
-        logger.write("Starting from existing Vulkan parameters in: " + outputFile);
-      }
-      catch(const StringError&) {
-        logger.write("Starting fresh Vulkan tuning, saving to: " + outputFile);
-      }
-      VulkanTuneParams tuned = VulkanTuner::tune(
-        device,recreateDevice,initialParams,nnXLen,nnYLen,modelInfo,&logger,full
-      );
-      VulkanTuneParams::save(outputFile,tuned);
-      logger.write("Vulkan tuning complete, saved results to: " + outputFile);
+      VulkanTuneParams::save(outputFile,VulkanTuneParams());
+      logger.write("Saved default Vulkan tuning parameters to: " + outputFile);
     }
     catch(...) {
-      delete device;
       vkDestroyInstance(instance,nullptr);
       throw;
     }
-    delete device;
   }
   vkDestroyInstance(instance,nullptr);
   return 0;

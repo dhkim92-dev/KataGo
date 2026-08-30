@@ -4,10 +4,7 @@
 
 #include "../core/logger.h"
 #include "../neuralnet/desc.h"
-#include "../neuralnet/vulkancompute.h"
 #include "../neuralnet/vulkanshaders.h"
-
-#include <functional>
 
 using namespace vk_shader;
 using namespace vk_shader::tune;
@@ -28,27 +25,14 @@ namespace VulkanTuner {
   defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, int trunkNumChannels, int modelVersion);
   std::string defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, const ModelInfoForTuning& modelInfo);
 
-  VulkanTuneParams tune(
-    VulkanDevice*& device,
-    const std::function<VulkanDevice*()>& recreateDevice,
-    const VulkanTuneParams& initialParams,
-    int nnXLen,
-    int nnYLen,
-    const ModelInfoForTuning& modelInfo,
-    Logger* logger,
-    bool full);
-
-  VulkanTuneParams loadOrAutoTune(
+  VulkanTuneParams loadOrCreate(
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
-    VulkanDevice*& device,
-    const std::function<VulkanDevice*()>& recreateDevice,
+    const std::string& gpuName,
     int nnXLen,
     int nnYLen,
     const ModelInfoForTuning& modelInfo,
-    Logger* logger,
-    bool full,
-    bool forceRetune);
+    Logger* logger);
 }  // namespace VulkanTuner
 
 #endif

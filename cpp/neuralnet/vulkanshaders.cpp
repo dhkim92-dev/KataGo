@@ -27,6 +27,7 @@ namespace vk_shader {
     };
   }
 
+
   // conv2d_fp32
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
@@ -221,8 +222,8 @@ namespace vk_shader {
     createBatchNormMaskMishScale8();
     createBatchNormMaskSilu();
     createGlobalPoolingChannelsFp32();
-    createValueHeadPoolingChannelsFp32();
-    createSumChannelsFp32();
+    createValueHeadPoolingChannels();
+    createSumChannels();
     createAddChannelBiasNCHW();
     createAddChannelBiasNCIdentity();
     createAddChannelBiasNCRelu();
@@ -276,9 +277,13 @@ namespace vk_shader {
     destroyPipeline(batchNormMaskMishScale8);
     destroyPipeline(batchNormMaskSilu);
     destroyPipeline(globalPoolingChannelsFp32);
-    destroyPipeline(valueHeadPoolingChannelsFp32);
-    for ( Pipeline& pipeline : sumChannels ) {
-      destroyPipeline(pipeline);
+
+    for ( auto it : valueHeadPoolingChannels ) {
+      destroyPipeline(it.second);
+    }
+    valueHeadPoolingChannels.clear();
+    for ( auto it : sumChannels ) {
+      destroyPipeline(it.second);
     }
     sumChannels.clear();
     destroyPipeline(addChannelBiasNCHW);
@@ -713,26 +718,49 @@ namespace vk_shader {
     createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), globalPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createValueHeadPoolingChannelsFp32() {
+  void ComputePipelines::createValueHeadPoolingChannels() {
     auto spec = ValueHeadPoolingChannelsSpec();
-    SpecializationData specData(spec);
-    createPipeline("ValueHeadPoolingChannelsFp32", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), valueHeadPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    spec.localSizeX = tuneParams.gPool.XYSTRIDE;
+    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
+    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
+    spec.LOCALSIZE_TOTAL = tuneParams.gPool.XYSTRIDE * tuneParams.gPool.CHANNELSTRIDE * tuneParams.gPool.BATCHSTRIDE;
+
+    for (uint32_t localSizeY = 1 ; localSizeY <= tuneParams.gPool.CHANNELSTRIDE ; localSizeY *= 2 ) {
+      for (uint32_t localSizeZ = 1 ; localSizeZ <= tuneParams.gPool.BATCHSTRIDE ; localSizeZ *= 2 ) {
+        spec.localSizeY = localSizeY;
+        spec.localSizeZ = localSizeZ;
+        LocalDim dim = {
+          static_cast<int>(spec.localSizeX),
+          static_cast<int>(spec.localSizeY),
+          static_cast<int>(spec.localSizeZ)
+        };
+        SpecializationData specData(spec);
+        Pipeline pipeline;
+        createPipeline("ValueHeadPoolingChannels", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        valueHeadPoolingChannels.emplace(dim, pipeline);
+      }
+    }
   }
 
-  void ComputePipelines::createSumChannelsFp32() {
+  void ComputePipelines::createSumChannels() {
     auto spec = SumChannelsSpec();
-    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
+    spec.CHANNELSTRIDE = 1;
     spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
+    spec.LOCALSIZE_TOTAL = tuneParams.gPool.BATCHSTRIDE * tuneParams.gPool.CHANNELSTRIDE * tuneParams.gPool.XYSTRIDE;
     spec.localSizeX = spec.XYSTRIDE;
-    spec.localSizeY = spec.CHANNELSTRIDE;
+    spec.localSizeY = 1;
     sumChannels.clear();
-    for ( int bs = 1 ; bs <= 4 ; ++bs ) {
-      spec.localSizeZ = bs;
-      spec.LOCALSIZE_TOTAL = spec.localSizeX * spec.localSizeY * spec.localSizeZ;
+    for (uint32_t localSizeZ = 1 ; localSizeZ <= tuneParams.gPool.BATCHSTRIDE ; localSizeZ*=2) {
+      spec.localSizeZ = localSizeZ;
       SpecializationData specData(spec);
       Pipeline pipeline{};
-      createPipeline("SumChannelsFp32", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      sumChannels.push_back(pipeline);
+      LocalDim dim = {
+        static_cast<int>(spec.localSizeX),
+        static_cast<int>(spec.localSizeY),
+        static_cast<int>(spec.localSizeZ)
+      };
+      createPipeline("SumChannels", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      sumChannels.emplace(dim, pipeline);
     }
   }
 

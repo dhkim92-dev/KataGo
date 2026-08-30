@@ -35,6 +35,14 @@ void Tests::runVulkanTunerPersistenceTests() {
 
   MakeDir::make("tests/scratch");
   const string filename = "tests/scratch/vulkantuner-roundtrip.txt";
+  const string defaultsFilename = "tests/scratch/vulkantuner-defaults.txt";
+  FileUtils::tryRemoveFile(defaultsFilename);
+  VulkanTuneParams defaults;
+  testAssert(
+    VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, {96, 8}, nullptr) == defaults
+  );
+  testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
+
   VulkanTuneParams params;
   params.conv3x3.inputTransformLocalXSize = 64;
   params.conv3x3.inputTransformLocalYSize = 4;
@@ -62,6 +70,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(saveThrew);
 
   FileUtils::tryRemoveFile(filename);
+  FileUtils::tryRemoveFile(defaultsFilename);
   cout << "Vulkan tuner persistence tests passed" << endl;
 }
 

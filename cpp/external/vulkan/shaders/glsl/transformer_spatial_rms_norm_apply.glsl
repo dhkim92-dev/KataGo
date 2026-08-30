@@ -3,7 +3,7 @@
 
 #include "common.glsl"
 
-layout(constant_id = 4) const int APPLY_ELTS_PER_THREAD = 1;
+layout(constant_id = 3) const int APPLY_ELTS_PER_THREAD = 1;
 
 
 layout(push_constant) uniform SpatialRmsNormApplyParams{

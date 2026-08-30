@@ -237,9 +237,7 @@ struct ComputeContext {
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
     const VulkanTuner::ModelInfoForTuning* modelInfo,
-    const ModelDesc* modelDesc,
-    bool fullTuning,
-    bool forceRetune)
+    const ModelDesc* modelDesc)
   : nnXLen(nnXLen),
     nnYLen(nnYLen),
     usingFP16Mode(useFP16Mode_),
@@ -309,12 +307,9 @@ struct ComputeContext {
         try {
           VulkanTuneParams tuneParams;
           if(modelInfo != nullptr) {
-            const auto recreateDevice = [&]() {
-              return vk_helper::createVulkanDevice(instance,deviceInfo,requiredExtensions,logger);
-            };
-            tuneParams = VulkanTuner::loadOrAutoTune(
-              tunerFile,homeDataDirOverride,vulkanDevice,recreateDevice,
-              nnXLen,nnYLen,*modelInfo,logger,fullTuning,forceRetune
+            tuneParams = VulkanTuner::loadOrCreate(
+              tunerFile,homeDataDirOverride,deviceInfo.deviceName,
+              nnXLen,nnYLen,*modelInfo,logger
             );
           }
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device,tuneParams, transformerHeadDims.first, transformerHeadDims.second);
@@ -2151,7 +2146,7 @@ void performValueHeadPool(
   VulkanBuffer* gpoolConcat,
   VulkanBuffer* maskSum,
   int batchSize,
-  int valueHeadChannels,
+  int gPoolChannels,
   int nnXYLen,
   bool begin = true
 ) {
@@ -2163,15 +2158,21 @@ void performValueHeadPool(
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
   }
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  const auto pipelines = handle->pipelines;
+  LocalDim dim = {
+    handle->tuneParams.gPool.XYSTRIDE,
+    std::min(handle->tuneParams.gPool.CHANNELSTRIDE, static_cast<int>(vk_helper::powerOf2ify(gPoolChannels))),
+    std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
+  };
+  const Pipeline pipeline = pipelines->valueHeadPoolingChannels.at(dim);
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
-      pipelines->valueHeadPoolingChannelsFp32.descriptorSetLayout,
+      pipeline.descriptorSetLayout,
       &res
     );
+    CHECK_VK_MSG("ValueHeadPool allocate descriptor set", res);
   }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
@@ -2180,12 +2181,15 @@ void performValueHeadPool(
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
   };
   vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  uint32_t localSizeX = handle->tuneParams.gPool.XYSTRIDE;
+  uint32_t localSizeY = std::min(handle->tuneParams.gPool.CHANNELSTRIDE, static_cast<int>(vk_helper::powerOf2ify(gPoolChannels)));
+  uint32_t localSizeZ = std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)));
 
-  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->valueHeadPoolingChannelsFp32.pipeline);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
   vkCmdBindDescriptorSets(
     commandBuffer,
     VK_PIPELINE_BIND_POINT_COMPUTE,
-    pipelines->valueHeadPoolingChannelsFp32.layout,
+    pipeline.layout,
     0,
     1,
     &descriptorSet,
@@ -2193,22 +2197,25 @@ void performValueHeadPool(
     nullptr
   );
   ValueHeadPoolingChannelsParams pushConstants = {};
-  pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-  pushConstants.gpoolChannels = static_cast<uint32_t>(valueHeadChannels);
-  pushConstants.nnXYLen = static_cast<uint32_t>(nnXYLen);
+  pushConstants.nSize = batchSize;
+  pushConstants.cSize= gPoolChannels;
+  pushConstants.xySize = nnXYLen;
   vkCmdPushConstants(
     commandBuffer,
-    pipelines->valueHeadPoolingChannelsFp32.layout,
+    pipeline.layout,
     VK_SHADER_STAGE_COMPUTE_BIT,
     0,
     sizeof(ValueHeadPoolingChannelsParams),
     &pushConstants
   );
-  // Shader uses SV_GroupID.y for channel, SV_GroupID.z for batch
-  // Same pattern as GlobalPooling - each workgroup processes one (batch, channel) pair
-  uint32_t wgCountX = 1u;
-  uint32_t wgCountY = static_cast<uint32_t>(valueHeadChannels);
-  uint32_t wgCountZ = static_cast<uint32_t>(batchSize);
+  
+  uint32_t globalSizeX = handle->tuneParams.gPool.XYSTRIDE;
+  uint32_t globalSizeY = vk_helper::roundUpToMultiple(gPoolChannels, localSizeY);
+  uint32_t globalSizeZ = vk_helper::roundUpToMultiple(batchSize, localSizeZ);
+
+  uint32_t wgCountX = (globalSizeX + localSizeX - 1) / localSizeX;
+  uint32_t wgCountY = (globalSizeY + localSizeY - 1) / localSizeY;
+  uint32_t wgCountZ = (globalSizeZ + localSizeZ - 1) / localSizeZ;
   SHADER_PROFILE_START("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
@@ -2267,7 +2274,6 @@ struct TransformerMatMulLayer {
   ~TransformerMatMulLayer() {
     if ( filter ) {
       vk_helper::releaseVulkanBuffer(handle->vulkanDevice, filter);
-      delete filter;
     }
   }
 
@@ -3485,21 +3491,17 @@ BlockStack::BlockStack(
       );
       blocks.push_back(std::make_pair(blockType, std::move(blockPtr)));
     } else if ( blockType == TRANSFORMER_ATTENTION_BLOCK_KIND ) {
-      // TODO: implement transformer attention block
-      // TransformerAttentionDesc* blockDesc = (TransformerAttentionDesc*)descBlocks[i].second.get();
-      // unique_ptr_void blockPtr = make_unique_void(
-      //   new TransformerAttentionBlock(handle, blockDesc, nnXLen, nnYLen)
-      // );
-      // blocks.emplace_back(TRANSFORMER_ATTENTION_BLOCK_KIND, std::move(blockPtr));
-      throw StringError("[BlockStack::BlockStack()] Transformer Attention block not supported");
+      const TransformerAttentionDesc* attentionDesc = static_cast<const TransformerAttentionDesc*>(descBlocks[i].second.get());
+      unique_ptr_void blockPtr = make_unique_void(
+        new TransformerAttentionBlock(handle, attentionDesc, nnXLen, nnYLen)
+      );
+      blocks.emplace_back(TRANSFORMER_ATTENTION_BLOCK_KIND, std::move(blockPtr));
     } else if ( blockType == TRANSFORMER_FFN_BLOCK_KIND ) {
-      // TODO: implement transformer ffn block 
-      // TransformerFFNDesc* blockDesc = (TransformerFFNDesc*)descBlocks[i].second.get();
-      // unique_ptr_void blockPtr = make_unique_void(
-      //   new TransformerFFNBlock(handle, blockDesc)
-      // );
-      // blocks.emplace_back(TRANSFORMER_FFN_BLOCK_KIND, std::move(blockPtr));
-      throw StringError("[BlockStack::BlockStack()] Transformer FFN block required");
+      const TransformerFFNDesc* ffnDesc = static_cast<const TransformerFFNDesc*>(descBlocks[i].second.get());
+      unique_ptr_void blockPtr = make_unique_void(
+        new TransformerFFNBlock(handle, ffnDesc)
+      );
+      blocks.emplace_back(TRANSFORMER_FFN_BLOCK_KIND, std::move(blockPtr));
     }else {
       ASSERT_UNREACHABLE;
     }
@@ -3526,16 +3528,12 @@ ConvWorkspaceEltsNeeded BlockStack::requiredConvWorkspaceElts(ComputeHandleInter
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
     }
     else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
-      // TODO: uncomment this after implement layer.
-      // TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
-      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
-      throw StringError("Not Implemented Yet");
+      TransformerAttentionBlock* block = static_cast<TransformerAttentionBlock*>(blocks[i].second.get());
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
     }
     else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
-      // TODO: uncomment this after implement layer.
-      // TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
-      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
-      throw StringError("Not Implemented Yet");
+      TransformerFFNBlock* block = static_cast<TransformerFFNBlock*>(blocks[i].second.get());
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
     }
 
     else {
@@ -3617,14 +3615,18 @@ void BlockStack::forward(
       }
       blockPtr->forward(cb, batchSize, scratch, trunk, trunkScratch, mask, maskSum, convWorkspace, convWorkspace2);
     } else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
-      throw StringError("Not implemented yet.");
-      // TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
-      // block->apply(handle, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
+      TransformerAttentionBlock* block = static_cast<TransformerAttentionBlock*>(blocks[i].second.get());
+      if(block == nullptr) {
+        Global::fatalError("BlockStack::forward: TransformerAttentionBlock pointer is null at index " + Global::intToString(i));
+      }
+      block->forward(cb, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
     }
     else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
-      throw StringError("Not implemented yet.");
-      // TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
-      // block->apply(handle, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
+      TransformerFFNBlock* block = static_cast<TransformerFFNBlock*>(blocks[i].second.get());
+      if(block == nullptr) {
+        Global::fatalError("BlockStack::forward: TransformerFFNBlock pointer is null at index " + Global::intToString(i));
+      }
+      block->forward(cb, scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
     }
     else {
       ASSERT_UNREACHABLE;
@@ -3723,8 +3725,7 @@ struct Trunk {
   std::unique_ptr<SGFMetadataEncoder> sgfMetadataEncoder;
   BlockStack blockStack;
   std::unique_ptr<BatchNormLayer> trunkTipBN;
-  // std::unique_ptr<RMSNormLayer> trunkTipRMSNorm = nullptr;
-  void* trunkTipRMSNorm = nullptr;
+  std::unique_ptr<RMSNormLayer> trunkTipRMSNorm;
   VkDescriptorSet addChannelBiasDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelBiasDS2 = VK_NULL_HANDLE;
 
@@ -3768,7 +3769,11 @@ struct Trunk {
     if ( desc->trunkNormKind == TRUNK_NORM_KIND_STANDARD  ){
       trunkTipBN = std::make_unique<BatchNormLayer>(handle, &desc->trunkTipBN, &desc->trunkTipActivation, useFP16);
     } else {
-      throw StringError("[Trunk::Trunk()] transformer features not implemented yet");
+      trunkTipRMSNorm = std::make_unique<RMSNormLayer>(
+        handle,
+        &desc->trunkTipRMSNorm,
+        desc->trunkTipActivation.activation
+      );
     }
   }
 
@@ -3785,10 +3790,8 @@ struct Trunk {
       blockStack.requiredConvWorkspaceElts(handle,maxBatchSize)
     );
 
-    if(trunkTipRMSNorm){
-      throw StringError("[Trunk::requiredConvWorkspaceElts] trunkTipRMSNorm not supported yet.");
-      // maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunkTipRMSNorm->requiredConvWorkspaceElts(handle,maxBatchSize));
-    }
+    if(trunkTipRMSNorm)
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunkTipRMSNorm->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -3824,7 +3827,7 @@ struct Trunk {
     if (trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
       trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
     } else {
-      throw StringError("[Trunk::forward()] trunkTipRMSNorm required");
+      trunkTipRMSNorm->forward(cb, batchSize, trunk, trunk, mask, maskSum, convWorkspace, convWorkspace2);
     }
   }
 
@@ -4186,17 +4189,13 @@ void computeMaskSums(
 
   const int numChannels = 1;
   const int paddedNNXYLen = handle->paddedNNXYLen;
-  const uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
-
-  const uint32_t batchLocalSize = std::min(
-    {
-      static_cast<uint32_t>(handle->tuneParams.gPool.BATCHSTRIDE),
-      static_cast<uint32_t>(vk_helper::powerOf2ify(static_cast<size_t>(batchSize))),
-      static_cast<uint32_t>(pipelines->sumChannels.size())
-    }
-  );
-  const Pipeline& targetPipeline = pipelines->sumChannels.at(batchLocalSize - 1);
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
+  LocalDim dim = {
+    handle->tuneParams.gPool.XYSTRIDE,
+    1,
+    std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
+  };
+  const Pipeline& targetPipeline = pipelines->sumChannels.at(dim);
 
   const uint32_t globalSizeX = static_cast<uint32_t>(handle->tuneParams.gPool.XYSTRIDE);
   const uint32_t globalSizeY = 1u;
@@ -4448,14 +4447,14 @@ ComputeContext* NeuralNet::createComputeContext(
     throw StringError("NeuralNet::createComputeContext - specified no GPUs to use");
   if(loadedModel == nullptr)
     throw StringError("NeuralNet::createComputeContext - loaded model was null");
-  if(loadedModel->modelDesc.modelVersion > 16)
-    throw StringError("Vulkan backend currently supports model versions through 16");
+  if(loadedModel->modelDesc.modelVersion > NNModelVersion::latestModelVersionImplemented)
+    throw StringError("Vulkan backend does not support this model version");
+  if(useFP16Mode == enabled_t::True && logger != nullptr)
+    logger->write("Vulkan backend supports FP32 execution only; ignoring useFP16=true");
 
   std::string tunerFile;
   if(cfg.contains("vulkanTunerFile"))
     tunerFile = cfg.getString("vulkanTunerFile");
-  bool fullTuning = cfg.contains("vulkanTunerFull") && cfg.getBool("vulkanTunerFull");
-  bool forceRetune = cfg.contains("vulkanForceRetune") && cfg.getBool("vulkanForceRetune");
   VulkanTuner::ModelInfoForTuning modelInfo = VulkanTuner::ModelInfoForTuning::ofDesc(loadedModel->modelDesc);
 
   if(logger != nullptr) {
@@ -4468,16 +4467,14 @@ ComputeContext* NeuralNet::createComputeContext(
   return new ComputeContext(
     nnXLen,
     nnYLen,
-    useFP16Mode,
+    enabled_t::False,
     enabled_t::False,
     std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
     logger,
     tunerFile,
     homeDataDirOverride,
     &modelInfo,
-    &loadedModel->modelDesc,
-    fullTuning,
-    forceRetune
+    &loadedModel->modelDesc
   );
 }
 
@@ -4504,9 +4501,7 @@ static ComputeContext* createComputeContextForTesting(
     "",
     "",
     nullptr,
-    nullptr,
-    false,
-    false
+    nullptr
   );
 }
 
@@ -4581,7 +4576,9 @@ struct Buffers {
     trunk = vk_helper::createDeviceBuffer(handle->vulkanDevice, m.trunk->trunkNumChannels * batchXYElts * dtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create trunk buffer", res);
 
-    if(m.modelVersion >= 16)
+    if(m.modelVersion >= 17)
+      testAssert(m.policyHead->p2Channels == 2 || m.policyHead->p2Channels == 4);
+    else if(m.modelVersion >= 16)
       testAssert(m.policyHead->p2Channels == 4);
     else if(m.modelVersion >= 12)
       testAssert(m.policyHead->p2Channels == 2);

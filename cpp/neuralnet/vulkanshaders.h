@@ -351,6 +351,46 @@ namespace vk_shader {
   extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32;
   extern size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size;
 
+  struct LocalDim {
+    int x;
+    int y;
+    int z;
+
+    bool operator==(const LocalDim& other) const {
+        return x == other.x &&
+                y == other.y &&
+                z == other.z;
+    }
+
+    bool operator<(const LocalDim& other) const {
+        if (x != other.x)
+            return x < other.x;
+        if (y != other.y)
+            return y < other.y;
+        return z < other.z;
+    }
+  };
+
+struct LocalDimHash {
+  std::size_t operator()(const LocalDim& dim) const noexcept {
+    std::size_t seed = 0;
+
+    auto hash_combine = [&seed](int value) {
+        seed ^= std::hash<int>{}(value)
+              + 0x9e3779b9
+              + (seed << 6)
+              + (seed >> 2);
+    };
+
+    hash_combine(dim.x);
+    hash_combine(dim.y);
+    hash_combine(dim.z);
+
+    return seed;
+  }
+};
+
+
 
   namespace spec {
     struct Conv2DSpec {
@@ -403,6 +443,9 @@ namespace vk_shader {
       uint32_t localSizeX = 128;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
     };
 
     /**
@@ -726,9 +769,9 @@ namespace vk_shader {
       * @brief Value Head Pooling Channels Push Constant Parameters
       */
     struct ValueHeadPoolingChannelsParams {
-      uint32_t batchSize;
-      uint32_t gpoolChannels;
-      uint32_t nnXYLen;
+      int nSize;
+      int cSize;
+      int xySize;
     };
 
     /**
@@ -828,19 +871,19 @@ namespace vk_shader {
   namespace tune {
 
     struct AddPointWiseTuneParams {
-      int LOCAL_SIZE=32;
-      int ELTS_PER_THREAD=1;
+      int LOCAL_SIZE=64;
+      int ELTS_PER_THREAD=4;
     };
 
     struct AddChannelBiasesNCHWTuneParams {
       int XY_ELTS_PER_THREAD=4;
-      int NC_ELTS_PER_THREAD=2;
+      int NC_ELTS_PER_THREAD=4;
     };
 
     struct GPoolTuneParams {
       int XYSTRIDE=32;
       int CHANNELSTRIDE=1;
-      int BATCHSTRIDE=2;
+      int BATCHSTRIDE=4;
     };
 
     struct ConvTuneParams {
@@ -853,45 +896,48 @@ namespace vk_shader {
       uint32_t outputTransformLocalXSize;
       uint32_t outputTransformLocalYSize;
       uint32_t outputTransformLocalZSize;
+      uint32_t transLocalSizeX=128;
+      uint32_t transLocalSizeY=1;
+      uint32_t untransLocalSizeX=8;
     };
 
     struct XgemmTuneParams {
-      uint32_t MDIMC;
-      uint32_t NDIMC;
-      uint32_t MWG;
-      uint32_t NWG;
-      uint32_t KWG;
-      uint32_t MDIMA;
-      uint32_t NDIMB;
+      uint32_t MDIMC=8;
+      uint32_t NDIMC=8;
+      uint32_t MWG=32;
+      uint32_t NWG=32;
+      uint32_t KWG=32;
+      uint32_t MDIMA=8;
+      uint32_t NDIMB=8;
     };
 
     struct XgemmDirectTuneParams {
-      uint32_t WGD;
-      uint32_t MDIMCD;
-      uint32_t NDIMCD;
-      uint32_t MDIMAD;
-      uint32_t NDIMBD;
-      uint32_t KWID;
-      uint32_t PADA;
-      uint32_t PADB;
+      uint32_t WGD = 32;
+      uint32_t MDIMCD = 8;
+      uint32_t NDIMCD = 16;
+      uint32_t MDIMAD = 8;
+      uint32_t NDIMBD = 8;
+      uint32_t KWID = 2;
+      uint32_t PADA = 1;
+      uint32_t PADB = 1;
     };
 
     struct TransformerTuneParams {
-      int ATTN_BLOCK_Q=32;
+      int ATTN_BLOCK_Q=128  ;
       int ATTN_BLOCK_KV=32;
       int Q_PER_THREAD=1;
       int USE_TILED_ATTN=1;
     };
 
     struct TransformerRMSNormTuneParms {
-      int WG_C_SIZE = 64;
-      int WG_XY_SIZE = 1;
-      int C_PER_THREAD = 4;
+      int WG_C_SIZE = 32;
+      int WG_XY_SIZE = 8;
+      int C_PER_THREAD = 1;
     };
 
     struct TransformerSpatialRmsNormTuneParams {
-      int TILE_SIZE = 32;
-      int APPLY_ELTS_PER_THREAD = 1;
+      int TILE_SIZE = 128;
+      int APPLY_ELTS_PER_THREAD = 16;
     };
 
     struct VulkanTuneParams {
@@ -917,28 +963,34 @@ namespace vk_shader {
       static VulkanTuneParams load(const std::string& filename);
 
       VulkanTuneParams() {
-        // conv3x3 = ConvTuneParams{
-        //   .inTileYSize = 6,
-        //   .inTileXSize = 6,
-        //   .outTileYSize = 4,
-        //   .outTileXSize = 4,
-        //   .inputTransformLocalXSize = 4,
-        //   .inputTransformLocalYSize = 2,
-        //   .outputTransformLocalXSize = 8,
-        //   .outputTransformLocalYSize = 2,
-        //   .outputTransformLocalZSize = 2
-        // };
-        // conv5x5 = ConvTuneParams{
-        //   .inTileYSize = 6,
-        //   .inTileXSize = 6,
-        //   .outTileYSize = 2,
-        //   .outTileXSize = 2,
-        //   .inputTransformLocalXSize = 4,
-        //   .inputTransformLocalYSize = 2,
-        //   .outputTransformLocalXSize = 8,
-        //   .outputTransformLocalYSize = 2,
-        //   .outputTransformLocalZSize = 2
-        // };
+        conv3x3 = ConvTuneParams{
+          .inTileYSize = 6,
+          .inTileXSize = 6,
+          .outTileYSize = 4,
+          .outTileXSize = 4,
+          .inputTransformLocalXSize = 4,
+          .inputTransformLocalYSize = 2,
+          .outputTransformLocalXSize = 8,
+          .outputTransformLocalYSize = 2,
+          .outputTransformLocalZSize = 2,
+          .transLocalSizeX = 128,
+          .transLocalSizeY = 1,
+          .untransLocalSizeX = 8
+        };
+        conv5x5 = ConvTuneParams{
+          .inTileYSize = 6,
+          .inTileXSize = 6,
+          .outTileYSize = 2,
+          .outTileXSize = 2,
+          .inputTransformLocalXSize = 4,
+          .inputTransformLocalYSize = 2,
+          .outputTransformLocalXSize = 8,
+          .outputTransformLocalYSize = 2,
+          .outputTransformLocalZSize = 2,
+          .transLocalSizeX = 128,
+          .transLocalSizeY = 1,
+          .untransLocalSizeX = 8
+        };
         // xgemm = XgemmTuneParams{
         //   .MDIMC = 16,
         //   .NDIMC = 16,
@@ -960,46 +1012,9 @@ namespace vk_shader {
         //   .PADB = 1
         // };
 
-        conv3x3 = ConvTuneParams();
-        conv3x3.inTileYSize = 6;
-        conv3x3.inTileXSize = 6;
-        conv3x3.outTileYSize = 4;
-        conv3x3.outTileXSize = 4;
-        conv3x3.inputTransformLocalXSize = 128;
-        conv3x3.inputTransformLocalYSize = 2;
-        conv3x3.outputTransformLocalXSize = 8;
-        conv3x3.outputTransformLocalYSize = 4;
-        conv3x3.outputTransformLocalZSize = 8;
-
-        conv5x5 = ConvTuneParams();
-        conv5x5.inTileYSize = 6;
-        conv5x5.inTileXSize = 6;
-        conv5x5.outTileYSize = 2;
-        conv5x5.outTileXSize = 2;
-        conv5x5.inputTransformLocalXSize = 128;
-        conv5x5.inputTransformLocalYSize = 2;
-        conv5x5.outputTransformLocalXSize = 8;
-        conv5x5.outputTransformLocalYSize = 2;
-        conv5x5.outputTransformLocalZSize = 2;
-
         xgemm = XgemmTuneParams();
-        xgemm.MDIMC = 16;
-        xgemm.NDIMC = 16;
-        xgemm.MWG = 64;
-        xgemm.NWG = 64;
-        xgemm.KWG = 16;
-        xgemm.MDIMA = 16;
-        xgemm.NDIMB = 16;
 
         xgemmDirect = XgemmDirectTuneParams();
-        xgemmDirect.WGD = 32;
-        xgemmDirect.MDIMCD = 8;
-        xgemmDirect.NDIMCD = 8;
-        xgemmDirect.MDIMAD = 8;
-        xgemmDirect.NDIMBD = 8;
-        xgemmDirect.KWID = 2;
-        xgemmDirect.PADA = 1;
-        xgemmDirect.PADB = 1;
       }
     };
 
@@ -1058,10 +1073,11 @@ namespace vk_shader {
 
     // Pooling pipelines
     Pipeline globalPoolingChannelsFp32;
-    Pipeline valueHeadPoolingChannelsFp32;
+    
+    std::map<LocalDim, Pipeline> valueHeadPoolingChannels;
     
     // Element wise operations
-    std::vector<Pipeline> sumChannels;
+    std::map<LocalDim, Pipeline> sumChannels;
 
     Pipeline addChannelBiasNCHW;
     Pipeline addChannelBiasNCIdentity;
@@ -1215,12 +1231,12 @@ namespace vk_shader {
     /**
      * @brief Create a Value Head Pool Channels Fp32 object
      */
-    void createValueHeadPoolingChannelsFp32();
+    void createValueHeadPoolingChannels();
 
     /**
      * @brief Create a Sum Channels Fp32 object
      */
-    void createSumChannelsFp32();
+    void createSumChannels();
 
     /**
      * @brief Create a Add Channel Bias NCHW Fp32 object

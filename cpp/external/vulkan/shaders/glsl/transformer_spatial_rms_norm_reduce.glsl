@@ -3,7 +3,7 @@
 
 #include "common.glsl"
 
-layout(constant_id = 4) const int TILE_SIZE = 32;
+layout(constant_id = 3) const int TILE_SIZE = 32;
 
 layout(push_constant) uniform SpatialRMSNormReduceParams{
     int nSize;

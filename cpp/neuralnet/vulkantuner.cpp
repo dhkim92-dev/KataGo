@@ -2,17 +2,12 @@
 
 #include "../neuralnet/vulkantuner.h"
 
-#include <chrono>
-#include <cmath>
 #include <fstream>
-#include <limits>
 #include <map>
-#include <set>
 
 #include "../core/fileutils.h"
 #include "../core/makedir.h"
 #include "../dataio/homedata.h"
-#include "../neuralnet/vulkanbackend.h"
 
 using namespace std;
 using namespace vk_shader;
@@ -39,357 +34,6 @@ namespace {
     return static_cast<uint32_t>(value);
   }
 
-  enum class TuneGroup { Conv3x3, Conv5x5, Xgemm, XgemmDirect };
-  enum class CandidateStatus { Success, Reject, RecreateDevice };
-
-  struct CandidateResult {
-    CandidateStatus status;
-    double milliseconds;
-    string error;
-  };
-
-  uint32_t roundUp(uint32_t x, uint32_t multiple) {
-    return (x + multiple - 1) / multiple * multiple;
-  }
-
-  bool isDeviceFailure(VkResult result) {
-    return result == VK_ERROR_DEVICE_LOST || result == VK_TIMEOUT;
-  }
-
-  CandidateResult evaluateCandidate(
-    VulkanDevice* device,
-    const VulkanTuneParams& params,
-    TuneGroup group,
-    int nnXLen,
-    int nnYLen,
-    int trunkChannels) {
-    if(!params.isValid())
-      return {CandidateStatus::Reject, 0.0, "invalid parameter relationships"};
-
-    vk_shader::ComputePipelines* pipelines = nullptr;
-    vector<VulkanBuffer*> buffers;
-    VkFence fence = VK_NULL_HANDLE;
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkResult result = VK_SUCCESS;
-
-    const auto cleanup = [&]() {
-      if(fence != VK_NULL_HANDLE)
-        vkDestroyFence(device->device, fence, nullptr);
-      for(VulkanBuffer* buffer: buffers)
-        vk_helper::releaseVulkanBuffer(device, buffer);
-      delete pipelines;
-      vkResetDescriptorPool(device->device, device->descriptorPool, 0);
-      vkResetCommandPool(device->device, device->commandPool, 0);
-    };
-    const auto cleanupAfterDeviceFailure = [&]() {
-      for(VulkanBuffer* buffer: buffers)
-        delete buffer;
-      buffers.clear();
-      ::operator delete(pipelines);
-      pipelines = nullptr;
-      fence = VK_NULL_HANDLE;
-      commandBuffer = VK_NULL_HANDLE;
-    };
-    const auto reject = [&](const string& error) {
-      cleanup();
-      return CandidateResult{CandidateStatus::Reject, 0.0, error};
-    };
-
-    try {
-      pipelines = new vk_shader::ComputePipelines(device->device, params, -1, -1);
-    } catch(const StringError& e) {
-      return {CandidateStatus::Reject, 0.0, e.what()};
-    }
-
-    const auto makeBuffer = [&](size_t numFloats) -> VulkanBuffer* {
-      VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, numFloats * sizeof(float), false, &result);
-      if(result == VK_SUCCESS && buffer != nullptr)
-        buffers.push_back(buffer);
-      return buffer;
-    };
-
-    commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
-    if(result != VK_SUCCESS || commandBuffer == VK_NULL_HANDLE)
-      return reject("command buffer allocation failed: " + vk_helper::vkErrorToString(result));
-    result = vk_helper::beginCommandBuffer(commandBuffer);
-    if(result != VK_SUCCESS)
-      return reject("command buffer begin failed: " + vk_helper::vkErrorToString(result));
-
-    vector<pair<VulkanBuffer*, size_t>> verifiedOutputs;
-    const uint32_t channels = static_cast<uint32_t>(std::max(32, trunkChannels));
-    if(group == TuneGroup::Xgemm) {
-      const uint32_t m =
-        roundUp(static_cast<uint32_t>(VulkanTuner::DEFAULT_BATCH_SIZE * nnXLen * nnYLen), params.xgemm.MWG);
-      const uint32_t n = roundUp(channels, params.xgemm.NWG);
-      const uint32_t k = roundUp(channels, params.xgemm.KWG);
-      const uint32_t batches = 1;
-      VulkanBuffer* a = makeBuffer(static_cast<size_t>(m) * k * batches);
-      VulkanBuffer* b = makeBuffer(static_cast<size_t>(n) * k * batches);
-      VulkanBuffer* c = makeBuffer(static_cast<size_t>(m) * n * batches);
-      if(result != VK_SUCCESS || a == nullptr || b == nullptr || c == nullptr)
-        return reject("XGEMM buffer allocation failed: " + vk_helper::vkErrorToString(result));
-      vkCmdFillBuffer(commandBuffer, a->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, b->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, c->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-      VkDescriptorSet descriptorSet =
-        vk_helper::allocateDescriptorSet(device, pipelines->xgemmBatchedFp32.descriptorSetLayout, &result);
-      if(result != VK_SUCCESS)
-        return reject("XGEMM descriptor allocation failed: " + vk_helper::vkErrorToString(result));
-      vkcompute::xgemmBatched(
-        device, params, &pipelines->xgemmBatchedFp32, commandBuffer, descriptorSet, m, n, k, a, b, c, batches, &result);
-      verifiedOutputs.push_back({c, static_cast<size_t>(m) * n * batches});
-    } else if(group == TuneGroup::XgemmDirect) {
-      const uint32_t m = static_cast<uint32_t>(VulkanTuner::DEFAULT_BATCH_SIZE * nnXLen * nnYLen);
-      const uint32_t n = channels;
-      const uint32_t k = channels;
-      VulkanBuffer* a = makeBuffer(static_cast<size_t>(m) * k);
-      VulkanBuffer* b = makeBuffer(static_cast<size_t>(n) * k);
-      VulkanBuffer* c = makeBuffer(static_cast<size_t>(m) * n);
-      if(result != VK_SUCCESS || a == nullptr || b == nullptr || c == nullptr)
-        return reject("direct XGEMM buffer allocation failed: " + vk_helper::vkErrorToString(result));
-      vkCmdFillBuffer(commandBuffer, a->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, b->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, c->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-      VkDescriptorSet descriptorSet =
-        vk_helper::allocateDescriptorSet(device, pipelines->batchedXgemmDirect.descriptorSetLayout, &result);
-      if(result != VK_SUCCESS)
-        return reject("direct XGEMM descriptor allocation failed: " + vk_helper::vkErrorToString(result));
-      vkcompute::batchedXGemmDirect_MK_NK_MN(
-        device,
-        params,
-        &pipelines->batchedXgemmDirect,
-        commandBuffer,
-        descriptorSet,
-        static_cast<int>(m),
-        static_cast<int>(n),
-        static_cast<int>(k),
-        a,
-        b,
-        c,
-        1,
-        &result);
-      verifiedOutputs.push_back({c, static_cast<size_t>(m) * n});
-    } else {
-      const bool is3x3 = group == TuneGroup::Conv3x3;
-      const ConvTuneParams& conv = is3x3 ? params.conv3x3 : params.conv5x5;
-      const uint32_t convSize = is3x3 ? 3 : 5;
-      const uint32_t numTilesY = (static_cast<uint32_t>(nnYLen) + conv.outTileYSize - 1) / conv.outTileYSize;
-      const uint32_t numTilesX = (static_cast<uint32_t>(nnXLen) + conv.outTileXSize - 1) / conv.outTileXSize;
-      const uint32_t paddedTiles = roundUp(VulkanTuner::DEFAULT_BATCH_SIZE * numTilesY * numTilesX, params.xgemm.MWG);
-      const size_t inputWorkspaceFloats =
-        static_cast<size_t>(conv.inTileYSize) * conv.inTileXSize * paddedTiles * roundUp(channels, params.xgemm.KWG);
-      const size_t outputWorkspaceFloats =
-        static_cast<size_t>(conv.inTileYSize) * conv.inTileXSize * paddedTiles * roundUp(channels, params.xgemm.NWG);
-      VulkanBuffer* input =
-        makeBuffer(static_cast<size_t>(VulkanTuner::DEFAULT_BATCH_SIZE) * nnXLen * nnYLen * channels);
-      VulkanBuffer* transformed = makeBuffer(inputWorkspaceFloats);
-      VulkanBuffer* outputTransformInput = makeBuffer(outputWorkspaceFloats);
-      VulkanBuffer* output =
-        makeBuffer(static_cast<size_t>(VulkanTuner::DEFAULT_BATCH_SIZE) * nnXLen * nnYLen * channels);
-      if(
-        result != VK_SUCCESS || input == nullptr || transformed == nullptr || outputTransformInput == nullptr ||
-        output == nullptr)
-        return reject("Winograd buffer allocation failed: " + vk_helper::vkErrorToString(result));
-      vkCmdFillBuffer(commandBuffer, input->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, transformed->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      vkCmdFillBuffer(commandBuffer, outputTransformInput->buffer, 0, VK_WHOLE_SIZE, 0);
-      vkCmdFillBuffer(commandBuffer, output->buffer, 0, VK_WHOLE_SIZE, 0x7fc00000U);
-      vk_helper::barrierCommandBuffer(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-      const Pipeline& inputPipeline =
-        is3x3 ? pipelines->winogradInputTransform3x3 : pipelines->winogradInputTransform5x5;
-      const Pipeline& outputPipeline =
-        is3x3 ? pipelines->winogradOutputTransform3x3 : pipelines->winogradOutputTransform5x5;
-      VkDescriptorSet inputSet = vk_helper::allocateDescriptorSet(device, inputPipeline.descriptorSetLayout, &result);
-      if(result != VK_SUCCESS)
-        return reject("Winograd input descriptor allocation failed: " + vk_helper::vkErrorToString(result));
-      VkDescriptorSet outputSet = vk_helper::allocateDescriptorSet(device, outputPipeline.descriptorSetLayout, &result);
-      if(result != VK_SUCCESS)
-        return reject("Winograd output descriptor allocation failed: " + vk_helper::vkErrorToString(result));
-      vkcompute::convInputsToWinogradDomain(
-        device,
-        params,
-        &inputPipeline,
-        commandBuffer,
-        inputSet,
-        input,
-        transformed,
-        nnYLen,
-        nnXLen,
-        nnYLen*nnXLen,
-        VulkanTuner::DEFAULT_BATCH_SIZE,
-        numTilesY,
-        numTilesX,
-        params.xgemm.MWG,
-        channels,
-        params.xgemm.KWG,
-        convSize,
-        &result);
-      if(result == VK_SUCCESS) {
-        vkcompute::winogradOutputToSpatialDomain(
-          device,
-          &outputPipeline,
-          commandBuffer,
-          outputSet,
-          outputTransformInput,
-          output,
-          nnYLen,
-          nnXLen,
-          VulkanTuner::DEFAULT_BATCH_SIZE,
-          numTilesY,
-          numTilesX,
-          numTilesY*numTilesX,
-          params.xgemm.MWG,
-          channels,
-          params.xgemm.NWG,
-          &result);
-      }
-      verifiedOutputs.push_back({transformed, inputWorkspaceFloats});
-      verifiedOutputs.push_back(
-        {output, static_cast<size_t>(VulkanTuner::DEFAULT_BATCH_SIZE) * nnXLen * nnYLen * channels});
-    }
-    if(result != VK_SUCCESS)
-      return reject("candidate command recording failed: " + vk_helper::vkErrorToString(result));
-
-    size_t verifiedFloats = 0;
-    for(const auto& output: verifiedOutputs)
-      verifiedFloats += output.second;
-    VulkanBuffer* readback = vk_helper::createReadbackBuffer(device, verifiedFloats * sizeof(float), &result);
-    if(result != VK_SUCCESS || readback == nullptr)
-      return reject("readback buffer allocation failed: " + vk_helper::vkErrorToString(result));
-    buffers.push_back(readback);
-    VkDeviceSize readbackOffset = 0;
-    for(const auto& output: verifiedOutputs) {
-      vk_helper::barrierCommandBufferForBuffer(
-        commandBuffer,
-        output.first,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT);
-      VkBufferCopy copyRegion = {};
-      copyRegion.dstOffset = readbackOffset;
-      copyRegion.size = output.second * sizeof(float);
-      vkCmdCopyBuffer(commandBuffer, output.first->buffer, readback->buffer, 1, &copyRegion);
-      readbackOffset += copyRegion.size;
-    }
-    result = vk_helper::endCommandBuffer(commandBuffer);
-    if(result != VK_SUCCESS)
-      return reject("command buffer end failed: " + vk_helper::vkErrorToString(result));
-
-    VkFenceCreateInfo fenceInfo = {};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
-    if(result != VK_SUCCESS)
-      return reject("fence creation failed: " + vk_helper::vkErrorToString(result));
-
-    double totalMilliseconds = 0.0;
-    constexpr int warmupRuns = 1;
-    constexpr int timedRuns = 3;
-    for(int run = 0; run < warmupRuns + timedRuns; run++) {
-      result = vkResetFences(device->device, 1, &fence);
-      if(result == VK_SUCCESS) {
-        auto start = chrono::steady_clock::now();
-        result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
-        if(result == VK_SUCCESS)
-          result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, 5000000000ULL);
-        auto end = chrono::steady_clock::now();
-        if(run >= warmupRuns)
-          totalMilliseconds += chrono::duration<double, milli>(end - start).count();
-      }
-      if(result != VK_SUCCESS) {
-        if(isDeviceFailure(result)) {
-          cleanupAfterDeviceFailure();
-          return {
-            CandidateStatus::RecreateDevice, 0.0, "candidate execution failed: " + vk_helper::vkErrorToString(result)};
-        }
-        return reject("candidate execution failed: " + vk_helper::vkErrorToString(result));
-      }
-    }
-
-    void* mapped = nullptr;
-    result = vmaMapMemory(device->allocator, readback->allocation, &mapped);
-    if(result != VK_SUCCESS)
-      return reject("readback map failed: " + vk_helper::vkErrorToString(result));
-    vmaInvalidateAllocation(device->allocator, readback->allocation, 0, VK_WHOLE_SIZE);
-    const float* values = static_cast<const float*>(mapped);
-    bool correct = true;
-    for(size_t i = 0; i < verifiedFloats; i++) {
-      if(!std::isfinite(values[i]) || std::abs(values[i]) > 1e-6f) {
-        correct = false;
-        break;
-      }
-    }
-    vmaUnmapMemory(device->allocator, readback->allocation);
-    if(!correct)
-      return reject("candidate produced an incorrect numerical result");
-
-    double milliseconds = totalMilliseconds / timedRuns;
-    cleanup();
-    return {CandidateStatus::Success, milliseconds, ""};
-  }
-
-  vector<VulkanTuneParams> candidatesForGroup(const VulkanTuneParams& base, TuneGroup group, bool full) {
-    vector<VulkanTuneParams> candidates;
-    candidates.push_back(base);
-    if(group == TuneGroup::Conv3x3 || group == TuneGroup::Conv5x5) {
-      const uint32_t inputSizes[][2] = {{64, 4}, {128, 2}, {256, 1}, {32, 8}};
-      const uint32_t outputSizes[][3] = {{8, 4, 8}, {16, 4, 4}, {32, 2, 4}, {8, 8, 4}};
-      size_t count = full ? 4 : 3;
-      for(size_t i = 0; i < count; i++) {
-        VulkanTuneParams candidate = base;
-        ConvTuneParams& conv = group == TuneGroup::Conv3x3 ? candidate.conv3x3 : candidate.conv5x5;
-        conv.inputTransformLocalXSize = inputSizes[i][0];
-        conv.inputTransformLocalYSize = inputSizes[i][1];
-        conv.outputTransformLocalXSize = outputSizes[i][0];
-        conv.outputTransformLocalYSize = outputSizes[i][1];
-        conv.outputTransformLocalZSize = outputSizes[i][2];
-        candidates.push_back(candidate);
-      }
-    } else if(group == TuneGroup::Xgemm) {
-      const uint32_t values[][7] = {
-        {8, 8, 32, 32, 8, 8, 8},
-        {8, 8, 64, 64, 8, 8, 8},
-        {16, 8, 64, 32, 16, 16, 8},
-        {8, 16, 32, 64, 16, 8, 16},
-        {16, 16, 64, 64, 32, 16, 16}};
-      size_t count = full ? 5 : 3;
-      for(size_t i = 0; i < count; i++) {
-        VulkanTuneParams candidate = base;
-        candidate.xgemm = {
-          values[i][0], values[i][1], values[i][2], values[i][3], values[i][4], values[i][5], values[i][6]};
-        candidates.push_back(candidate);
-      }
-    } else {
-      const uint32_t values[][8] = {
-        {16, 4, 4, 4, 4, 1, 1, 1},
-        {32, 8, 8, 8, 8, 1, 1, 1},
-        {32, 8, 8, 8, 8, 2, 1, 1},
-        {64, 16, 16, 16, 16, 2, 1, 1},
-        {64, 8, 16, 8, 16, 2, 1, 1}};
-      size_t count = full ? 5 : 3;
-      for(size_t i = 0; i < count; i++) {
-        VulkanTuneParams candidate = base;
-        candidate.xgemmDirect = {
-          values[i][0],
-          values[i][1],
-          values[i][2],
-          values[i][3],
-          values[i][4],
-          values[i][5],
-          values[i][6],
-          values[i][7]};
-        candidates.push_back(candidate);
-      }
-    }
-    vector<VulkanTuneParams> valid;
-    for(const VulkanTuneParams& candidate: candidates) {
-      if(candidate.isValid() && std::find(valid.begin(), valid.end(), candidate) == valid.end())
-        valid.push_back(candidate);
-    }
-    return valid;
-  }
 }  // namespace
 
 bool VulkanTuneParams::isValid() const {
@@ -443,18 +87,6 @@ bool VulkanTuneParams::isValid() const {
   if(xgemmDirect.PADA > 1 || xgemmDirect.PADB > 1)
     return false;
   if(!isMultipleOf(xgemmDirect.WGD, xgemmDirect.KWID))
-    return false;
-  if(
-    !isMultipleOf(xgemmDirect.WGD, static_cast<uint64_t>(xgemmDirect.MDIMCD) * 4) ||
-    !isMultipleOf(xgemmDirect.WGD, static_cast<uint64_t>(xgemmDirect.NDIMCD) * 4))
-    return false;
-  if(
-    !isMultipleOf(xgemmDirect.WGD, static_cast<uint64_t>(xgemmDirect.MDIMAD) * 4) ||
-    !isMultipleOf(xgemmDirect.WGD, static_cast<uint64_t>(xgemmDirect.NDIMBD) * 4))
-    return false;
-  if(!isMultipleOf(xgemmDirect.WGD, directWorkgroupSize / xgemmDirect.MDIMAD))
-    return false;
-  if(!isMultipleOf(xgemmDirect.WGD, directWorkgroupSize / xgemmDirect.NDIMBD))
     return false;
   return true;
 }
@@ -615,107 +247,33 @@ VulkanTuner::defaultFileName(const string& gpuName, int nnXLen, int nnYLen, cons
   return defaultFileName(gpuName, nnXLen, nnYLen, modelInfo.trunkNumChannels, modelInfo.modelVersion);
 }
 
-VulkanTuneParams VulkanTuner::tune(
-  VulkanDevice*& device,
-  const function<VulkanDevice*()>& recreateDevice,
-  const VulkanTuneParams& initialParams,
-  int nnXLen,
-  int nnYLen,
-  const ModelInfoForTuning& modelInfo,
-  Logger* logger,
-  bool full) {
-  VulkanTuneParams current = initialParams;
-  if(!current.isValid())
-    current = VulkanTuneParams();
-
-  const TuneGroup groups[] = {TuneGroup::Conv3x3, TuneGroup::Conv5x5, TuneGroup::Xgemm, TuneGroup::XgemmDirect};
-  const char* groupNames[] = {"conv3x3", "conv5x5", "xgemm", "xgemmDirect"};
-  for(size_t groupIdx = 0; groupIdx < 4; groupIdx++) {
-    vector<VulkanTuneParams> candidates = candidatesForGroup(current, groups[groupIdx], full);
-    double bestMilliseconds = std::numeric_limits<double>::infinity();
-    VulkanTuneParams best = current;
-    bool found = false;
-    for(size_t candidateIdx = 0; candidateIdx < candidates.size(); candidateIdx++) {
-      CandidateResult result = evaluateCandidate(
-        device, candidates[candidateIdx], groups[groupIdx], nnXLen, nnYLen, modelInfo.trunkNumChannels);
-      if(result.status == CandidateStatus::RecreateDevice) {
-        if(logger != nullptr)
-          logger->write(
-            "Vulkan tuner rejected " + string(groupNames[groupIdx]) +
-            " candidate after device execution failure: " + result.error);
-        device->skipWaitOnDestruction = true;
-        delete device;
-        device = nullptr;
-        device = recreateDevice();
-        continue;
-      }
-      if(result.status == CandidateStatus::Reject) {
-        if(logger != nullptr)
-          logger->write("Vulkan tuner rejected " + string(groupNames[groupIdx]) + " candidate: " + result.error);
-        continue;
-      }
-      if(logger != nullptr) {
-        logger->write(
-          "Vulkan tuner " + string(groupNames[groupIdx]) + " candidate " +
-          Global::intToString(static_cast<int>(candidateIdx + 1)) + "/" +
-          Global::intToString(static_cast<int>(candidates.size())) + ": " +
-          Global::doubleToString(result.milliseconds) + " ms");
-      }
-      if(result.milliseconds < bestMilliseconds) {
-        bestMilliseconds = result.milliseconds;
-        best = candidates[candidateIdx];
-        found = true;
-      }
-    }
-    if(!found)
-      throw StringError("Vulkan tuner found no runnable candidates for " + string(groupNames[groupIdx]));
-    current = best;
-  }
-  return current;
-}
-
-VulkanTuneParams VulkanTuner::loadOrAutoTune(
+VulkanTuneParams VulkanTuner::loadOrCreate(
   const string& tunerFile,
   const string& homeDataDirOverride,
-  VulkanDevice*& device,
-  const function<VulkanDevice*()>& recreateDevice,
+  const string& gpuName,
   int nnXLen,
   int nnYLen,
   const ModelInfoForTuning& modelInfo,
-  Logger* logger,
-  bool full,
-  bool forceRetune) {
+  Logger* logger) {
   string filename = tunerFile;
   if(filename.empty()) {
     filename = defaultDirectory(true, homeDataDirOverride) + "/" +
-               defaultFileName(device->info.deviceName, nnXLen, nnYLen, modelInfo);
+               defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
   }
 
-  VulkanTuneParams initialParams;
-  if(!forceRetune) {
-    try {
-      VulkanTuneParams loaded = VulkanTuneParams::load(filename);
-      if(logger != nullptr)
-        logger->write("Loaded Vulkan tuning parameters from: " + filename);
-      return loaded;
-    } catch(const StringError&) {
-    }
-  } else {
-    try {
-      initialParams = VulkanTuneParams::load(filename);
-    } catch(const StringError&) {
-    }
+  try {
+    VulkanTuneParams loaded = VulkanTuneParams::load(filename);
+    if(logger != nullptr)
+      logger->write("Loaded Vulkan tuning parameters from: " + filename);
+    return loaded;
+  } catch(const StringError&) {
   }
 
-  if(logger != nullptr) {
-    logger->write("No usable Vulkan tuning parameters found at: " + filename);
-    logger->write("Performing Vulkan autotuning");
-  }
-  VulkanTuneParams tuned = tune(device, recreateDevice, initialParams, nnXLen, nnYLen, modelInfo, logger, full);
-  VulkanTuneParams::save(filename, tuned);
+  VulkanTuneParams params;
+  VulkanTuneParams::save(filename, params);
   if(logger != nullptr)
-    logger->write("Saved Vulkan tuning parameters to: " + filename);
-  return tuned;
+    logger->write("Saved default Vulkan tuning parameters to: " + filename);
+  return params;
 }
 
 #endif
