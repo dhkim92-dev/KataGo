@@ -2309,6 +2309,22 @@ struct TransformerMatMulLayer {
     }
   }
 
+  void debug(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask,
+    VulkanBuffer* convWorkspace
+  ) {
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for TransformerMatMulLayer: " + name, res);
+    forward(commandBuffer, batchSize, input, output, mask, convWorkspace);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for TransformerMatMulLayer: " + name, res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+  }
+
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
     // No separate pad buffer needed - input is pre-padded to paddedNNXYLen
     (void)handle;
@@ -2409,6 +2425,27 @@ struct TransformerApplyRoPELayer {
     vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
     SHADER_PROFILE_END("TransformerApplyRoPE", cb);
   }
+
+  void debug(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* cosTable,
+    VulkanBuffer* sinTable,
+    const int numHeads,
+    const int numKVHeads,
+    const int headDim,
+    const int seqLen,
+    const int numPairs,
+    const int learnableInt
+  ) {
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for TransformerApplyRoPELayer", res);
+    forward(commandBuffer, batchSize, input, cosTable, sinTable, numHeads, numKVHeads, headDim, seqLen, numPairs, learnableInt);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for TransformerApplyRoPELayer", res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+  }
 };
 
 
@@ -2497,6 +2534,23 @@ struct TransformerAttentionLayer {
       SHADER_PROFILE_END("scaleDotProductAttentionNaive", cb);
     }
   }
+
+  void debug(
+    int batchSize,
+    VulkanBuffer* Q,
+    VulkanBuffer* K,
+    VulkanBuffer* V,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for TransformerAttentionLayer", res);
+    forward(commandBuffer, batchSize, Q, K, V, output, mask);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for TransformerAttentionLayer", res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
+  }
 };
 
 struct TransformerRMSNormLayer {
@@ -2579,6 +2633,21 @@ struct TransformerRMSNormLayer {
     SHADER_PROFILE_END("TransformerRMSNorm", cb);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
 
+  }
+
+  void debug(
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mask
+  ) {
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for TransformerRMSNormLayer: " + name, res);
+    forward(commandBuffer, batchSize, input, output, mask);
+    res = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for TransformerRMSNormLayer: " + name, res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
   }
 
   TransformerRMSNormLayer() = delete;
@@ -2993,6 +3062,46 @@ struct TransformerAttentionBlock {
     performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"), false);
   }
 
+  void debug(
+    ScratchBuffers* scratch,
+    int batchSize,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace
+  ) {
+    (void)maskSum;
+    const int seqLen = paddedNNXYLen;
+    const int qTotalDim = numHeads * qHeadDim;
+    const int kTotalDim = numKVHeads * qHeadDim;
+    const int vTotalDim = numKVHeads * vHeadDim;
+
+    preLN->debug(batchSize, trunk, trunkScratch, mask);
+
+    SizedBuf<VulkanBuffer*> qBuf(scratch->allocator, scratch->getBufSizeXY(qTotalDim));
+    SizedBuf<VulkanBuffer*> kBuf(scratch->allocator, scratch->getBufSizeXY(kTotalDim));
+    SizedBuf<VulkanBuffer*> vBuf(scratch->allocator, scratch->getBufSizeXY(vTotalDim));
+
+    qProj->debug(batchSize, trunkScratch, qBuf.buf, mask, convWorkspace);
+    kProj->debug(batchSize, trunkScratch, kBuf.buf, mask, convWorkspace);
+    vProj->debug(batchSize, trunkScratch, vBuf.buf, mask, convWorkspace);
+
+    if(useRope) {
+      int learnableInt = learnableRope ? 1 : 0;
+      qRoPE->debug(batchSize, qBuf.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
+      kRoPE->debug(batchSize, kBuf.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
+    }
+
+    SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+    attention->debug(batchSize, qBuf.buf, kBuf.buf, vBuf.buf, attnOut.buf, mask);
+    outProj->debug(batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
+
+    VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
+    performAddPointWise(handle, addPointWiseCB, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"));
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
+  }
+
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
     ConvWorkspaceEltsNeeded maxElts;
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, qProj->requiredConvWorkspaceElts(handle, maxBatchSize));
@@ -3088,6 +3197,40 @@ struct TransformerFFNBlock {
 
     // Step 5: Add residual
     performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
+  }
+
+  void debug(
+    ScratchBuffers* scratch,
+    int batchSize,
+    VulkanBuffer* trunk,
+    VulkanBuffer* trunkScratch,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* convWorkspace
+  ) {
+    (void)maskSum;
+    preLN->debug(batchSize, trunk, trunkScratch, mask);
+
+    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    linear1->debug(batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+
+    SizedBuf<VulkanBuffer*> gateBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    linearGate->debug(batchSize, trunkScratch, gateBuf.buf, mask, convWorkspace);
+
+    int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+    VkCommandBuffer swigluCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkResult res = vk_helper::beginCommandBuffer(swigluCB);
+    CHECK_VK_MSG("Begin command buffer for TransformerFFNBlock SwiGLU", res);
+    vkcompute::doSwiGLU(handle->vulkanDevice, swigluCB, swigluDS, handle->pipelines->transformerSwiGLU, handle->tuneParams, ffnBuf.buf, gateBuf.buf, ffnBuf.buf, totalSize);
+    res = vk_helper::endCommandBuffer(swigluCB);
+    CHECK_VK_MSG("End command buffer for TransformerFFNBlock SwiGLU", res);
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {swigluCB});
+
+    linear2->debug(batchSize, ffnBuf.buf, trunkScratch, mask, convWorkspace);
+
+    VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
+    performAddPointWise(handle, addPointWiseCB, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"));
+    vk_helper::submitCommandBuffers(handle->vulkanDevice, {addPointWiseCB});
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
@@ -3575,6 +3718,18 @@ void BlockStack::debug(
         Global::fatalError("BlockStack::debug: NestedResidualBlock pointer is null at index " + Global::intToString(i));
       }
       blockPtr->debug(batchSize, scratch, trunk, trunkScratch, mask, maskSum, convWorkspace, convWorkspace2);
+    } else if ( blockType == TRANSFORMER_ATTENTION_BLOCK_KIND ) {
+      TransformerAttentionBlock* blockPtr = static_cast<TransformerAttentionBlock*>(blocks[i].second.get());
+      if(blockPtr == nullptr) {
+        Global::fatalError("BlockStack::debug: TransformerAttentionBlock pointer is null at index " + Global::intToString(i));
+      }
+      blockPtr->debug(scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
+    } else if ( blockType == TRANSFORMER_FFN_BLOCK_KIND ) {
+      TransformerFFNBlock* blockPtr = static_cast<TransformerFFNBlock*>(blocks[i].second.get());
+      if(blockPtr == nullptr) {
+        Global::fatalError("BlockStack::debug: TransformerFFNBlock pointer is null at index " + Global::intToString(i));
+      }
+      blockPtr->debug(scratch, batchSize, trunk, trunkScratch, mask, maskSum, convWorkspace);
     } else {
       ASSERT_UNREACHABLE;
     }
