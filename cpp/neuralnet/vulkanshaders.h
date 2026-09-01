@@ -21,23 +21,33 @@ extern "C" {
   extern const size_t _binary_conv2d_fp32_size;
 
   // winograd_input_transform.glsl
-  extern const unsigned char _binary_winograd_input_transform_start[];
-  extern const unsigned char* _binary_winograd_input_transform_end;
-  extern const size_t _binary_winograd_input_transform_size;
+  extern const unsigned char _binary_winograd_input_transform_fp32_start[];
+  extern const unsigned char* _binary_winograd_input_transform_fp32_end;
+  extern const size_t _binary_winograd_input_transform_fp32_size;
 
-  extern const unsigned char _binary_winograd_input_transform_bnact_start[];
-  extern const unsigned char* _binary_winograd_input_transform_bnact_end;
-  extern const size_t _binary_winograd_input_transform_bnact_size;
+  extern const unsigned char _binary_winograd_input_transform_bnact_fp32_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_fp32_end;
+  extern const size_t _binary_winograd_input_transform_bnact_fp32_size;
 
   // winograd_output_transform.glsl
-  extern const unsigned char _binary_winograd_output_transform_start[];
-  extern const unsigned char* _binary_winograd_output_transform_end;
-  extern const size_t _binary_winograd_output_transform_size;
+  extern const unsigned char _binary_winograd_output_transform_fp32_start[];
+  extern const unsigned char* _binary_winograd_output_transform_fpo32__end;
+  extern const size_t _binary_winograd_output_transform_fp32_size;
 
   // add_pointwise_fp32.glsl
   extern const unsigned char _binary_add_pointwise_fp32_start[];
   extern const unsigned char* _binary_add_pointwise_fp32_end;
   extern const size_t _binary_add_pointwise_fp32_size;
+
+  // add_pointwise_p32s16.glsl
+  extern const unsigned char _binary_add_pointwise_p32s16_start[];
+  extern const unsigned char* _binary_add_pointwise_p32s16_end;
+  extern const size_t _binary_add_pointwise_p32s16_size;
+
+  // add_pointwise_p16s16.glsl
+  extern const unsigned char _binary_add_pointwise_p16s16_start[];
+  extern const unsigned char* _binary_add_pointwise_p16s16_end;
+  extern const size_t _binary_add_pointwise_p16s16_size;
 
   // matmul_fp32.glsl
   extern const unsigned char _binary_matmul_fp32_start[];
@@ -187,14 +197,14 @@ namespace vk_shader {
   extern const unsigned char* spirv_conv2d_fp32;
   extern size_t spirv_conv2d_fp32_size;
 
-  extern const unsigned char* spirv_winograd_input_transform;
-  extern size_t spirv_winograd_input_transform_size;
+  extern const unsigned char* spirv_winograd_input_transform_fp32;
+  extern size_t spirv_winograd_input_transform_fp32_size;
 
-  extern const unsigned char* spirv_winograd_input_transform_bnact;
-  extern size_t spirv_winograd_input_transform_bnact_size;
+  extern const unsigned char* spirv_winograd_input_transform_bnact_fp32;
+  extern size_t spirv_winograd_input_transform_bnact_fp32_size;
 
-  extern const unsigned char* spirv_winograd_output_transform;
-  extern size_t spirv_winograd_output_transform_size;
+  extern const unsigned char* spirv_winograd_output_transform_fp32;
+  extern size_t spirv_winograd_output_transform_fp32_size;
 
   // Convolution layers 3x3 with identity activation function
   // extern const unsigned char* spirv_conv2d_3x3_bn_fp32;
@@ -223,6 +233,12 @@ namespace vk_shader {
   // add_pointwise_fp32 - Element-wise add for skip connections
   extern const unsigned char* spirv_add_pointwise_fp32;
   extern size_t spirv_add_pointwise_fp32_size;
+
+  extern const unsigned char* spirv_add_pointwise_p32s16;
+  extern size_t spirv_add_pointwise_p32s16_size;
+
+  extern const unsigned char* spirv_add_pointwise_p16s16;
+  extern size_t spirv_add_pointwise_p16s16_size;
 
   // matmul_fp32 - Matrix multiplication
   extern const unsigned char* spirv_matmul_fp32;

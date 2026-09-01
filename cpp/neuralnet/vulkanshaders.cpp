@@ -34,16 +34,16 @@ namespace vk_shader {
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
 
   // winograd_input_transform 
-  const unsigned char* spirv_winograd_input_transform = _binary_winograd_input_transform_start;
-  size_t spirv_winograd_input_transform_size = _binary_winograd_input_transform_size;
+  const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
+  size_t spirv_winograd_input_transform_fp32_size = _binary_winograd_input_transform_fp32_size;
 
   // winograd_input_transform_bnact
-  const unsigned char* spirv_winograd_input_transform_bnact = _binary_winograd_input_transform_bnact_start;
-  size_t spirv_winograd_input_transform_bnact_size = _binary_winograd_input_transform_bnact_size;
+  const unsigned char* spirv_winograd_input_transform_bnact_fp32 = _binary_winograd_input_transform_bnact_fp32_start;
+  size_t spirv_winograd_input_transform_bnact_fp32_size = _binary_winograd_input_transform_bnact_fp32_size;
 
   // winograd_output_transform
-  const unsigned char* spirv_winograd_output_transform = _binary_winograd_output_transform_start;
-  size_t spirv_winograd_output_transform_size = _binary_winograd_output_transform_size;
+  const unsigned char* spirv_winograd_output_transform_fp32 = _binary_winograd_output_transform_fp32_start;
+  size_t spirv_winograd_output_transform_fp32_size = _binary_winograd_output_transform_fp32_size;
 
   // add_pointwise_fp32
   const unsigned char* spirv_add_pointwise_fp32 = _binary_add_pointwise_fp32_start;
@@ -159,7 +159,6 @@ namespace vk_shader {
   // transformer_spatial_rms_norm_sum_sq_fp32
   const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32 = _binary_transformer_spatial_rms_norm_sum_sq_fp32_start;
   size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size = _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
-
 
   ComputePipelines::ComputePipelines(
     VkDevice device_,
@@ -426,7 +425,7 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322.size());
     VkSpecializationInfo si3322 = vk_helper::createSpecializationInfo(specData_3322, specEntry);
 
-    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform_fp32, vk_shader::spirv_winograd_input_transform_fp32_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.convX = 5;
     spec.convY = 5;
     spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
@@ -439,7 +438,7 @@ namespace vk_shader {
     spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
     std::vector<int32_t> specData_5544 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
     VkSpecializationInfo si5544 = vk_helper::createSpecializationInfo(specData_5544, specEntry);
-    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform, vk_shader::spirv_winograd_input_transform_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform_fp32, vk_shader::spirv_winograd_input_transform_fp32_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createWinogradInputTransformBnAct() {
@@ -459,22 +458,22 @@ namespace vk_shader {
     std::vector<int32_t> specData_3322_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322_identity.size());
     VkSpecializationInfo si3322_identity = vk_helper::createSpecializationInfo(specData_3322_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_RELU;
     std::vector<int32_t> specData_3322_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_relu = vk_helper::createSpecializationInfo(specData_3322_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_MISH;
     std::vector<int32_t> specData_3322_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_mish = vk_helper::createSpecializationInfo(specData_3322_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.activation = ACTIVATION_MISH_SCALE8;
     std::vector<int32_t> specData_3322_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si3322_mish_scale8 = vk_helper::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     // 5x5
     spec.convX = 5;
@@ -490,19 +489,19 @@ namespace vk_shader {
     spec.activation = ACTIVATION_IDENTITY;
     std::vector<int32_t> specData_55_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_identity = vk_helper::createSpecializationInfo(specData_55_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_RELU;
     std::vector<int32_t> specData_55_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_relu = vk_helper::createSpecializationInfo(specData_55_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_MISH;
     std::vector<int32_t> specData_55_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_mish = vk_helper::createSpecializationInfo(specData_55_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     spec.activation = ACTIVATION_MISH_SCALE8;
     std::vector<int32_t> specData_55_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
     VkSpecializationInfo si55_mish_scale8 = vk_helper::createSpecializationInfo(specData_55_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact, vk_shader::spirv_winograd_input_transform_bnact_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createWinogradOutputTransform() {
@@ -521,7 +520,7 @@ namespace vk_shader {
     std::vector<int32_t> specData_33 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_33.size());
     VkSpecializationInfo si33 = vk_helper::createSpecializationInfo(specData_33, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform_fp32, vk_shader::spirv_winograd_output_transform_fp32_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
 
     spec.localSizeX = tuneParams.conv5x5.outputTransformLocalXSize;
     spec.localSizeY = tuneParams.conv5x5.outputTransformLocalYSize;
@@ -534,7 +533,7 @@ namespace vk_shader {
     spec.convY = 5;
     std::vector<int32_t> specData_55 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
     VkSpecializationInfo si55 = vk_helper::createSpecializationInfo(specData_55, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform, vk_shader::spirv_winograd_output_transform_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform_fp32, vk_shader::spirv_winograd_output_transform_fp32_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   /**

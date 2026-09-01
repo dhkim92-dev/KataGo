@@ -10,11 +10,6 @@
 * _output = [ N, C, H, W ] 
 */
 
-#version 450
-
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-
 #include "common.glsl"
 
 layout(constant_id=3) const int INTILE_YSIZE = 4;
@@ -25,11 +20,11 @@ layout(constant_id=7) const int CONV_YSIZE = 3;
 layout(constant_id=8) const int CONV_XSIZE = 3;
 
 layout(set=0, binding = 0) readonly buffer InputBuffer {
-    real _input[];
+    realstore _input[];
 };
 
 layout(set=0, binding = 1) writeonly buffer OutputBuffer {
-    real _output[];
+    realstore _output[];
 };
 
 layout(push_constant) uniform WinogradOutputRecover{

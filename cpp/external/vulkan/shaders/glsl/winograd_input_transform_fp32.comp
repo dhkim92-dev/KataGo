@@ -2,4 +2,4 @@
 #define PRECISION 32
 #define PRECISION_STORAGE 32
 
-#include "add_pointwise.glsl"
+#include "winograd_input_transform.glsl"
