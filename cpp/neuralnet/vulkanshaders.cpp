@@ -69,21 +69,61 @@ namespace vk_shader {
   const unsigned char* spirv_bn_mask_identity_fp32 = _binary_bn_mask_identity_fp32_start;
   size_t spirv_bn_mask_identity_fp32_size = _binary_bn_mask_identity_fp32_size;
 
+  // bn_mask_identity_p32s16
+  const unsigned char* spirv_bn_mask_identity_p32s16 = _binary_bn_mask_identity_p32s16_start;
+  size_t spirv_bn_mask_identity_p32s16_size = _binary_bn_mask_identity_p32s16_size;
+
+  // bn_mask_identity_p16s16
+  const unsigned char* spirv_bn_mask_identity_p16s16 = _binary_bn_mask_identity_p16s16_start;
+  size_t spirv_bn_mask_identity_p16s16_size = _binary_bn_mask_identity_p16s16_size;
+
   // bn_mask_relu_fp32
   const unsigned char* spirv_bn_mask_relu_fp32 = _binary_bn_mask_relu_fp32_start;
   size_t spirv_bn_mask_relu_fp32_size = _binary_bn_mask_relu_fp32_size;
+
+  // bn_mask_relu_p32s16
+  const unsigned char* spirv_bn_mask_relu_p32s16 = _binary_bn_mask_relu_p32s16_start;
+  size_t spirv_bn_mask_relu_p32s16_size = _binary_bn_mask_relu_p32s16_size;
+
+  // bn_mask_relu_p16s16
+  const unsigned char* spirv_bn_mask_relu_p16s16 = _binary_bn_mask_relu_p16s16_start;
+  size_t spirv_bn_mask_relu_p16s16_size = _binary_bn_mask_relu_p16s16_size;
 
   // bn_mask_mish_fp32
   const unsigned char* spirv_bn_mask_mish_fp32 = _binary_bn_mask_mish_fp32_start;
   size_t spirv_bn_mask_mish_fp32_size = _binary_bn_mask_mish_fp32_size;
 
+  // bn_mask_mish_p32s16
+  const unsigned char* spirv_bn_mask_mish_p32s16 = _binary_bn_mask_mish_p32s16_start;
+  size_t spirv_bn_mask_mish_p32s16_size = _binary_bn_mask_mish_p32s16_size;
+
+  // bn_mask_mish_p16s16
+  const unsigned char* spirv_bn_mask_mish_p16s16 = _binary_bn_mask_mish_p16s16_start;
+  size_t spirv_bn_mask_mish_p16s16_size = _binary_bn_mask_mish_p16s16_size;
+
   // bn_mask_mish_scale8_fp32
   const unsigned char* spirv_bn_mask_mish_scale8_fp32 = _binary_bn_mask_mish_scale8_fp32_start;
   size_t spirv_bn_mask_mish_scale8_fp32_size = _binary_bn_mask_mish_scale8_fp32_size;
 
+  // bn_mask_mish_scale8_p32s16
+  const unsigned char* spirv_bn_mask_mish_scale8_p32s16 = _binary_bn_mask_mish_scale8_p32s16_start;
+  size_t spirv_bn_mask_mish_scale8_p32s16_size = _binary_bn_mask_mish_scale8_p32s16_size;
+
+  // bn_mask_mish_scale8_p16s16
+  const unsigned char* spirv_bn_mask_mish_scale8_p16s16 = _binary_bn_mask_mish_scale8_p16s16_start;
+  size_t spirv_bn_mask_mish_scale8_p16s16_size = _binary_bn_mask_mish_scale8_p16s16_size;
+
   // bn_mask_silu_fp32
   const unsigned char* spirv_bn_mask_silu_fp32 = _binary_bn_mask_silu_fp32_start;
   size_t spirv_bn_mask_silu_fp32_size = _binary_bn_mask_silu_fp32_size;
+
+  // bn_mask_silu_p32s16
+  const unsigned char* spirv_bn_mask_silu_p32s16 = _binary_bn_mask_silu_p32s16_start;
+  size_t spirv_bn_mask_silu_p32s16_size = _binary_bn_mask_silu_p32s16_size;
+
+  // bn_mask_silu_p16s16
+  const unsigned char* spirv_bn_mask_silu_p16s16 = _binary_bn_mask_silu_p16s16_start;
+  size_t spirv_bn_mask_silu_p16s16_size = _binary_bn_mask_silu_p16s16_size;
 
   // sum_channels_fp32
   const unsigned char* spirv_sum_channels_fp32 = _binary_sum_channels_fp32_start;

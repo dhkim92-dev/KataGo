@@ -74,25 +74,67 @@ extern "C" {
   extern const unsigned char* _binary_bn_mask_identity_fp32_end;
   extern const size_t _binary_bn_mask_identity_fp32_size;
 
+  extern const unsigned char _binary_bn_mask_identity_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_identity_p32s16_end;
+  extern const size_t _binary_bn_mask_identity_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_identity_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_identity_p16s16_end;
+  extern const size_t _binary_bn_mask_identity_p16s16_size;
+
   // bn_mask_relu_fp32.glsl
   extern const unsigned char _binary_bn_mask_relu_fp32_start[];
   extern const unsigned char* _binary_bn_mask_relu_fp32_end;
   extern const size_t _binary_bn_mask_relu_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_relu_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_relu_p32s16_end;
+  extern const size_t _binary_bn_mask_relu_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_relu_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_relu_p16s16_end;
+  extern const size_t _binary_bn_mask_relu_p16s16_size;
 
   // bn_mask_mish_fp32.glsl
   extern const unsigned char _binary_bn_mask_mish_fp32_start[];
   extern const unsigned char* _binary_bn_mask_mish_fp32_end;
   extern const size_t _binary_bn_mask_mish_fp32_size;
 
+  extern const unsigned char _binary_bn_mask_mish_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_p32s16_end;
+  extern const size_t _binary_bn_mask_mish_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_mish_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_p16s16_end;
+  extern const size_t _binary_bn_mask_mish_p16s16_size;
+
   // bn_mask_mish_scale8_fp32.glsl
   extern const unsigned char _binary_bn_mask_mish_scale8_fp32_start[];
   extern const unsigned char* _binary_bn_mask_mish_scale8_fp32_end;
   extern const size_t _binary_bn_mask_mish_scale8_fp32_size;
 
+  // bn_mask_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_p32s16_end;
+  extern const size_t _binary_bn_mask_mish_scale8_p32s16_size;
+
+  // bn_mask_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_p16s16_end;
+  extern const size_t _binary_bn_mask_mish_scale8_p16s16_size;
+
   // bn_mask_silu_fp32.glsl
   extern const unsigned char _binary_bn_mask_silu_fp32_start[];
   extern const unsigned char* _binary_bn_mask_silu_fp32_end;
   extern const size_t _binary_bn_mask_silu_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_silu_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_silu_p32s16_end;
+  extern const size_t _binary_bn_mask_silu_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_silu_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_silu_p16s16_end;
+  extern const size_t _binary_bn_mask_silu_p16s16_size;
 
   // global_pooling_channels_fp32.glsl
   extern const unsigned char _binary_global_pooling_channels_fp32_start[];
@@ -263,21 +305,51 @@ namespace vk_shader {
   extern const unsigned char* spirv_bn_mask_identity_fp32;
   extern size_t spirv_bn_mask_identity_fp32_size;
 
+  extern const unsigned char* spirv_bn_mask_identity_p32s16;
+  extern size_t spirv_bn_mask_identity_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_identity_p16s16;
+  extern size_t spirv_bn_mask_identity_p16s16_size;
+
   // bn_mask_relu_fp32 - Batch normalization with mask + ReLU
   extern const unsigned char* spirv_bn_mask_relu_fp32;
   extern size_t spirv_bn_mask_relu_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_relu_p32s16;
+  extern size_t spirv_bn_mask_relu_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_relu_p16s16;
+  extern size_t spirv_bn_mask_relu_p16s16_size;
 
   // bn_mask_mish_fp32 - Batch normalization with mask + Mish
   extern const unsigned char* spirv_bn_mask_mish_fp32;
   extern size_t spirv_bn_mask_mish_fp32_size;
 
+  extern const unsigned char* spirv_bn_mask_mish_p32s16;
+  extern size_t spirv_bn_mask_mish_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_p16s16;
+  extern size_t spirv_bn_mask_mish_p16s16_size;
+
   // bn_mask_mish_scale8_fp32 - Batch normalization with mask + Mish + Scale8
   extern const unsigned char* spirv_bn_mask_mish_scale8_fp32;
   extern size_t spirv_bn_mask_mish_scale8_fp32_size;
 
+  extern const unsigned char* spirv_bn_mask_mish_scale8_p32s16;
+  extern size_t spirv_bn_mask_mish_scale8_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_scale8_p16s16;
+  extern size_t spirv_bn_mask_mish_scale8_p16s16_size;
+
   // bn_mask_silu_fp32 - Batch normalization with mask + silu
   extern const unsigned char* spirv_bn_mask_silu_fp32;
   extern size_t spirv_bn_mask_silu_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_silu_p32s16;
+  extern size_t spirv_bn_mask_silu_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_silu_p16s16;
+  extern size_t spirv_bn_mask_silu_p16s16_size;
 
   // sum_channels_fp32 - Sum over channels
   extern const unsigned char* spirv_sum_channels_fp32;

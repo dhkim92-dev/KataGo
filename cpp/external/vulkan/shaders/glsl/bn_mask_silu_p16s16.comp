@@ -1,0 +1,6 @@
+#version 460
+#define PRECISION 16
+#define PRECISION_STORAGE 16
+#define ACTIVATION 3
+
+#include "bn_mask.glsl"
