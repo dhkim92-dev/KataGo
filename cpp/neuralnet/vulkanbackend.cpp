@@ -356,12 +356,16 @@ struct ComputeContext {
   }
 
   bool isDeviceSupportNHWC(const VulkanDeviceInfo& deviceInfo) {
-    return deviceInfo.properties.apiVersion >= VK_API_VERSION_1_1 &&
-           deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+    // return deviceInfo.properties.apiVersion >= VK_API_VERSION_1_1 &&
+          //  deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+      return false;
   }
 };
 
 
+/**
+ * @deprecated
+ */
 VkDeviceSize getRequiredMemorySize(const LoadedModel* loadedModel) {
   // For simplicity, return a fixed size for now.
   // In future, we can calculate based on model parameters.
@@ -1003,84 +1007,6 @@ struct ConvLayer {
     };
   }
 
-  void doConv2DTiledBnActFp32(
-    VkCommandBuffer& cb,
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output,
-    VulkanBuffer* bnScale,
-    VulkanBuffer* bnBias,
-    VulkanBuffer* mask,
-    uint32_t activation
-  ) {
-    VkResult res = VK_ERROR_UNKNOWN;
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
-    std::string shaderName = (convXSize == 3 && convYSize == 3) ? "Conv2DTiledBnAct3x3Fp32" :
-                             (convXSize == 5 && convYSize == 5) ? "Conv2DTiledBnAct5x5Fp32" :
-                             "Unsupported";
-
-    auto targetPipeline = (convXSize == 3 && convYSize == 3) ?
-                          pipelines->conv2dTiledBnAct3x3Fp32 :
-                          (convXSize == 5 && convYSize == 5) ?
-                          pipelines->conv2dTiledBnAct5x5Fp32 : 
-                          throw StringError("Conv2DTiledBnActFp32: Unsupported conv size " + std::to_string(convXSize) + "x" + std::to_string(convYSize) + " in layer " + name);
-
-    if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice,
-        targetPipeline.descriptorSetLayout,
-        &res
-      );
-      CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
-    }
-
-    // update descriptor set
-    std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, bnScale),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, bnBias),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 5, mask)
-    };
-    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
-    vkCmdBindDescriptorSets(
-      cb,
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      targetPipeline.layout,
-      0,
-      1,
-      &descriptorSet,
-      0,
-      nullptr
-    );
-    auto pushConstants = Conv2DTiledBnActParams();
-    pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-    pushConstants.inChannels = static_cast<uint32_t>(inChannels);
-    pushConstants.outChannels = static_cast<uint32_t>(outChannels);
-    pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
-    pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
-    pushConstants.filterH = static_cast<uint32_t>(convYSize);
-    pushConstants.filterW = static_cast<uint32_t>(convXSize);
-    pushConstants.activation = activation;
-
-    vkCmdPushConstants(cb, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Conv2DTiledBnActParams), &pushConstants);
-
-    const uint32_t outputTileY = 8u;
-    uint32_t wgCountX = (pushConstants.nnXLen + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
-    uint32_t wgCountY = (pushConstants.nnYLen + outputTileY - 1u) / outputTileY;
-    uint32_t ocGroupsPerBatch = (pushConstants.outChannels + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
-    uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
-
-    SHADER_PROFILE_START(shaderName, cb);
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    SHADER_PROFILE_END(shaderName, cb);
-    vk_helper::barrierCommandBufferForBuffer(cb, output);
-    vk_helper::barrierCommandBuffer(cb);
-  }
-
   // void doConv2DTiledFp32(
   //   VkCommandBuffer& cb,
   //   int batchSize,
@@ -1484,7 +1410,6 @@ struct ConvLayer {
     assert(bnLayer != nullptr);
     assert(mask != nullptr);
     doWinogradConvolutionBnActMask(cb, batchSize, input, convWorkspace1, convWorkspace2, output, bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation);
-    // doConv2DTiledBnActFp32(cb, batchSize, input, output, bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation);
   }
 
   /**
@@ -4627,8 +4552,8 @@ ComputeContext* NeuralNet::createComputeContext(
     throw StringError("NeuralNet::createComputeContext - loaded model was null");
   if(loadedModel->modelDesc.modelVersion > NNModelVersion::latestModelVersionImplemented)
     throw StringError("Vulkan backend does not support this model version");
-  if(useFP16Mode == enabled_t::True && logger != nullptr)
-    logger->write("Vulkan backend supports FP32 execution only; ignoring useFP16=true");
+  // if(useFP16Mode == enabled_t::True && logger != nullptr)
+    // logger->write("Vulkan backend supports FP32 execution only; ignoring useFP16=true");
 
   std::string tunerFile;
   if(cfg.contains("vulkanTunerFile"))
@@ -4642,11 +4567,14 @@ ComputeContext* NeuralNet::createComputeContext(
     }
   }
 
+  enabled_t useFP16 = useFP16Mode;
+  enabled_t useNHWC = enabled_t::False;
+
   return new ComputeContext(
     nnXLen,
     nnYLen,
-    enabled_t::False,
-    enabled_t::False,
+    useFP16,
+    useNHWC,
     std::vector<uint32_t>(gpuIdxs.begin(), gpuIdxs.end()),
     logger,
     tunerFile,

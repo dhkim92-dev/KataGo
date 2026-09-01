@@ -3,6 +3,7 @@
  * @author Dohoon Kim(https://github.com/dhkim92-dev)
  * @details connect external symbols data to cpp variables
  */
+#ifdef USE_VULKAN_BACKEND
 #include "../neuralnet/vulkanshaders.h"
 
 using namespace vk_shader;
@@ -31,14 +32,6 @@ namespace vk_shader {
   // conv2d_fp32
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
-
-  // conv2d_tiled_bn_act_3x3_fp32
-  const unsigned char* spirv_conv2d_tiled_bn_act_3x3_fp32 = _binary_conv2d_tiled_bn_act_3x3_fp32_start;
-  size_t spirv_conv2d_tiled_bn_act_3x3_fp32_size = _binary_conv2d_tiled_bn_act_3x3_fp32_size;
-
-  // conv2d_tiled_bn_act_5x5_fp32
-  const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32 = _binary_conv2d_tiled_bn_act_5x5_fp32_start;
-  size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size = _binary_conv2d_tiled_bn_act_5x5_fp32_size;
 
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform = _binary_winograd_input_transform_start;
@@ -200,8 +193,6 @@ namespace vk_shader {
   void ComputePipelines::createPipelines(int qHeadDim, int vHeadDim) {
     // Tile base conv no longer used.
     // createConv2dFp32();
-    // createConv2dTiledBnAct3x3Fp32();
-    // createConv2dTiledBnAct5x5Fp32();
     createWinogradInputTransform();
     createWinogradInputTransformBnAct();
     createWinogradOutputTransform();
@@ -246,8 +237,6 @@ namespace vk_shader {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
-    destroyPipeline(conv2dTiledBnAct3x3Fp32);
-    destroyPipeline(conv2dTiledBnAct5x5Fp32);
     // destroyPipeline(conv2d3x3BnFp32);
     // destroyPipeline(conv2d3x3BnReluFp32);
     // destroyPipeline(conv2d5x5BnFp32);
@@ -418,18 +407,6 @@ namespace vk_shader {
     // auto spec = Conv2DSpec();
     // SpecializationData specData(spec);
     // createPipeline("Conv2dFp32", vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  // }
-
-  // void ComputePipelines::createConv2dTiledBnAct3x3Fp32() {
-    // auto spec = Conv2DTiledBnAct3x3Spec();
-    // SpecializationData specData(spec);
-    // createPipeline("Conv2dTiledBnAct3x3Fp32", vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32, vk_shader::spirv_conv2d_tiled_bn_act_3x3_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct3x3Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  // }
-
-  // void ComputePipelines::createConv2dTiledBnAct5x5Fp32() {
-    // auto spec = Conv2DTiledBnAct5x5Spec();
-    // SpecializationData specData(spec);
-    // createPipeline("Conv2dTiledBnAct5x5Fp32", vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32, vk_shader::spirv_conv2d_tiled_bn_act_5x5_fp32_size, 6, sizeof(Conv2DTiledBnActParams), conv2dTiledBnAct5x5Fp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   // }
 
   void ComputePipelines::createWinogradInputTransform() {
@@ -884,3 +861,4 @@ namespace vk_shader {
     createPipeline("TransformerSpatialRMSNormSumSq", vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32, vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), transformerSpatialRMSNormSumSq, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 }
+#endif

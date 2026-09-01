@@ -20,16 +20,6 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_fp32_end;
   extern const size_t _binary_conv2d_fp32_size;
 
-  // conv2d_tiled_bn_act_fp32.glsl
-  extern const unsigned char _binary_conv2d_tiled_bn_act_3x3_fp32_start[];
-  extern const unsigned char* _binary_conv2d_tiled_bn_act_3x3_fp32_end;
-  extern const size_t _binary_conv2d_tiled_bn_act_3x3_fp32_size;
-
-  // conv2d_tiled_bn_act_5x5_fp32.glsl
-  extern const unsigned char _binary_conv2d_tiled_bn_act_5x5_fp32_start[];
-  extern const unsigned char* _binary_conv2d_tiled_bn_act_5x5_fp32_end;
-  extern const size_t _binary_conv2d_tiled_bn_act_5x5_fp32_size;
-
   // winograd_input_transform.glsl
   extern const unsigned char _binary_winograd_input_transform_start[];
   extern const unsigned char* _binary_winograd_input_transform_end;
@@ -196,12 +186,6 @@ namespace vk_shader {
   // conv2d_fp32 - Direct convolution layer
   extern const unsigned char* spirv_conv2d_fp32;
   extern size_t spirv_conv2d_fp32_size;
-
-  extern const unsigned char* spirv_conv2d_tiled_bn_act_3x3_fp32;
-  extern size_t spirv_conv2d_tiled_bn_act_3x3_fp32_size;
-
-  extern const unsigned char* spirv_conv2d_tiled_bn_act_5x5_fp32;
-  extern size_t spirv_conv2d_tiled_bn_act_5x5_fp32_size;
 
   extern const unsigned char* spirv_winograd_input_transform;
   extern size_t spirv_winograd_input_transform_size;
@@ -396,18 +380,6 @@ struct LocalDimHash {
     struct Conv2DSpec {
       uint32_t localSizeX = 16;
       uint32_t localSizeY = 8;
-      uint32_t localSizeZ = 1;
-    };
-
-    struct Conv2DTiledBnAct3x3Spec {
-      uint32_t localSizeX = 16;
-      uint32_t localSizeY = 16;
-      uint32_t localSizeZ = 1;
-    };
-
-    struct Conv2DTiledBnAct5x5Spec {
-      uint32_t localSizeX = 16;
-      uint32_t localSizeY = 16;
       uint32_t localSizeZ = 1;
     };
 
@@ -624,17 +596,6 @@ struct LocalDimHash {
       int filterXRadius;
       int filterYRadius;
       int xyStride;
-    };
-
-    struct Conv2DTiledBnActParams {
-      uint32_t batchSize;
-      uint32_t inChannels;
-      uint32_t outChannels;
-      uint32_t nnYLen;
-      uint32_t nnXLen;
-      uint32_t filterH;
-      uint32_t filterW;
-      uint32_t activation; // 0: Identity, 1: ReLU, 2: Mish, 3: Mish + Scale8
     };
 
     struct WinogradInputTransformParams {
@@ -1033,9 +994,6 @@ struct LocalDimHash {
 
     // Conv2D pipelines
     Pipeline conv2dFp32; 
-    Pipeline conv2dTiledBnAct3x3Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
-    Pipeline conv2dTiledBnAct5x5Fp32; // Conv2d + Tiled + BatchNorm + Activation fused pipeline
-
     Pipeline winogradInputTransform3x3;
     Pipeline winogradInputTransform5x5;
 
@@ -1125,16 +1083,6 @@ struct LocalDimHash {
      * @brief Create a Conv2d Fp32 object
     */
     // void createConv2dFp32();
-
-    /**
-     * @brief Create Conv2d Tiled Bn + Activation 3x3 Fp32 object
-     */
-    // void createConv2dTiledBnAct3x3Fp32();
-
-    /**
-     * @brief Create Conv2d Tiled Bn + Activation 5x5 Fp32 object
-     */
-    // void createConv2dTiledBnAct5x5Fp32();
 
     void createWinogradInputTransform();
 

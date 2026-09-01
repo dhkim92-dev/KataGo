@@ -22,13 +22,13 @@
 layout(constant_id=3) const int FILTER_XRADIUS = 1;
 layout(constant_id=4) const int FILTER_YRADIUS = 1;
 
-layout(set = 0, binding = 0) readonly buffer input_buf {
+layout(set = 0, binding = 0) restrict readonly buffer input_buf {
   realstore d_input[];
 };
-layout(set = 0, binding = 1) readonly buffer filter_buf {
+layout(set = 0, binding = 1) restrict readonly buffer filter_buf {
   realstore d_filter[];
 };
-layout(set = 0, binding = 2) buffer output_buf{
+layout(set = 0, binding = 2) restrict buffer output_buf{
   realstore d_output[];
 };
 

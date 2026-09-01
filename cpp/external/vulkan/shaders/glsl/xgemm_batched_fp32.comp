@@ -58,9 +58,18 @@ layout(push_constant) uniform BatchedXGEMMParams {
     int c_two;
 }params;
 
-READ_ONLY_GLOBAL(0, 0, real4, agm);
-READ_ONLY_GLOBAL(0, 1, real4, bgm);
-READ_WRITE_GLOBAL(0, 2, real4, cgm);
+// READ_ONLY_GLOBAL(0, 0, real4, agm);
+layout(set = 0, binding = 0) readonly buffer A {
+  real4 agm[];
+};
+
+layout(set = 0, binding = 1) readonly buffer B {
+  real4 bgm[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer C {
+  real4 cgm[];
+};
 
 shared real4 alm[(_MWG * _KWG) / VWM];
 shared real4 blm[(_NWG * _KWG) / VWN];
@@ -71,7 +80,6 @@ shared real4 blm[(_NWG * _KWG) / VWN];
 #include "xgemm.glsl"
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-// layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
 void main() {
   const int batch = GroupId2();
 
