@@ -1,5 +1,5 @@
 #version 460
-#define PRECISION 32
-#define PRECISION_STORAGE 32
+#define PRECISION 16
+#define PRECISION_STORAGE 16
 
 #include "extract_channel0_nchw.glsl"

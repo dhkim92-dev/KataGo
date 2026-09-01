@@ -167,6 +167,14 @@ namespace vk_shader {
   const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;
   size_t spirv_extract_channel0_nchw_fp32_size = _binary_extract_channel0_nchw_fp32_size;
 
+  // extract_channel0_nchw_p32s16
+  const unsigned char* spirv_extract_channel0_nchw_p32s16 = _binary_extract_channel0_nchw_p32s16_start;
+  size_t spirv_extract_channel0_nchw_p32s16_size = _binary_extract_channel0_nchw_p32s16_size;
+
+  // extract_channel0_nchw_p16s16
+  const unsigned char* spirv_extract_channel0_nchw_p16s16 = _binary_extract_channel0_nchw_p16s16_start;
+  size_t spirv_extract_channel0_nchw_p16s16_size = _binary_extract_channel0_nchw_p16s16_size;
+
   // transformer_rms_norm_fp32
   const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
   size_t spirv_transformer_rms_norm_fp32_size = _binary_transformer_rms_norm_fp32_size;

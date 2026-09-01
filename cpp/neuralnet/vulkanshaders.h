@@ -186,6 +186,16 @@ extern "C" {
   extern const unsigned char* _binary_extract_channel0_nchw_fp32_end;
   extern const size_t _binary_extract_channel0_nchw_fp32_size;
 
+  // extract_channel0_nchw_p32s16
+  extern const unsigned char _binary_extract_channel0_nchw_p32s16_start[];
+  extern const unsigned char* _binary_extract_channel0_nchw_p32s16_end;
+  extern const size_t _binary_extract_channel0_nchw_p32s16_size;
+
+  // extract_channel0_nchw_p16s16
+  extern const unsigned char _binary_extract_channel0_nchw_p16s16_start[];
+  extern const unsigned char* _binary_extract_channel0_nchw_p16s16_end;
+  extern const size_t _binary_extract_channel0_nchw_p16s16_size;
+
   // transformer_rms_norm_fp32
   extern const unsigned char _binary_transformer_rms_norm_fp32_start[];
   extern const unsigned char* _binary_transformer_rms_norm_fp32_end;
@@ -390,6 +400,12 @@ namespace vk_shader {
   // Extract channel 0 from NCHW fp32
   extern const unsigned char* spirv_extract_channel0_nchw_fp32;
   extern size_t spirv_extract_channel0_nchw_fp32_size;
+
+  extern const unsigned char* spirv_extract_channel0_nchw_p32s16;
+  extern size_t spirv_extract_channel0_nchw_p32s16_size;
+
+  extern const unsigned char* spirv_extract_channel0_nchw_p16s16;
+  extern size_t spirv_extract_channel0_nchw_p16s16_size;
 
   // Transformer RMS Norm f32
   extern const unsigned char* spirv_transformer_rms_norm_fp32;
