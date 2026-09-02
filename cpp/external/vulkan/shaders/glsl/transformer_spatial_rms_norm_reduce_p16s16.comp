@@ -1,0 +1,5 @@
+#version 460
+#define PRECISION 16
+#define PRECISION_STORAGE 16
+
+#include "transformer_spatial_rms_norm_reduce.glsl"

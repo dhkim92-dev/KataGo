@@ -20,6 +20,16 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_fp32_end;
   extern const size_t _binary_conv2d_fp32_size;
 
+  // conv2d_p32s16.glsl
+  extern const unsigned char _binary_conv2d_p32s16_start[];
+  extern const unsigned char* _binary_conv2d_p32s16_end;
+  extern const size_t _binary_conv2d_p32s16_size;
+
+  // conv2d_p16s16.glsl
+  extern const unsigned char _binary_conv2d_p16s16_start[];
+  extern const unsigned char* _binary_conv2d_p16s16_end;
+  extern const size_t _binary_conv2d_p16s16_size;
+
   // winograd_input_transform.glsl
   extern const unsigned char _binary_winograd_input_transform_fp32_start[];
   extern const unsigned char* _binary_winograd_input_transform_fp32_end;
@@ -166,15 +176,30 @@ extern "C" {
   extern const unsigned char* _binary_global_pooling_channels_fp32_end;
   extern const size_t _binary_global_pooling_channels_fp32_size;
 
+  // global_pooling_channels_p32s16.glsl
+  extern const unsigned char _binary_global_pooling_channels_p32s16_start[];
+  extern const unsigned char* _binary_global_pooling_channels_p32s16_end;
+  extern const size_t _binary_global_pooling_channels_p32s16_size;
+
   // value_head_pool_channels_fp32.glsl
   extern const unsigned char _binary_value_head_pool_channels_fp32_start[];
   extern const unsigned char* _binary_value_head_pool_channels_fp32_end;
   extern const size_t _binary_value_head_pool_channels_fp32_size;
 
+  // value_head_pool_channels_p32s16.glsl
+  extern const unsigned char _binary_value_head_pool_channels_p32s16_start[];
+  extern const unsigned char* _binary_value_head_pool_channels_p32s16_end;
+  extern const size_t _binary_value_head_pool_channels_p32s16_size;
+
   // sum_channels_fp32.glsl
   extern const unsigned char _binary_sum_channels_fp32_start[];
   extern const unsigned char* _binary_sum_channels_fp32_end;
   extern const size_t _binary_sum_channels_fp32_size;
+
+  // sum_channels_p32s16.glsl
+  extern const unsigned char _binary_sum_channels_p32s16_start[];
+  extern const unsigned char* _binary_sum_channels_p32s16_end;
+  extern const size_t _binary_sum_channels_p32s16_size;
 
   // add_channel_bias_nchw_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nchw_fp32_start[];
@@ -226,40 +251,104 @@ extern "C" {
   extern const unsigned char* _binary_transformer_rms_norm_fp32_end;
   extern const size_t _binary_transformer_rms_norm_fp32_size;
 
+  extern const unsigned char _binary_transformer_rms_norm_p32s16_start[];
+  extern const unsigned char* _binary_transformer_rms_norm_p32s16_end;
+  extern const size_t _binary_transformer_rms_norm_p32s16_size;
+
+  extern const unsigned char _binary_transformer_rms_norm_p16s16_start[];
+  extern const unsigned char* _binary_transformer_rms_norm_p16s16_end;
+  extern const size_t _binary_transformer_rms_norm_p16s16_size;
+
   // transformer_rope_fp32
   extern const unsigned char _binary_transformer_apply_rope_fp32_start[];
   extern const unsigned char* _binary_transformer_apply_rope_fp32_end;
   extern const size_t _binary_transformer_apply_rope_fp32_size;
+
+  extern const unsigned char _binary_transformer_apply_rope_p32s16_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_p32s16_end;
+  extern const size_t _binary_transformer_apply_rope_p32s16_size;
+
+  extern const unsigned char _binary_transformer_apply_rope_p16s16_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_p16s16_end;
+  extern const size_t _binary_transformer_apply_rope_p16s16_size;
 
   // transformer_scale_dot_product_naive
   extern const unsigned char _binary_transformer_scale_dot_product_naive_fp32_start[];
   extern const unsigned char* _binary_transformer_scale_dot_product_naive_fp32_end;
   extern const size_t _binary_transformer_scale_dot_product_naive_fp32_size;
 
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_p16s16_size;
+
   // transformer_scale_dot_product
   extern const unsigned char _binary_transformer_scale_dot_product_fp32_start[];
   extern const unsigned char* _binary_transformer_scale_dot_product_fp32_end;
   extern const size_t _binary_transformer_scale_dot_product_fp32_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_p16s16_size;
 
   // transformer_swiglu_fp32
   extern const unsigned char _binary_transformer_swiglu_fp32_start[];
   extern const unsigned char* _binary_transformer_swiglu_fp32_end;
   extern const size_t _binary_transformer_swiglu_fp32_size;
 
+  extern const unsigned char _binary_transformer_swiglu_p32s16_start[];
+  extern const unsigned char* _binary_transformer_swiglu_p32s16_end;
+  extern const size_t _binary_transformer_swiglu_p32s16_size;
+
+  extern const unsigned char _binary_transformer_swiglu_p16s16_start[];
+  extern const unsigned char* _binary_transformer_swiglu_p16s16_end;
+  extern const size_t _binary_transformer_swiglu_p16s16_size;
+
   // transformer_spatial_rms_norm_apply_fp32
   extern const unsigned char _binary_transformer_spatial_rms_norm_apply_fp32_start[];
   extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_fp32_end;
   extern const size_t _binary_transformer_spatial_rms_norm_apply_fp32_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_p16s16_size;
 
   // transformer_spatial_rms_norm_reduce_fp32
   extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_fp32_start[];
   extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_fp32_end;
   extern const size_t _binary_transformer_spatial_rms_norm_reduce_fp32_size;
 
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_p16s16_size;
+
   // transformer_spatial_rms_norm_sum_sq_fp32
   extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_fp32_start[];
   extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_fp32_end;
   extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_p16s16_size;
 
 }
 
@@ -273,6 +362,12 @@ namespace vk_shader {
   // conv2d_fp32 - Direct convolution layer
   extern const unsigned char* spirv_conv2d_fp32;
   extern size_t spirv_conv2d_fp32_size;
+
+  extern const unsigned char* spirv_conv2d_p32s16;
+  extern size_t spirv_conv2d_p32s16_size;
+
+  extern const unsigned char* spirv_conv2d_p16s16;
+  extern size_t spirv_conv2d_p16s16_size;
 
   extern const unsigned char* spirv_winograd_input_transform_fp32;
   extern size_t spirv_winograd_input_transform_fp32_size;
@@ -404,13 +499,22 @@ namespace vk_shader {
   extern const unsigned char* spirv_sum_channels_fp32;
   extern size_t spirv_sum_channels_fp32_size;
 
+  extern const unsigned char* spirv_sum_channels_p32s16;
+  extern size_t spirv_sum_channels_p32s16_size;
+
   // global_pooling_channels_fp32 - Global pooling with mask
   extern const unsigned char* spirv_global_pooling_channels_fp32;
   extern size_t spirv_global_pooling_channels_fp32_size;
 
+  extern const unsigned char* spirv_global_pooling_channels_p32s16;
+  extern size_t spirv_global_pooling_channels_p32s16_size;
+
   // value_head_pool_channels_fp32 - Value head pooling
   extern const unsigned char* spirv_value_head_pool_channels_fp32;
   extern size_t spirv_value_head_pool_channels_fp32_size;
+
+  extern const unsigned char* spirv_value_head_pool_channels_p32s16;
+  extern size_t spirv_value_head_pool_channels_p32s16_size;
 
   // add_channel_bias_nchw_fp32 - Add channel bias (identity)
   extern const unsigned char* spirv_add_channel_bias_nchw_fp32;
@@ -449,34 +553,66 @@ namespace vk_shader {
   // Transformer RMS Norm f32
   extern const unsigned char* spirv_transformer_rms_norm_fp32;
   extern size_t spirv_transformer_rms_norm_fp32_size;
+  extern const unsigned char* spirv_transformer_rms_norm_p32s16;
+  extern size_t spirv_transformer_rms_norm_p32s16_size;
+  extern const unsigned char* spirv_transformer_rms_norm_p16s16;
+  extern size_t spirv_transformer_rms_norm_p16s16_size;
 
   // Transformer apply RoPE fp32
   extern const unsigned char* spirv_transformer_apply_rope_fp32;
   extern size_t spirv_transformer_apply_rope_fp32_size;;
+  extern const unsigned char* spirv_transformer_apply_rope_p32s16;
+  extern size_t spirv_transformer_apply_rope_p32s16_size;
+  extern const unsigned char* spirv_transformer_apply_rope_p16s16;
+  extern size_t spirv_transformer_apply_rope_p16s16_size;
 
   // Transformer scale dot product naive
   extern const unsigned char* spirv_transformer_scale_dot_product_naive_fp32;
   extern size_t spirv_transformer_scale_dot_product_naive_fp32_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_naive_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_naive_p16s16_size;
 
   // Transformer scale dot product
   extern const unsigned char* spirv_transformer_scale_dot_product_fp32;
   extern size_t spirv_transformer_scale_dot_product_fp32_size;;
+  extern const unsigned char* spirv_transformer_scale_dot_product_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_p16s16_size;
 
   // Transformer SwiGLU fp32
   extern const unsigned char* spirv_transformer_swiglu_fp32;
   extern size_t spirv_transformer_swiglu_fp32_size;
+  extern const unsigned char* spirv_transformer_swiglu_p32s16;
+  extern size_t spirv_transformer_swiglu_p32s16_size;
+  extern const unsigned char* spirv_transformer_swiglu_p16s16;
+  extern size_t spirv_transformer_swiglu_p16s16_size;
 
   // Transformer spatial RMS norm apply fp32
   extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_fp32;
   extern size_t spirv_transformer_spatial_rms_norm_apply_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_p16s16_size;
 
   // Transformer spatial RMS norm reduce fp32
   extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_fp32;
   extern size_t spirv_transformer_spatial_rms_norm_reduce_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_p16s16_size;
 
   // Transformer spatial RMS norm sum square fp32
   extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32;
   extern size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size;
 
   struct LocalDim {
     int x;

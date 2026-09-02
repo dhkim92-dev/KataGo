@@ -16,11 +16,11 @@ layout(push_constant) uniform TransformerRMSNormParams {
 };
 
 layout(set = 0, binding = 0) buffer readonly input_buffer {
-    real d_input[];// NCHW
+    realstore d_input[];// NCHW
 };
 
 layout(set = 0, binding = 1) buffer writeonly output_buffer {
-    real d_output[]; // NCHW
+    realstore d_output[]; // NCHW
 };
 
 layout(set = 0, binding = 2) buffer readonly weight_buffer {
@@ -32,7 +32,7 @@ layout(set = 0, binding = 3) buffer readonly beta_buffer {
 };
 
 layout(set = 0, binding = 4) buffer readonly mask_buffer {
-    real mask[]; // NHW
+    realstore mask[]; // NHW
 };
 
 shared float partials[WG_XY_SIZE * WG_C_SIZE];

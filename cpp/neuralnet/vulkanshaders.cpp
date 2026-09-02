@@ -33,6 +33,14 @@ namespace vk_shader {
   const unsigned char* spirv_conv2d_fp32 = _binary_conv2d_fp32_start;
   size_t spirv_conv2d_fp32_size = _binary_conv2d_fp32_size;
 
+  // conv2d_p32s16
+  const unsigned char* spirv_conv2d_p32s16 = _binary_conv2d_p32s16_start;
+  size_t spirv_conv2d_p32s16_size = _binary_conv2d_p32s16_size;
+
+  // conv2d_p16s16
+  const unsigned char* spirv_conv2d_p16s16 = _binary_conv2d_p16s16_start;
+  size_t spirv_conv2d_p16s16_size = _binary_conv2d_p16s16_size;
+
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
   size_t spirv_winograd_input_transform_fp32_size = _binary_winograd_input_transform_fp32_size;
@@ -149,13 +157,25 @@ namespace vk_shader {
   const unsigned char* spirv_sum_channels_fp32 = _binary_sum_channels_fp32_start;
   size_t spirv_sum_channels_fp32_size = _binary_sum_channels_fp32_size;
 
+  // sum_channels_p32s16
+  const unsigned char* spirv_sum_channels_p32s16 = _binary_sum_channels_p32s16_start;
+  size_t spirv_sum_channels_p32s16_size = _binary_sum_channels_p32s16_size;
+
   // global_pooling_channels_fp32
   const unsigned char* spirv_global_pooling_channels_fp32 = _binary_global_pooling_channels_fp32_start;
   size_t spirv_global_pooling_channels_fp32_size = _binary_global_pooling_channels_fp32_size;
 
+  // global_pooling_channels_p32s16
+  const unsigned char* spirv_global_pooling_channels_p32s16 = _binary_global_pooling_channels_p32s16_start;
+  size_t spirv_global_pooling_channels_p32s16_size = _binary_global_pooling_channels_p32s16_size;
+
   // value_head_pool_channels_fp32
   const unsigned char* spirv_value_head_pool_channels_fp32 = _binary_value_head_pool_channels_fp32_start;
   size_t spirv_value_head_pool_channels_fp32_size = _binary_value_head_pool_channels_fp32_size;
+
+  // value_head_pool_channels_p32s16
+  const unsigned char* spirv_value_head_pool_channels_p32s16 = _binary_value_head_pool_channels_p32s16_start;
+  size_t spirv_value_head_pool_channels_p32s16_size = _binary_value_head_pool_channels_p32s16_size;
 
   // add_channel_bias_nchw_fp32
   const unsigned char* spirv_add_channel_bias_nchw_fp32 = _binary_add_channel_bias_nchw_fp32_start;
@@ -198,35 +218,67 @@ namespace vk_shader {
   // transformer_rms_norm_fp32
   const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
   size_t spirv_transformer_rms_norm_fp32_size = _binary_transformer_rms_norm_fp32_size;
+  const unsigned char* spirv_transformer_rms_norm_p32s16 = _binary_transformer_rms_norm_p32s16_start;
+  size_t spirv_transformer_rms_norm_p32s16_size = _binary_transformer_rms_norm_p32s16_size;
+  const unsigned char* spirv_transformer_rms_norm_p16s16 = _binary_transformer_rms_norm_p16s16_start;
+  size_t spirv_transformer_rms_norm_p16s16_size = _binary_transformer_rms_norm_p16s16_size;
 
   // transformer_rope_fp32
   const unsigned char* spirv_transformer_apply_rope_fp32 = _binary_transformer_apply_rope_fp32_start;
   size_t spirv_transformer_apply_rope_fp32_size = _binary_transformer_apply_rope_fp32_size;
+  const unsigned char* spirv_transformer_apply_rope_p32s16 = _binary_transformer_apply_rope_p32s16_start;
+  size_t spirv_transformer_apply_rope_p32s16_size = _binary_transformer_apply_rope_p32s16_size;
+  const unsigned char* spirv_transformer_apply_rope_p16s16 = _binary_transformer_apply_rope_p16s16_start;
+  size_t spirv_transformer_apply_rope_p16s16_size = _binary_transformer_apply_rope_p16s16_size;
 
   // transformer_scale_dot_product_fp32
 
   const unsigned char* spirv_transformer_scale_dot_product_fp32 = _binary_transformer_scale_dot_product_fp32_start;
   size_t spirv_transformer_scale_dot_product_fp32_size = _binary_transformer_scale_dot_product_fp32_size;
+  const unsigned char* spirv_transformer_scale_dot_product_p32s16 = _binary_transformer_scale_dot_product_p32s16_start;
+  size_t spirv_transformer_scale_dot_product_p32s16_size = _binary_transformer_scale_dot_product_p32s16_size;
+  const unsigned char* spirv_transformer_scale_dot_product_p16s16 = _binary_transformer_scale_dot_product_p16s16_start;
+  size_t spirv_transformer_scale_dot_product_p16s16_size = _binary_transformer_scale_dot_product_p16s16_size;
 
   // transformer_scale_dot_product_naive_fp32
   const unsigned char* spirv_transformer_scale_dot_product_naive_fp32 = _binary_transformer_scale_dot_product_naive_fp32_start;
   size_t spirv_transformer_scale_dot_product_naive_fp32_size = _binary_transformer_scale_dot_product_naive_fp32_size;
+  const unsigned char* spirv_transformer_scale_dot_product_naive_p32s16 = _binary_transformer_scale_dot_product_naive_p32s16_start;
+  size_t spirv_transformer_scale_dot_product_naive_p32s16_size = _binary_transformer_scale_dot_product_naive_p32s16_size;
+  const unsigned char* spirv_transformer_scale_dot_product_naive_p16s16 = _binary_transformer_scale_dot_product_naive_p16s16_start;
+  size_t spirv_transformer_scale_dot_product_naive_p16s16_size = _binary_transformer_scale_dot_product_naive_p16s16_size;
 
   // transformer_swiglu_fp32
   const unsigned char* spirv_transformer_swiglu_fp32 = _binary_transformer_swiglu_fp32_start;
   size_t spirv_transformer_swiglu_fp32_size = _binary_transformer_swiglu_fp32_size;
+  const unsigned char* spirv_transformer_swiglu_p32s16 = _binary_transformer_swiglu_p32s16_start;
+  size_t spirv_transformer_swiglu_p32s16_size = _binary_transformer_swiglu_p32s16_size;
+  const unsigned char* spirv_transformer_swiglu_p16s16 = _binary_transformer_swiglu_p16s16_start;
+  size_t spirv_transformer_swiglu_p16s16_size = _binary_transformer_swiglu_p16s16_size;
 
   // transformer_spatial_rms_norm_apply_fp32
   const unsigned char* spirv_transformer_spatial_rms_norm_apply_fp32 = _binary_transformer_spatial_rms_norm_apply_fp32_start;
   size_t spirv_transformer_spatial_rms_norm_apply_fp32_size = _binary_transformer_spatial_rms_norm_apply_fp32_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_apply_p32s16 = _binary_transformer_spatial_rms_norm_apply_p32s16_start;
+  size_t spirv_transformer_spatial_rms_norm_apply_p32s16_size = _binary_transformer_spatial_rms_norm_apply_p32s16_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_apply_p16s16 = _binary_transformer_spatial_rms_norm_apply_p16s16_start;
+  size_t spirv_transformer_spatial_rms_norm_apply_p16s16_size = _binary_transformer_spatial_rms_norm_apply_p16s16_size;
 
   // transformer_spatial_rms_norm_reduce_fp32
   const unsigned char* spirv_transformer_spatial_rms_norm_reduce_fp32 = _binary_transformer_spatial_rms_norm_reduce_fp32_start;
   size_t spirv_transformer_spatial_rms_norm_reduce_fp32_size = _binary_transformer_spatial_rms_norm_reduce_fp32_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p32s16 = _binary_transformer_spatial_rms_norm_reduce_p32s16_start;
+  size_t spirv_transformer_spatial_rms_norm_reduce_p32s16_size = _binary_transformer_spatial_rms_norm_reduce_p32s16_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p16s16 = _binary_transformer_spatial_rms_norm_reduce_p16s16_start;
+  size_t spirv_transformer_spatial_rms_norm_reduce_p16s16_size = _binary_transformer_spatial_rms_norm_reduce_p16s16_size;
 
   // transformer_spatial_rms_norm_sum_sq_fp32
   const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32 = _binary_transformer_spatial_rms_norm_sum_sq_fp32_start;
   size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size = _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p32s16 = _binary_transformer_spatial_rms_norm_sum_sq_p32s16_start;
+  size_t spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size = _binary_transformer_spatial_rms_norm_sum_sq_p32s16_size;
+  const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p16s16 = _binary_transformer_spatial_rms_norm_sum_sq_p16s16_start;
+  size_t spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size = _binary_transformer_spatial_rms_norm_sum_sq_p16s16_size;
 
   ComputePipelines::ComputePipelines(
     VkDevice device_,

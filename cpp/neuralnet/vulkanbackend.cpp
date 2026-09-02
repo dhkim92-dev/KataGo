@@ -289,12 +289,8 @@ struct ComputeContext {
         //       VK_KHR_cooperative_matrix extension is required for tensor cores usage.
 
         // Check for NHWC support if requested
-        if ( usingNHWCMode == enabled_t::True && !isDeviceSupportNHWC(deviceInfo) ) {
-          throw StringError("Requested NHWC mode but device " + deviceInfo.deviceName + " does not support it");
-        }
-
-        if ( usingNHWCMode != enabled_t::False && isDeviceSupportNHWC(deviceInfo) ) {
-          requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+        if ( usingNHWCMode != enabled_t::False ) {
+          throw StringError("Vulkan backend doesn't support NHWC format");
         }
 
         VulkanDevice* vulkanDevice = vk_helper::createVulkanDevice(

@@ -1,0 +1,71 @@
+#include "common.glsl"
+#include "functions.glsl"
+
+layout(constant_id=3) const int XYSTRIDE=1;
+layout(constant_id=4) const int CHANNELSTRIDE=1;
+layout(constant_id=5) const int LOCALSIZE_TOTAL=1;
+
+layout(push_constant) uniform ValueHeadPoolingChannelsParams {
+    int nSize;
+    int cSize;
+    int xySize;
+};
+
+layout(set = 0, binding = 0) readonly buffer g_input_block {
+    realstore d_input[];
+};
+layout(set = 0, binding = 1) buffer g_output_block {
+    float d_output[];
+};
+layout(set = 0, binding = 2) readonly buffer g_maskSum_block {
+    float maskSums[];
+};
+
+shared float partialSums[LOCALSIZE_TOTAL];
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+void main()
+{
+  const int xyBase = LocalId0();
+  const int c = GlobalId1();
+  const int n = GlobalId2();
+  const int localId1 = LocalId1();
+  const int localId2 = LocalId2();
+
+  float sum = 0.0f;
+  if(n < nSize && c < cSize) {
+    //Sum up the elements that this group member is responsible for
+    for(int xy = xyBase; xy < xySize; xy += XYSTRIDE) {
+      int idx = (n * cSize + c) * xySize + xy;
+      float v = LOAD(d_input,idx);
+      sum += v;
+    }
+  }
+
+  //Write to local memory for performing the reduction
+  int localIdx = (localId2 * CHANNELSTRIDE + localId1) * XYSTRIDE + xyBase;
+  partialSums[localIdx] = sum;
+
+  //Parallel folding downward
+  for(int span = XYSTRIDE / 2; span > 0; span /= 2) {
+    barrier();
+
+    if(xyBase < span) {
+      partialSums[localIdx] += partialSums[localIdx + span];
+    }
+  }
+  barrier();
+
+  if(n < nSize && c < cSize && xyBase == 0) {
+    float finalSum = partialSums[localIdx];
+
+    float div = maskSums[n];
+    float sqrtdiv = sqrt(div);
+    float finalMean = finalSum/div;
+
+    int outBase = n * cSize * 3 + c;
+    d_output[outBase] = finalMean;
+    d_output[outBase + cSize] = finalMean * (sqrtdiv - 14.0f) * 0.1f;
+    d_output[outBase + cSize*2] = finalMean * ((sqrtdiv - 14.0f) * (sqrtdiv - 14.0f) * 0.01f - 0.1f);
+  }
+}

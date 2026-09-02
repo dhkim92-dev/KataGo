@@ -4,9 +4,6 @@
 #extension GL_EXT_spirv_intrinsics : require
 #define SPV_DECORATION_ALIASED 20
 
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-
 #include "common.glsl"
 
 layout(constant_id = 3) const int ELTS_PER_THREAD = 1;

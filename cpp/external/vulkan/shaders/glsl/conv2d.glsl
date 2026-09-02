@@ -122,7 +122,7 @@ void main()
           for(int dic = 0; dic<TILE_CHANNELS && icBase+dic < icSize; dic += 1) {
             for(int fy = 0; fy < fySize; fy++) {
               for(int fx = 0; fx < fxSize; fx++) {
-                acc += INPUTTILE(dic,oty+fy,otx+fx) * FILTER(oc,icBase+dic,fy,fx);
+                acc += floatToReal(INPUTTILE(dic,oty+fy,otx+fx)) * FILTER(oc,icBase+dic,fy,fx);
               }
             }
           }
@@ -137,7 +137,7 @@ void main()
       for(int otx = lx; otx<TILE_XSIZE; otx += lxSize) {
         int ox = xBase+otx;
         if(oy >= 0 && oy < ySize && ox >= 0 && ox < xSize) {
-          real result = OUTPUTTILE(oty,otx);
+          real result = floatToReal(OUTPUTTILE(oty,otx));
           WRITEOUTPUT(n, oc, yBase+oty, xBase+otx, result);
         }
       }

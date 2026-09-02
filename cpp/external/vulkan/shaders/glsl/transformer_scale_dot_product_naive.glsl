@@ -1,15 +1,5 @@
 
-#if PRECISION_STORAGE == 16
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_16bit_storage : enable
-  #define realstore float16_t
-  #define LOAD(__buf,__x) vload_half((__x),(__buf))
-  #define STORE(__buf,__x,__y) vstore_half((__y),(__x),(__buf))
-#else
-  #define realstore float
-  #define LOAD(__buf,__x) ((__buf)[(__x)])
-  #define STORE(__buf,__x,__y) ((__buf)[(__x)] = (__y))
-#endif
+#include "common.glsl"
 
 layout(constant_id=3) const int ATTN_HEAD_DIM = 1;
 layout(constant_id=4) const int ATTN_V_HEAD_DIM = 1;
@@ -57,7 +47,7 @@ void main() {
   float qMask = LOAD(mask, n * seqLen + qPos);
   if(qMask == 0.0f) {
     for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
-      STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, 0.0f);
+      STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(0.0f));
     }
     return;
   }
@@ -110,6 +100,6 @@ void main() {
   float invSum = (runningSum > 0.0f) ? (1.0f / runningSum) : 0.0f;
   for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
     float result = acc[d] * invSum;
-    STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, result);
+    STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(result));
   }
 }

@@ -14,11 +14,11 @@ layout(push_constant) uniform SpatialRMSNormSumSqParams{
 };
 
 layout(set=0, binding=0) buffer readonly input_buffer {
-    real d_input[];
+    realstore d_input[];
 };
 
 layout(set=0, binding=1) buffer readonly mask_bffer {
-    real mask[];
+    realstore mask[];
 };
 
 layout(set=0, binding=2) buffer writeonly output_buffer {

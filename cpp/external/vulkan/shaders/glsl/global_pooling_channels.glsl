@@ -1,0 +1,109 @@
+/**
+* @author dhkim92.dev@gmail.com
+* @brief Global Pooling Channels NCHW FP32 compute shader (with mask)
+* Computes mean and max pooling over spatial dimensions with mask support.
+*
+* Output layout per (batch, channel):
+*   output[n * cSize * 3 + c]            = mean
+*   output[n * cSize * 3 + c + cSize]    = mean * (sqrt(maskSum) - 14) * 0.1
+*   output[n * cSize * 3 + c + cSize*2]  = max
+*
+* Binding 0: input    - input tensor [N, C, H*W]
+* Binding 1: output   - output tensor [N, C*3]
+* Binding 2: mask     - spatial mask [N, H*W]
+* Binding 3: maskSum  - sum of mask per batch [N]
+*
+* Dispatch: (1, gpoolChannels, batchSize)
+* Each workgroup processes one (batch, channel) and reduces over spatial dimension.
+*
+* Compile-time defines required:
+*   XYSTRIDE - power of 2 reduction stride (e.g., 64)
+*/
+
+#include "common.glsl"
+#include "functions.glsl"
+
+layout(constant_id=3) const int XYSTRIDE = 1;
+layout(constant_id=4) const int CHANNELSTRIDE = 1;
+layout(constant_id=5) const int LOCALSIZE_TOTAL = 2;
+
+layout(push_constant) uniform GlobalPoolingChannelsParams {
+  int nSize;
+  int cSize;
+  int xySize;
+};
+
+layout(set = 0, binding = 0) readonly buffer g_input_block {
+    realstore g_input[];
+};
+layout(set = 0, binding = 1) buffer g_output_block {
+    float g_output[];
+};
+layout(set = 0, binding = 2) readonly buffer g_mask_block {
+    realstore mask[];
+};
+layout(set = 0, binding = 3) readonly buffer g_maskSum_block {
+    float maskSums[];
+};
+
+shared float partialSums[LOCALSIZE_TOTAL];
+shared float partialMaxes[LOCALSIZE_TOTAL];
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+void main()
+{
+  const int xyBase = LocalId0();
+  const int c = GlobalId1();
+  const int n = GlobalId2();
+  const int localId1 = LocalId1();
+  const int localId2 = LocalId2();
+
+  float sum = 0.0f;
+  float _max = -1.0f;
+  if(n < nSize && c < cSize) {
+    //Sum up the elements that this group member is responsible for
+    for(int xy = xyBase; xy < xySize; xy += XYSTRIDE) {
+      int idx = (n * cSize + c) * xySize + xy;
+      float v = LOAD(g_input,idx);
+      sum += v;
+      // Init to -1.0 above and + mask - 1.0 is because it will effectively make all padded space into -1.0
+      // which is lower than the lowest value that any current activation function will produce.
+      // so the max over all valid spaces will the same as the mask over all spaces including padding.
+      // We're relying on all padded space being equal to 0 because this gpool only ever follows a BN+Activate with a mask.
+      int maskIdx = n * xySize + xy;
+      float maskVal = LOAD(mask,maskIdx);
+      _max = fmax(_max,v + (maskVal-1.0f));
+    }
+  }
+
+  //Write to local memory for performing the reduction
+  int localIdx = (localId2 * CHANNELSTRIDE + localId1) * XYSTRIDE + xyBase;
+  partialSums[localIdx] = sum;
+  partialMaxes[localIdx] = _max;
+
+  //Parallel folding downward
+  for(int span = XYSTRIDE / 2; span > 0; span /= 2) {
+    barrier();
+
+    if(xyBase < span) {
+      partialSums[localIdx] += partialSums[localIdx + span];
+      partialMaxes[localIdx] = fmax(partialMaxes[localIdx], partialMaxes[localIdx + span]);
+    }
+  }
+  barrier();
+
+  if(n < nSize && c < cSize && xyBase == 0) {
+    float finalSum = partialSums[localIdx];
+    float finalMax = partialMaxes[localIdx];
+
+    float div = maskSums[n];
+    float sqrtdiv = sqrt(div);
+    float finalMean = finalSum/div;
+
+    int outBase = n * cSize * 3 + c;
+    g_output[outBase] = finalMean;
+    g_output[outBase + cSize] = finalMean * (sqrtdiv - 14.0f) * 0.1f;
+    g_output[outBase + cSize*2] = finalMax;
+  }
+}
