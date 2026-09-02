@@ -58,38 +58,32 @@
 #define NWBD (WGD/NDIMBD)                // Amount of loads-per-thread for matrix B (N-dimension)
 
 #if PRECISION_STORAGE == 16 && PRECISION == 32
-    // #error "Unsupported precision configuration"
-    // #define LOADGLOBAL(__buf,__x) vloada_half((__x),(const __global half*)(__buf))
-    // #define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
-    // #define STOREGLOBAL(__buf,__x,__val) vstorea_half((__val),(__x),(__global half*)(__buf))
-    // #define SetToZeroStore(a) (a) = 0
+    #define LOADGLOBAL(__buf,__x) real((__buf)[(__x)])
+    #define LOADLOCAL(__buf,__x) real((__buf)[(__x)])
+    #define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
+    #define STORELOCAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
+    #define SetToZeroStore(a) (a) = realstore(ZERO)
 #else
     #define LOADGLOBAL(__buf,__x) ((__buf)[(__x)])
     #define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
     #define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
+    #define STORELOCAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
     #define SetToZeroStore(a) SetToZero(a)
 #endif
 
 #define SetToZero(a) a = ZERO
 
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-    // #define LOADGLOBAL(__buf,__x) vloada_half((__x),(const __global half*)(__buf))
-    // #define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
-    // #define STOREGLOBAL(__buf,__x,__val) vstorea_half((__val),(__x),(__global half*)(__buf))
-    // #define SetToZeroStore(a) (a) = 0
-#else
-    #define LOADGLOBAL(__buf,__x) ((__buf)[(__x)])
-    #define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
-    #define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
-    #define SetToZeroStore(a) SetToZero(a)
-#endif
-
 // Load a single element from global memory, __x means index of element that in real array, not index of real4 vector. This is used for loading the bias vector in the post-processing stage.
 // __buf is vectorized buffer, only real4
-#define LOADSINGLEGLOBAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
-#define LOADSINGLELOCAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
-
-#define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)>>2][(__x)&0x3] = (__val))
+#if PRECISION_STORAGE == 16 && PRECISION == 32
+    #define LOADSINGLEGLOBAL(__buf,__x) real((__buf)[(__x)>>2][(__x)&0x3])
+    #define LOADSINGLELOCAL(__buf,__x) real((__buf)[(__x)>>2][(__x)&0x3])
+    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)>>2][(__x)&0x3] = realstore(__val))
+#else
+    #define LOADSINGLEGLOBAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
+    #define LOADSINGLELOCAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
+    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)>>2][(__x)&0x3] = (__val))
+#endif
 
 #define realMD real4
 #define realstoreMD realstore4
@@ -97,10 +91,9 @@
 #define realstoreND realstore4
 
 #if PRECISION_STORAGE == 16 && PRECISION == 32
-    // #error "Vectorized loads/stores from global memory are not supported for mixed precision (storage=16, compute=32) due to lack of native support for float16 vector types in OpenCL. Please set PRECISION_STORAGE to 32 or reduce the vector width."
-    // #define LOADGLOBALM(__buf,__x) vloada_half4((__x),(const __global half*)(__buf))
-    // #define LOADLOCALM(__buf,__x) ((__buf)[(__x)])
-    // #define STOREGLOBALM(__buf,__x,__val) vstorea_half4((__val),(__x),(__global half*)(__buf))
+    #define LOADGLOBALM(__buf,__x) real4((__buf)[(__x)])
+    #define LOADLOCALM(__buf,__x) real4((__buf)[(__x)])
+    #define STOREGLOBALM(__buf,__x,__val) ((__buf)[(__x)] = realstore4(__val))
 #else
     #define LOADGLOBALM(__buf,__x) ((__buf)[(__x)])
     #define LOADLOCALM(__buf,__x) ((__buf)[(__x)])
@@ -111,9 +104,9 @@
 #define realstoreND realstore4
 
 #if PRECISION_STORAGE == 16 && PRECISION == 32
-    // #define LOADGLOBALN(__buf,__x) vloada_half4((__x),(const __global half*)(__buf))
-    // #define LOADLOCALN(__buf,__x) ((__buf)[(__x)])
-    // #define STOREGLOBALN(__buf,__x,__val) vstorea_half4((__val),(__x),(__global half*)(__buf))
+    #define LOADGLOBALN(__buf,__x) real4((__buf)[(__x)])
+    #define LOADLOCALN(__buf,__x) real4((__buf)[(__x)])
+    #define STOREGLOBALN(__buf,__x,__val) ((__buf)[(__x)] = realstore4(__val))
 #else
   #define LOADGLOBALN(__buf,__x) ((__buf)[(__x)])
   #define LOADLOCALN(__buf,__x) ((__buf)[(__x)])
@@ -280,10 +273,10 @@ void GlobalToLocalDirectA(const int a_ld, const int a_offset, const int kwg,
 
       // Loads the data from global memory into the local memory
       const realMD avec = LOADGLOBALM(agm,idk*(a_ld/VWMD) + idm + (a_offset/VWMD));
-        alm[kg*(WGD + PADA) + mg*VWMD + 0] = avec.x;
-        alm[kg*(WGD + PADA) + mg*VWMD + 1] = avec.y;
-        alm[kg*(WGD + PADA) + mg*VWMD + 2] = avec.z;
-        alm[kg*(WGD + PADA) + mg*VWMD + 3] = avec.w;
+        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 0, avec.x);
+        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 1, avec.y);
+        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 2, avec.z);
+        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 3, avec.w);
     }
   }
 }
@@ -317,10 +310,10 @@ void GlobalToLocalDirectB(
 
       // Loads the data from global memory into the local memory
       const realND bvec = LOADGLOBALN(bgm,idk*(b_ld/VWND) + idn + (b_offset/VWND));
-      blm[kg*(WGD + PADB) + ng*VWND + 0] = bvec.x;
-      blm[kg*(WGD + PADB) + ng*VWND + 1] = bvec.y;
-      blm[kg*(WGD + PADB) + ng*VWND + 2] = bvec.z;
-      blm[kg*(WGD + PADB) + ng*VWND + 3] = bvec.w;
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 0, bvec.x);
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 1, bvec.y);
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 2, bvec.z);
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 3, bvec.w);
     }
   }
 }
@@ -357,7 +350,7 @@ void GlobalToLocalScalarA(
       // Loads the data from global memory into the local memory
       // real result = LOADGLOBAL(agms,idk*a_ld + idm + a_offset);
       real result = LOADSINGLEGLOBAL(agm,idk*a_ld + idm + a_offset);
-      alm[kg*(WGD + PADA) + mg] = result;
+      STORELOCAL(alm, kg*(WGD + PADA) + mg, result);
     }
   }
 }
@@ -390,7 +383,7 @@ void GlobalToLocalScalarB(
       // Loads the data from global memory into the local memory
       // real result = LOADGLOBAL(bgms,idk*b_ld + idn + b_offset);
       real result = LOADSINGLEGLOBAL(bgm,idk*b_ld + idn + b_offset);
-      blm[kg*(WGD + PADB) + ng] = result;
+      STORELOCAL(blm, kg*(WGD + PADB) + ng, result);
     }
   }
 }
@@ -433,10 +426,10 @@ void GlobalToLocalCheckedA(
         // real result = LOADGLOBAL(agms,idk*a_ld + idm + a_offset);
         // if (a_conjugate) { COMPLEX_CONJUGATE(result); }
         real result = LOADSINGLEGLOBAL(agm,idk*a_ld + idm + a_offset);
-        alm[kg*(WGD + PADA) + mg] = result;
+        STORELOCAL(alm, kg*(WGD + PADA) + mg, result);
       }
       else {
-        SetToZero(alm[kg*(WGD + PADA) + mg]);
+        SetToZeroStore(alm[kg*(WGD + PADA) + mg]);
       }
     }
   }
@@ -474,10 +467,10 @@ void GlobalToLocalCheckedB(
       if (condition) {
         // real result = LOADGLOBAL(bgms,idk*b_ld + idn + b_offset);
         real result = LOADSINGLEGLOBAL(bgm,idk*b_ld + idn + b_offset);
-        blm[kg*(WGD + PADB) + ng] = result;
+        STORELOCAL(blm, kg*(WGD + PADB) + ng, result);
       }
       else {
-        SetToZero(blm[kg*(WGD + PADB) + ng]);
+        SetToZeroStore(blm[kg*(WGD + PADB) + ng]);
       }
     }
   }

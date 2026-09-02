@@ -49,25 +49,50 @@ extern "C" {
   extern const unsigned char* _binary_add_pointwise_p16s16_end;
   extern const size_t _binary_add_pointwise_p16s16_size;
 
-  // matmul_fp32.glsl
-  extern const unsigned char _binary_matmul_fp32_start[];
-  extern const unsigned char* _binary_matmul_fp32_end;
-  extern const size_t _binary_matmul_fp32_size;
-
   // xgemm_batched_fp32.glsl
   extern const unsigned char _binary_xgemm_batched_fp32_start[];
   extern const unsigned char* _binary_xgemm_batched_fp32_end;
   extern const size_t _binary_xgemm_batched_fp32_size;
 
-  // batched_xgemm_direct_fp32.glsl
-  extern const unsigned char _binary_batched_xgemm_direct_start[];
-  extern const unsigned char* _binary_batched_xgemm_direct_end;
-  extern const size_t _binary_batched_xgemm_direct_size;
+  // xgemm_batched_p32s16.glsl
+  extern const unsigned char _binary_xgemm_batched_p32s16_start[];
+  extern const unsigned char* _binary_xgemm_batched_p32s16_end;
+  extern const size_t _binary_xgemm_batched_p32s16_size;
+
+  // xgemm_batched_p16s16.glsl
+  extern const unsigned char _binary_xgemm_batched_p16s16_start[];
+  extern const unsigned char* _binary_xgemm_batched_p16s16_end;
+  extern const size_t _binary_xgemm_batched_p16s16_size;
+
+  // xgemm_direct_batched_tt_fp32_fp32.glsl
+  extern const unsigned char _binary_xgemm_direct_batched_tt_fp32_start[];
+  extern const unsigned char* _binary_xgemm_direct_batched_tt_fp32_end;
+  extern const size_t _binary_xgemm_direct_batched_tt_fp32_size;
+
+  // xgemm_direct_batched_tt_p32s16.glsl
+  extern const unsigned char _binary_xgemm_direct_batched_tt_p32s16_start[];
+  extern const unsigned char* _binary_xgemm_direct_batched_tt_p32s16_end;
+  extern const size_t _binary_xgemm_direct_batched_tt_p32s16_size;
+
+  // xgemm_direct_batched_tt_p16s16.glsl
+  extern const unsigned char _binary_xgemm_direct_batched_tt_p16s16_start[];
+  extern const unsigned char* _binary_xgemm_direct_batched_tt_p16s16_end;
+  extern const size_t _binary_xgemm_direct_batched_tt_p16s16_size;
 
   // xgemm_strided_batched_nn_fp32.glsl
   extern const unsigned char _binary_xgemm_strided_batched_nn_fp32_start[];
   extern const unsigned char* _binary_xgemm_strided_batched_nn_fp32_end;
   extern const size_t _binary_xgemm_strided_batched_nn_fp32_size;
+
+  // xgemm_strided_batched_nn_p32s16.glsl
+  extern const unsigned char _binary_xgemm_strided_batched_nn_p32s16_start[];
+  extern const unsigned char* _binary_xgemm_strided_batched_nn_p32s16_end;
+  extern const size_t _binary_xgemm_strided_batched_nn_p32s16_size;
+
+  // xgemm_strided_batched_nn_p16s16.glsl
+  extern const unsigned char _binary_xgemm_strided_batched_nn_p16s16_start[];
+  extern const unsigned char* _binary_xgemm_strided_batched_nn_p16s16_end;
+  extern const size_t _binary_xgemm_strided_batched_nn_p16s16_size;
 
   // bn_mask_identity_fp32.glsl
   extern const unsigned char _binary_bn_mask_identity_fp32_start[];
@@ -292,20 +317,34 @@ namespace vk_shader {
   extern const unsigned char* spirv_add_pointwise_p16s16;
   extern size_t spirv_add_pointwise_p16s16_size;
 
-  // matmul_fp32 - Matrix multiplication
-  extern const unsigned char* spirv_matmul_fp32;
-  extern size_t spirv_matmul_fp32_size;
-
   extern const unsigned char* spirv_xgemm_batched_fp32;
   extern size_t spirv_xgemm_batched_fp32_size;
 
-  // batched_xgemm_direct_fp32 - batched xgemm direct fp32
-  extern const unsigned char* spirv_batched_xgemm_direct;
-  extern size_t spirv_batched_xgemm_direct_size;
+  extern const unsigned char* spirv_xgemm_batched_p32s16;
+  extern size_t spirv_xgemm_batched_p32s16_size;
+
+  extern const unsigned char* spirv_xgemm_batched_p16s16;
+  extern size_t spirv_xgemm_batched_p16s16_size;
+
+  // xgemm_direct_batched_tt_fp32_fp32 - batched xgemm direct fp32
+  extern const unsigned char* spirv_xgemm_direct_batched_tt_fp32;
+  extern size_t spirv_xgemm_direct_batched_tt_fp32_size;
+
+  extern const unsigned char* spirv_xgemm_direct_batched_tt_p32s16;
+  extern size_t spirv_xgemm_direct_batched_tt_p32s16_size;
+
+  extern const unsigned char* spirv_xgemm_direct_batched_tt_p16s16;
+  extern size_t spirv_xgemm_direct_batched_tt_p16s16_size;
 
   // strided batched matmul fp32 - for 1x1 conv
   extern const unsigned char* spirv_xgemm_strided_batched_nn_fp32;;
   extern size_t spirv_xgemm_strided_batched_nn_fp32_size;
+
+  extern const unsigned char* spirv_xgemm_strided_batched_nn_p32s16;
+  extern size_t spirv_xgemm_strided_batched_nn_p32s16_size;
+
+  extern const unsigned char* spirv_xgemm_strided_batched_nn_p16s16;
+  extern size_t spirv_xgemm_strided_batched_nn_p16s16_size;
 
   // Future support, NCHW matmul Fp32
   // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;
@@ -492,12 +531,6 @@ struct LocalDimHash {
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
       int ELTS_PER_THREAD = 1;
-    };
-
-    struct MatmulSpec {
-      uint32_t localSizeX = 16;
-      uint32_t localSizeY = 16;
-      uint32_t localSizeZ = 1;
     };
 
     struct BatchNormMaskSpec {
@@ -726,22 +759,6 @@ struct LocalDimHash {
       int xyStride;
     };
 
-    /**
-     * @brief Matmul pipeline Push Constant Parameters
-     * @param M: rows of A and C, each batch
-     * @param K: cols of A and rows of B, inChannels
-     * @param N: cols of B and C, outChannels
-     * @param numBatchElts: number of batches
-     * @param cTranspose: whether output C is transposed or not
-     */
-    struct MatmulFp32Params {
-      uint32_t M;  
-      uint32_t K;  
-      uint32_t N;
-      uint32_t numBatchElts;
-      uint32_t cTranspose; // Output Transpose
-    };
-
     struct XGEMMBatchedParams{
       uint32_t M;  
       uint32_t N;  
@@ -754,7 +771,7 @@ struct LocalDimHash {
       uint32_t cTwo;
     };
 
-    struct BatchedXGEMMDirectParams {
+    struct XgemmDirectBatchedTTParams {
       uint32_t M;  
       uint32_t N;
       uint32_t K;  
@@ -1116,8 +1133,8 @@ struct LocalDimHash {
     Pipeline addPointWise;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
-    Pipeline matmulFp32; 
-    Pipeline batchedXgemmDirect;
+    // Pipeline batchedXgemmDirect;
+    Pipeline xgemmDirectBatchedTT;
     Pipeline xgemmBatchedFp32;
 
     // note that conv1x1 can be implemented as matmul operation
@@ -1234,24 +1251,19 @@ struct LocalDimHash {
     void createAddPointWise();
 
     /**
-     * @brief Create a Matmul Fp32 object
-     */
-    void createMatmulFp32();
-
-    /**
      * @brief Create a Batched XGEMM Direct Fp32 object
      */
-    void createBatchedXgemmDirect();
+    void createXgemmDirectBatchedTT();
 
     /**
      * @brief Create a XGEMM Batched Fp32 object
      */
-    void createXGEMMBatchedFp32();
+    void createXgemmBatched();
 
      /**
      * @brief Create a Strided Batched Matmul Fp32 object
      */
-    void createXGEMMStridedBatchedFp32();
+    void createXgemmStridedBatched();
 
     /**
      * @brief Create a BatchNorm Mask Fp32 object

@@ -37,28 +37,30 @@
 
 #define realM real4
 #define realN real4
-#define realstoreM realstore
-#define realstoreN realstore
+#define realstoreM realstore4
+#define realstoreN realstore4
 
-#if PRECISION_STORAGE == 16
-  #define LOAD4(__buf, __x) real4(((__buf)[(__x)>>2]))
+#define LOAD4(__buf, __x) real4((__buf)[(__x)>>2])
+
+#if PRECISION_STORAGE == 16 && PRECISION == 32
+  // Match OpenCL's vloada_half4/vstorea_half4 paths: FP16 storage, FP32 registers.
+  #define LOADGLOBALM(__buf, __x) vec4((__buf)[(__x)])
+  #define LOADGLOBALN(__buf, __x) vec4((__buf)[(__x)])
+  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
+  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
+  #define LOADLOCALM(__buf, __x) vec4((__buf)[(__x)])
+  #define LOADLOCALN(__buf, __x) vec4((__buf)[(__x)])
+  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
+  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
+#else
   #define LOADGLOBALM(__buf, __x) __buf[(__x)]
   #define LOADGLOBALN(__buf, __x) __buf[(__x)]
-  #define STOREGLOBALM(__buf, __x, __y) __buf[(__x)] = __y
-  #define STOREGLOBALN(__buf, __x, __y) __buf[(__x)] = __y
+  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = (__y))
+  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = (__y))
   #define LOADLOCALM(__buf, __x) __buf[(__x)]
   #define LOADLOCALN(__buf, __x) __buf[(__x)]
-  #define STORELOCALM(__buf, __x, __y) __buf[(__x)] = __y
-  #define STORELOCALN(__buf, __x, __y) __buf[(__x)] = __y
-#else 
-  #define LOADGLOBALM(__buf, __x) __buf[(__x)]
-  #define LOADGLOBALN(__buf, __x) __buf[(__x)]
-  #define STOREGLOBALM(__buf, __x, __y) __buf[(__x)] = __y
-  #define STOREGLOBALN(__buf, __x, __y) __buf[(__x)] = __y
-  #define LOADLOCALM(__buf, __x) __buf[(__x)]
-  #define LOADLOCALN(__buf, __x) __buf[(__x)]
-  #define STORELOCALM(__buf, __x, __y) __buf[(__x)] = __y
-  #define STORELOCALN(__buf, __x, __y) __buf[(__x)] = __y
+  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = (__y))
+  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = (__y))
 #endif
 
 // return single real value from real4 buffer

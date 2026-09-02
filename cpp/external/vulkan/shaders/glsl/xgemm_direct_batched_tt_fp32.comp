@@ -1,4 +1,5 @@
 #version 460
 #define PRECISION 32
 #define PRECISION_STORAGE 32
-#include "xgemm_strided_batched_nn.glsl"
+
+#include "xgemm_direct_batched_tt.glsl"

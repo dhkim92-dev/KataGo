@@ -49,21 +49,41 @@ namespace vk_shader {
   const unsigned char* spirv_add_pointwise_fp32 = _binary_add_pointwise_fp32_start;
   size_t spirv_add_pointwise_fp32_size = _binary_add_pointwise_fp32_size;
 
-  // matmul_fp32
-  const unsigned char* spirv_matmul_fp32 = _binary_matmul_fp32_start;
-  size_t spirv_matmul_fp32_size = _binary_matmul_fp32_size;
-
   // xgemm_batched_fp32
   const unsigned char* spirv_xgemm_batched_fp32 = _binary_xgemm_batched_fp32_start;
   size_t spirv_xgemm_batched_fp32_size = _binary_xgemm_batched_fp32_size;
 
-  // batched_xgemm_direct_fp32
-  const unsigned char* spirv_batched_xgemm_direct = _binary_batched_xgemm_direct_start;
-  size_t spirv_batched_xgemm_direct_size = _binary_batched_xgemm_direct_size;
+  // xgemm_batched_p32s16
+  const unsigned char* spirv_xgemm_batched_p32s16 = _binary_xgemm_batched_p32s16_start;
+  size_t spirv_xgemm_batched_p32s16_size = _binary_xgemm_batched_p32s16_size;
+
+  // xgemm_batched_p16s16
+  const unsigned char* spirv_xgemm_batched_p16s16 = _binary_xgemm_batched_p16s16_start;
+  size_t spirv_xgemm_batched_p16s16_size = _binary_xgemm_batched_p16s16_size;
+
+  // xgemm_direct_batched_tt_fp32_fp32
+  const unsigned char* spirv_xgemm_direct_batched_tt_fp32 = _binary_xgemm_direct_batched_tt_fp32_start;
+  size_t spirv_xgemm_direct_batched_tt_fp32_size = _binary_xgemm_direct_batched_tt_fp32_size;
+
+  // xgemm_direct_batched_tt_p32s16
+  const unsigned char* spirv_xgemm_direct_batched_tt_p32s16 = _binary_xgemm_direct_batched_tt_p32s16_start;
+  size_t spirv_xgemm_direct_batched_tt_p32s16_size = _binary_xgemm_direct_batched_tt_p32s16_size;
+
+  // xgemm_direct_batched_tt_p16s16
+  const unsigned char* spirv_xgemm_direct_batched_tt_p16s16 = _binary_xgemm_direct_batched_tt_p16s16_start;
+  size_t spirv_xgemm_direct_batched_tt_p16s16_size = _binary_xgemm_direct_batched_tt_p16s16_size;
 
   // xgemm_strided_batched_nn_fp32
   const unsigned char* spirv_xgemm_strided_batched_nn_fp32 = _binary_xgemm_strided_batched_nn_fp32_start;
   size_t spirv_xgemm_strided_batched_nn_fp32_size = _binary_xgemm_strided_batched_nn_fp32_size;
+
+  // xgemm_strided_batched_nn_p32s16
+  const unsigned char* spirv_xgemm_strided_batched_nn_p32s16 = _binary_xgemm_strided_batched_nn_p32s16_start;
+  size_t spirv_xgemm_strided_batched_nn_p32s16_size = _binary_xgemm_strided_batched_nn_p32s16_size;
+
+  // xgemm_strided_batched_nn_p16s16
+  const unsigned char* spirv_xgemm_strided_batched_nn_p16s16 = _binary_xgemm_strided_batched_nn_p16s16_start;
+  size_t spirv_xgemm_strided_batched_nn_p16s16_size = _binary_xgemm_strided_batched_nn_p16s16_size;
 
   // bn_mask_identity_fp32
   const unsigned char* spirv_bn_mask_identity_fp32 = _binary_bn_mask_identity_fp32_start;
@@ -243,17 +263,10 @@ namespace vk_shader {
     createWinogradInputTransform();
     createWinogradInputTransformBnAct();
     createWinogradOutputTransform();
-    // createConv2d3x3BnFp32();
-    // createConv2d3x3BnReluFp32();
-    // createConv2d5x5BnFp32();
-    // createConv2d5x5BnReluFp32();
-    // createConv2d5x5BnMishFp32();
     createAddPointWise();
-    createMatmulFp32();
-    createBatchedXgemmDirect();
-    createXGEMMBatchedFp32();
-    createXGEMMStridedBatchedFp32();
-    // createMatmulTiled4x4x32Fp32();
+    createXgemmDirectBatchedTT();
+    createXgemmBatched();
+    createXgemmStridedBatched();
     createBatchNormMaskIdentity();
     createBatchNormMaskRelu();
     createBatchNormMaskMish();
@@ -284,11 +297,6 @@ namespace vk_shader {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
-    // destroyPipeline(conv2d3x3BnFp32);
-    // destroyPipeline(conv2d3x3BnReluFp32);
-    // destroyPipeline(conv2d5x5BnFp32);
-    // destroyPipeline(conv2d5x5BnReluFp32);
-    // destroyPipeline(conv2d5x5BnMishFp32);
     destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
@@ -302,11 +310,9 @@ namespace vk_shader {
     destroyPipeline(winogradInputTransform5x5_bnact_mish_scale8);
     destroyPipeline(winogradOutputTransform3x3);
     destroyPipeline(winogradOutputTransform5x5);
-    destroyPipeline(matmulFp32);
-    destroyPipeline(batchedXgemmDirect);
+    destroyPipeline(xgemmDirectBatchedTT);
     destroyPipeline(xgemmStridedBatchedFp32);
     destroyPipeline(xgemmBatchedFp32);
-    // destroyPipeline(matmulTiledChw4x4x32Fp32);
     destroyPipeline(batchNormMaskIdentity);
     destroyPipeline(batchNormMaskRelu);
     destroyPipeline(batchNormMaskMish);
@@ -636,13 +642,7 @@ namespace vk_shader {
     createPipeline("AddPointWise", vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWise, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createMatmulFp32() {
-    auto spec = MatmulSpec();
-    SpecializationData specData(spec);
-    createPipeline("MatmulFp32", vk_shader::spirv_matmul_fp32, vk_shader::spirv_matmul_fp32_size, 3, sizeof(MatmulFp32Params), matmulFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-  }
-
-  void ComputePipelines::createBatchedXgemmDirect() {
+  void ComputePipelines::createXgemmDirectBatchedTT() {
     auto spec = XgemmDirectSpec();
     spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
     spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
@@ -658,10 +658,10 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_batched_xgemm_direct, vk_shader::spirv_batched_xgemm_direct_size, 3, sizeof(BatchedXGEMMDirectParams), batchedXgemmDirect, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_xgemm_direct_batched_tt_fp32, vk_shader::spirv_xgemm_direct_batched_tt_fp32_size, 3, sizeof(XgemmDirectBatchedTTParams), xgemmDirectBatchedTT, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createXGEMMBatchedFp32() {
+  void ComputePipelines::createXgemmBatched() {
 
     auto spec = XGEMMBatchedSpec();
     spec.localSizeX = tuneParams.xgemm.MDIMC;
@@ -677,10 +677,10 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMBatchedFp32", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("XGEMMBatched", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createXGEMMStridedBatchedFp32() {
+  void ComputePipelines::createXgemmStridedBatched() {
     auto spec = XgemmDirectSpec();
     spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
     spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
@@ -696,7 +696,7 @@ namespace vk_shader {
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMStridedBatchedFp32", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    createPipeline("XGEMMStridedBatched", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   void ComputePipelines::createBatchNormMaskIdentity() {

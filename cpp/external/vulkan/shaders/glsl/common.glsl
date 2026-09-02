@@ -70,31 +70,6 @@
 #define ADD_POINTWISE_DISPATCH_Z 1
 
 /**
-* Matmul parameters - Optimized with register tiling
-* 
-* Each thread computes MATMUL_WORK_M x MATMUL_WORK_N output elements.
-* Workgroup has MATMUL_THREAD_M x MATMUL_THREAD_N threads.
-* Therefore workgroup tile size:
-*   MATMUL_TILE_M = MATMUL_THREAD_M * MATMUL_WORK_M
-*   MATMUL_TILE_N = MATMUL_THREAD_N * MATMUL_WORK_N
-* 
-* This reduces global memory traffic by reusing values in registers.
-* Total threads per workgroup: 16 * 16 = 256
-* Work per thread: 4 * 4 = 16 output elements
-* Workgroup output: 64 * 64 = 4096 elements (16x improvement over naive)
-*/
-#define MATMUL_THREAD_M 16   // Threads in M dimension
-#define MATMUL_THREAD_N 16   // Threads in N dimension
-#define MATMUL_WORK_M 4      // Work per thread in M dimension
-#define MATMUL_WORK_N 4      // Work per thread in N dimension
-#define MATMUL_TILE_M (MATMUL_THREAD_M * MATMUL_WORK_M)  // 64
-#define MATMUL_TILE_N (MATMUL_THREAD_N * MATMUL_WORK_N)  // 64
-#define MATMUL_TILE_K 16     // K tile size for shared memory blocking
-#define MATMUL_SMEM_PAD 1    // Shared memory padding to avoid bank conflicts
-#define MATMUL_DISPATCH_X MATMUL_THREAD_M
-#define MATMUL_DISPATCH_Y MATMUL_THREAD_N
-
-/**
 * Pooling Layer params
 * POOLING_XYSTRIDE: number of threads for parallel reduction over spatial dimension
 * Increased from 64 to 128 for better GPU occupancy while maintaining power-of-2 for reduction
@@ -176,6 +151,9 @@
 
 #if PRECISION_STORAGE == 16
   #extension GL_EXT_shader_16bit_storage : enable
+  #if PRECISION != 16
+    #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+  #endif
   #define realstore float16_t
   #define realstore4 f16vec4
   #if PRECISION == 16

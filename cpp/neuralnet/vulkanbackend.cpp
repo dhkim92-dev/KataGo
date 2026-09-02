@@ -524,94 +524,23 @@ struct MatmulLayer {
     VulkanBuffer* output
   ) {
     assert(cb != VK_NULL_HANDLE);
-    // doMatmulFp32(cb, batchSize, input, output);
     doBatchedXGEMMDirectFP32_MK_NK_MN(cb, batchSize, input, output);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     vk_helper::barrierCommandBuffer(cb);
   }
 
 private:
-  void doMatmulFp32(
-    VkCommandBuffer& cb,
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    auto *pipelines = handle->context->pipelinesPerDev.at(gpuId);
-    VkResult res;
-    if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice,
-        pipelines->matmulFp32.descriptorSetLayout,
-        &res
-      );
-      CHECK_VK_MSG("Allocate descriptor set for MatmulLayer: " + name, res);
-    }
-
-    // update descriptor set
-    std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, matBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
-    };
-    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-
-    auto pushConstants = MatmulFp32Params();
-    pushConstants.M = static_cast<uint32_t>(batchSize);
-    pushConstants.K = static_cast<uint32_t>(inChannels);
-    pushConstants.N = static_cast<uint32_t>(outChannels);
-    pushConstants.numBatchElts = 1;
-    pushConstants.cTranspose = 1; // Weights always transposed, so Output should be transposed.
-
-    vkCmdPushConstants(
-      cb,
-      pipelines->matmulFp32.layout,
-      VK_SHADER_STAGE_COMPUTE_BIT,
-      0,
-      sizeof(MatmulFp32Params),
-      &pushConstants
-    );
-    vkCmdBindPipeline(
-      cb,
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipelines->matmulFp32.pipeline
-    );
-    vkCmdBindDescriptorSets(
-      cb,
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipelines->matmulFp32.layout,
-      0,
-      1,
-      &descriptorSet,
-      0,
-      nullptr
-    );
-
-    // Each invocation computes a fixed 4x4 register tile, so one workgroup covers
-    // four times its specialized local size in each output dimension.
-    // HLSL: GId.x = groupM (M axis), GId.y = groupN (N axis)
-    const uint32_t matmulTileX = pipelines->matmulFp32.localSizeX * 4u;
-    const uint32_t matmulTileY = pipelines->matmulFp32.localSizeY * 4u;
-    uint32_t wgCountX = (static_cast<uint32_t>(batchSize) + matmulTileX - 1u) / matmulTileX;
-    uint32_t wgCountY = (static_cast<uint32_t>(outChannels) + matmulTileY - 1u) / matmulTileY;
-    uint32_t wgCountZ = 1u;
-    SHADER_PROFILE_START("MATMUL_FP32", cb);
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    SHADER_PROFILE_END("MATMUL_FP32", cb);
-  }
-
   void doBatchedXGEMMDirectFP32_MK_NK_MN(
     VkCommandBuffer& cb,
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    auto pipelines = handle->context->pipelinesPerDev.at(gpuId);
+    // uint32_t gpuId = handle->vulkanDevice->info.deviceId;
+    // auto pipelines = handle->context->pipelinesPerDev.at(gpuId);
     VkResult res;
     SHADER_PROFILE_START("BATCHED_XGEMM_DIRECT_FP32", cb);
-    Pipeline pipeline = pipelines->batchedXgemmDirect;
+    Pipeline pipeline = handle->pipelines->xgemmDirectBatchedTT;
     if( descriptorSet == VK_NULL_HANDLE ) {
       descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
