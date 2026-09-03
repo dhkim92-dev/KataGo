@@ -11,7 +11,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 4;
+  constexpr int TUNER_VERSION = 5;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   struct ModelInfoForTuning {

@@ -1889,7 +1889,10 @@ void performAddPointWise(
     &pushConstants
   );
   const Pipeline& targetPipeline = pipelines->addPointWise;
-  uint32_t wgCountX = (static_cast<uint32_t>(totalSize) + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
+  const uint32_t eltsPerThread = static_cast<uint32_t>(handle->tuneParams.pointwise.ELTS_PER_THREAD);
+  uint32_t wgCountX =
+    (static_cast<uint32_t>(totalSize) + targetPipeline.localSizeX * eltsPerThread - 1u) /
+    (targetPipeline.localSizeX * eltsPerThread);
   uint32_t wgCountY = 1u;
   uint32_t wgCountZ = 1u;
   SHADER_PROFILE_START("ADD_POINTWISE_FP32", commandBuffer);

@@ -1,6 +1,7 @@
 #ifdef USE_VULKAN_BACKEND
 
 #include "../neuralnet/vulkantuner.h"
+#include "../neuralnet/vulkancompute.h"
 
 #include <fstream>
 #include <map>
@@ -103,7 +104,17 @@ bool XgemmTuneParams::isValid() const {
 bool XgemmDirectTuneParams::isValid() const {
   if(WGD == 0 || MDIMCD == 0 || NDIMCD == 0 || MDIMAD == 0 || NDIMBD == 0 || KWID == 0)
     return false;
-  return static_cast<uint64_t>(MDIMCD) * NDIMCD <= 1024 && PADA <= 1 && PADB <= 1 && isMultipleOf(WGD, KWID);
+  const uint64_t workgroupSize = static_cast<uint64_t>(MDIMCD) * NDIMCD;
+  if(workgroupSize > 1024 || PADA > 1 || PADB > 1)
+    return false;
+  if(!isMultipleOf(WGD, KWID) ||
+     !isMultipleOf(WGD, MDIMCD) || !isMultipleOf(WGD, NDIMCD) ||
+     !isMultipleOf(WGD, static_cast<uint64_t>(MDIMAD) * 4) ||
+     !isMultipleOf(WGD, static_cast<uint64_t>(NDIMBD) * 4) ||
+     !isMultipleOf(workgroupSize, MDIMAD) || !isMultipleOf(workgroupSize, NDIMBD))
+    return false;
+  return isMultipleOf(WGD, workgroupSize / MDIMAD) &&
+         isMultipleOf(WGD, workgroupSize / NDIMBD);
 }
 
 bool TransformerTuneParams::isValid() const {
@@ -465,7 +476,23 @@ namespace {
       }
 
       VkResult result = VK_SUCCESS;
-      VulkanBuffer* scratch = vk_helper::createDeviceBuffer(device, 4 * 1024 * 1024, false, &result);
+      const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
+      const size_t xySize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const size_t maxChannels = static_cast<size_t>(std::max({
+        1,
+        context.modelInfo.trunkNumChannels,
+        context.modelInfo.maxConvChannels1x1,
+        context.modelInfo.maxConvChannels3x3,
+        context.modelInfo.gpoolNumChannels,
+        context.modelInfo.transformerFFNChannels
+      }));
+      const size_t maxTilesX = (static_cast<size_t>(std::max(1, context.nnXLen)) + 1) / 2;
+      const size_t maxTilesY = (static_cast<size_t>(std::max(1, context.nnYLen)) + 1) / 2;
+      const size_t paddedTiles = vk_helper::roundUpToMultiple(batchSize * maxTilesX * maxTilesY, static_cast<size_t>(config.xgemm.MWG));
+      const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(config.xgemm.KWG, config.xgemm.NWG)));
+      const size_t scratchElements = std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
+      const size_t scratchBytes = std::max(static_cast<size_t>(4 * 1024 * 1024), scratchElements * sizeof(float));
+      VulkanBuffer* scratch = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
       if(result != VK_SUCCESS || scratch == nullptr) {
         error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
         return false;
@@ -600,11 +627,15 @@ namespace {
           dispatch(2, 2, static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("winograd_input_transform") == 0) {
-          const int outTile = config.conv3x3.outTileXSize;
+          const vk_shader::tune::ConvTuneParams& convParams =
+            pipeline->name.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+          const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, config.xgemm.MWG);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, config.xgemm.KWG);
           vk_shader::push::WinogradInputTransformParams params = {
-            batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,channels,batchSize * tilesX * tilesY,xySize
+            batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,paddedChannels,paddedTiles,xySize
           };
           push(params);
           dispatch(
@@ -613,11 +644,15 @@ namespace {
           );
         }
         else if(pipeline->name.find("winograd_output_transform") == 0) {
-          const int outTile = config.conv3x3.outTileXSize;
+          const vk_shader::tune::ConvTuneParams& convParams =
+            pipeline->name.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+          const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, config.xgemm.MWG);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, config.xgemm.NWG);
           vk_shader::push::WinogradOutputTransformParams params = {
-            batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,channels,batchSize * tilesX * tilesY,xySize
+            batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,paddedChannels,paddedTiles,xySize
           };
           push(params);
           dispatch(
@@ -627,9 +662,33 @@ namespace {
           );
         }
         else if(pipeline->name.find("global_pooling_channels") == 0) {
-          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,channels,xySize};
+          const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,xySize};
           push(params);
-          dispatch(1, 1, 1);
+          dispatch(
+            1,
+            static_cast<uint32_t>((gpoolChannels + pipeline->localSizeY - 1) / pipeline->localSizeY),
+            static_cast<uint32_t>((batchSize + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
+          );
+        }
+        else if(pipeline->name.find("value_head_pool_channels") == 0) {
+          const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+          vk_shader::push::ValueHeadPoolingChannelsParams params = {batchSize,gpoolChannels,xySize};
+          push(params);
+          dispatch(
+            1,
+            static_cast<uint32_t>((gpoolChannels + pipeline->localSizeY - 1) / pipeline->localSizeY),
+            static_cast<uint32_t>((batchSize + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
+          );
+        }
+        else if(pipeline->name.find("sum_channels") == 0) {
+          vk_shader::push::SumChannelsParams params = {
+            static_cast<uint32_t>(batchSize),
+            1u,
+            static_cast<uint32_t>(xySize)
+          };
+          push(params);
+          dispatch(1, 1, static_cast<uint32_t>((batchSize + pipeline->localSizeZ - 1) / pipeline->localSizeZ));
         }
         else if(pipeline->name.find("add_pointwise") == 0) {
           vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(batchSize * channels * xySize)};
@@ -673,21 +732,24 @@ namespace {
                    (config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_sum_sq") == 0) {
-          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,xySize,1};
+          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * xySize);
+          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,xySize,sizing.tilesPerGroupPass1};
           push(params);
-          dispatch(static_cast<uint32_t>(batchSize));
+          dispatch(static_cast<uint32_t>(sizing.numCHWWorkgroups), static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_reduce") == 0) {
-          vk_shader::push::TransformerSpatialRMSNormReducePushParams params = {batchSize,1,1};
+          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * xySize);
+          vk_shader::push::TransformerSpatialRMSNormReducePushParams params = {batchSize,sizing.numCHWWorkgroups,sizing.tilesPerGroupPass2};
           push(params);
-          dispatch(static_cast<uint32_t>(batchSize));
+          dispatch(1, static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_apply") == 0) {
           vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,xySize,1e-6f};
           push(params);
           dispatch(
-            static_cast<uint32_t>((batchSize * channels * xySize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
-                                  (config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX))
+            static_cast<uint32_t>((channels * xySize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
+                                  (config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX)),
+            static_cast<uint32_t>(batchSize)
           );
         }
         else {
@@ -879,8 +941,10 @@ namespace {
       Pipeline& output = ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5;
       VkResult result = pipelines.createWinogradInputTransform(input, params(config), ConvSize, config.vulkan);
       if(result != VK_SUCCESS) return result;
+      input.name += ConvSize == 3 ? "_3x3" : "_5x5";
       result = pipelines.createWinogradOutputTransform(output, params(config), ConvSize, config.vulkan);
       if(result == VK_SUCCESS) {
+        output.name += ConvSize == 3 ? "_3x3" : "_5x5";
         targets.push_back(&input);
         targets.push_back(&output);
       }
@@ -902,9 +966,35 @@ namespace {
       addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.gPool.BATCHSTRIDE = v; });
       return configs;
     }
-    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+    static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
       VkResult result = pipelines.createGlobalPoolingChannelsFp32(pipelines.globalPoolingChannelsFp32, config.gPool, config.vulkan);
-      if(result == VK_SUCCESS) targets.push_back(&pipelines.globalPoolingChannelsFp32);
+      if(result != VK_SUCCESS)
+        return result;
+      targets.push_back(&pipelines.globalPoolingChannelsFp32);
+
+      const uint32_t localSizeY = static_cast<uint32_t>(std::min(
+        config.gPool.CHANNELSTRIDE,
+        static_cast<int>(vk_helper::powerOf2ify(std::max(1, context.modelInfo.gpoolNumChannels)))
+      ));
+      const uint32_t localSizeZ = static_cast<uint32_t>(std::min(
+        config.gPool.BATCHSTRIDE,
+        static_cast<int>(vk_helper::powerOf2ify(std::max(1, context.batchSize)))
+      ));
+      LocalDim valueHeadDim = {config.gPool.XYSTRIDE, static_cast<int>(localSizeY), static_cast<int>(localSizeZ)};
+      Pipeline valueHeadPipeline;
+      result = pipelines.createValueHeadPoolingChannels(valueHeadPipeline, config.gPool, localSizeY, localSizeZ, config.vulkan);
+      if(result != VK_SUCCESS)
+        return result;
+      auto valueHeadInsert = pipelines.valueHeadPoolingChannels.emplace(valueHeadDim, std::move(valueHeadPipeline));
+      targets.push_back(&valueHeadInsert.first->second);
+
+      LocalDim sumChannelsDim = {config.gPool.XYSTRIDE, 1, static_cast<int>(localSizeZ)};
+      Pipeline sumChannelsPipeline;
+      result = pipelines.createSumChannels(sumChannelsPipeline, config.gPool, localSizeZ, config.vulkan);
+      if(result != VK_SUCCESS)
+        return result;
+      auto sumChannelsInsert = pipelines.sumChannels.emplace(sumChannelsDim, std::move(sumChannelsPipeline));
+      targets.push_back(&sumChannelsInsert.first->second);
       return result;
     }
   };
@@ -953,14 +1043,13 @@ namespace {
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.transformer = defaults.transformer; return result; }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
-      vector<VulkanTuneParams> configs;
+      vector<VulkanTuneParams> configs = {current};
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
-      configs.push_back(naive);
-      configs.push_back(current);
       addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; p.transformer.USE_TILED_ATTN = 1; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
+      configs.push_back(naive);
       return configs;
     }
     static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {

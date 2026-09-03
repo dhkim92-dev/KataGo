@@ -31,7 +31,10 @@ namespace {
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
-  testAssert(VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) == "tune4_gpuAppleM2_x19_y19_c96_mv8.txt");
+  testAssert(
+    VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) ==
+    "tune" + to_string(VulkanTuner::TUNER_VERSION) + "_gpuAppleM2_x19_y19_c96_mv8.txt"
+  );
 
   MakeDir::make("tests/scratch");
   const string filename = "tests/scratch/vulkantuner-roundtrip.txt";
@@ -55,7 +58,7 @@ void Tests::runVulkanTunerPersistenceTests() {
     VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, modelInfo, deviceInfo, nullptr) == defaults
   );
   vector<string> defaultLines = FileUtils::readFileLines(defaultsFilename, '\n');
-  testAssert(defaultLines[0] == "VERSION=4");
+  testAssert(defaultLines[0] == "VERSION=" + to_string(VulkanTuner::TUNER_VERSION));
   testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");
   testAssert(defaultLines[2] == "vulkan.canUseFP16Compute=1");
   testAssert(defaultLines[3] == "vulkan.canUseCooperativMatrix=1");
@@ -95,11 +98,14 @@ void Tests::runVulkanTunerPersistenceTests() {
 
   writeText(filename, "VERSION=1\n");
   testAssert(loadThrows(filename));
-  writeText(filename, "VERSION=4\nvulkan.canUseFP16Storage=not-an-int\n");
+  writeText(filename, "VERSION=" + to_string(VulkanTuner::TUNER_VERSION) + "\nvulkan.canUseFP16Storage=not-an-int\n");
   testAssert(loadThrows(filename));
 
   VulkanTuneParams invalid = params;
   invalid.xgemm.MDIMC = 0;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.xgemmDirect.MDIMAD = 16;
   testAssert(!invalid.isValid());
   bool saveThrew = false;
   try {
