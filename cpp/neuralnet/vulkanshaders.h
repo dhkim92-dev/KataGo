@@ -1264,28 +1264,27 @@ struct LocalDimHash {
       static VulkanTuneParams load(const std::string& filename);
 
       VulkanTuneParams() {
-        conv3x3 = ConvTuneParams{
-          .inTileYSize = 6,
-          .inTileXSize = 6,
-          .outTileYSize = 4,
-          .outTileXSize = 4,
-          .inputTransformLocalXSize = 4,
-          .inputTransformLocalYSize = 2,
-          .outputTransformLocalXSize = 8,
-          .outputTransformLocalYSize = 2,
-          .outputTransformLocalZSize = 2
-        };
-        conv5x5 = ConvTuneParams{
-          .inTileYSize = 6,
-          .inTileXSize = 6,
-          .outTileYSize = 2,
-          .outTileXSize = 2,
-          .inputTransformLocalXSize = 4,
-          .inputTransformLocalYSize = 2,
-          .outputTransformLocalXSize = 8,
-          .outputTransformLocalYSize = 2,
-          .outputTransformLocalZSize = 2
-        };
+        conv3x3 = ConvTuneParams();
+        conv3x3.inTileYSize = 6;
+        conv3x3.inTileXSize = 6;
+        conv3x3.outTileYSize = 4;
+        conv3x3.outTileXSize = 4;
+        conv3x3.inputTransformLocalXSize = 4;
+        conv3x3.inputTransformLocalYSize = 2;
+        conv3x3.outputTransformLocalXSize = 8;
+        conv3x3.outputTransformLocalYSize = 2;
+        conv3x3.outputTransformLocalZSize = 2;
+
+        conv5x5 = ConvTuneParams();
+        conv5x5.inTileYSize = 6;
+        conv5x5.inTileXSize = 6;
+        conv5x5.outTileYSize = 2;
+        conv5x5.outTileXSize = 2;
+        conv5x5.inputTransformLocalXSize = 4;
+        conv5x5.inputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalXSize = 8;
+        conv5x5.outputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalZSize = 2;
         // xgemm = XgemmTuneParams{
         //   .MDIMC = 16,
         //   .NDIMC = 16,
