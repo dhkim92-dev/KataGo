@@ -96,6 +96,8 @@ struct Pipeline {
   uint32_t localSizeX = 1;
   uint32_t localSizeY = 1;
   uint32_t localSizeZ = 1;
+  uint32_t bindingCount = 0;
+  uint32_t pushConstantSize = 0;
 };
 
 /**

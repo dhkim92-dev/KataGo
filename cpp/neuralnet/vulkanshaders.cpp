@@ -542,6 +542,8 @@ namespace vk_shader {
     outPipeline.localSizeX = localSizeX;
     outPipeline.localSizeY = localSizeY;
     outPipeline.localSizeZ = localSizeZ;
+    outPipeline.bindingCount = static_cast<uint32_t>(bindingSize);
+    outPipeline.pushConstantSize = pushConstantSize;
     const std::string message = "Built Vulkan compute pipeline with shader: " + pipelineName;
     if(logger != nullptr)
       logger->write(message);

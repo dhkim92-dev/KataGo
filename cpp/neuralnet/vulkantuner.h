@@ -11,15 +11,35 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 3;
+  constexpr int TUNER_VERSION = 4;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   struct ModelInfoForTuning {
-    int trunkNumChannels;
-    int modelVersion;
+    int maxConvChannels1x1 = 0;
+    int maxConvChannels3x3 = 0;
+    int trunkNumChannels = 0;
+    int midNumChannels = 0;
+    int regularNumChannels = 0;
+    int gpoolNumChannels = 0;
+    int modelVersion = 0;
+    int transformerHeadDim = 0;
+    int transformerVHeadDim = 0;
+    int transformerNumHeads = 0;
+    int transformerNumKVHeads = 0;
+    int transformerFFNChannels = 0;
 
     static ModelInfoForTuning ofDesc(const ModelDesc& desc);
   };
+
+  void tune(
+    const VulkanDevice* device,
+    int batchSize,
+    int nnXLen,
+    int nnYLen,
+    const ModelInfoForTuning& modelInfo,
+    bool full,
+    Logger* logger,
+    VulkanTuneParams& tunedConfig);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
   std::string
@@ -34,6 +54,16 @@ namespace VulkanTuner {
     int nnYLen,
     const ModelInfoForTuning& modelInfo,
     const VulkanDeviceInfo& deviceInfo,
+    Logger* logger);
+
+  VulkanTuneParams loadOrAutoTune(
+    const std::string& tunerFile,
+    const std::string& homeDataDirOverride,
+    const std::string& gpuName,
+    int nnXLen,
+    int nnYLen,
+    const ModelInfoForTuning& modelInfo,
+    const VulkanDevice* device,
     Logger* logger);
 }  // namespace VulkanTuner
 

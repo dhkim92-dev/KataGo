@@ -317,9 +317,9 @@ struct ComputeContext {
         VulkanTuneParams tuneParams;
         try {
           if(modelInfo != nullptr) {
-            tuneParams = VulkanTuner::loadOrCreate(
+            tuneParams = VulkanTuner::loadOrAutoTune(
               tunerFile,homeDataDirOverride,deviceInfo.deviceName,
-              nnXLen,nnYLen,*modelInfo,vulkanDevice->info,logger
+              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger
             );
           }
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);

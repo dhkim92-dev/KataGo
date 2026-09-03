@@ -1147,17 +1147,23 @@ struct LocalDimHash {
     struct AddPointWiseTuneParams {
       int LOCAL_SIZE=64;
       int ELTS_PER_THREAD=4;
+
+      bool isValid() const;
     };
 
     struct AddChannelBiasesNCHWTuneParams {
       int XY_ELTS_PER_THREAD=4;
       int NC_ELTS_PER_THREAD=4;
+
+      bool isValid() const;
     };
 
     struct GPoolTuneParams {
       int XYSTRIDE=32;
       int CHANNELSTRIDE=1;
       int BATCHSTRIDE=4;
+
+      bool isValid() const;
     };
 
     struct ConvTuneParams {
@@ -1170,6 +1176,8 @@ struct LocalDimHash {
       uint32_t outputTransformLocalXSize;
       uint32_t outputTransformLocalYSize;
       uint32_t outputTransformLocalZSize;
+
+      bool isValid(uint32_t expectedOutTileSize) const;
     };
 
     struct XgemmTuneParams {
@@ -1180,6 +1188,8 @@ struct LocalDimHash {
       uint32_t KWG=32;
       uint32_t MDIMA=8;
       uint32_t NDIMB=8;
+
+      bool isValid() const;
     };
 
     struct XgemmDirectTuneParams {
@@ -1191,6 +1201,8 @@ struct LocalDimHash {
       uint32_t KWID = 2;
       uint32_t PADA = 1;
       uint32_t PADB = 1;
+
+      bool isValid() const;
     };
 
     struct TransformerTuneParams {
@@ -1198,17 +1210,23 @@ struct LocalDimHash {
       int ATTN_BLOCK_KV=32;
       int Q_PER_THREAD=1;
       int USE_TILED_ATTN=1;
+
+      bool isValid() const;
     };
 
     struct TransformerRMSNormTuneParms {
       int WG_C_SIZE = 32;
       int WG_XY_SIZE = 8;
       int C_PER_THREAD = 1;
+
+      bool isValid() const;
     };
 
     struct TransformerSpatialRmsNormTuneParams {
       int TILE_SIZE = 128;
       int APPLY_ELTS_PER_THREAD = 16;
+
+      bool isValid() const;
     };
 
     struct VulkanParams {

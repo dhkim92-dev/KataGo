@@ -31,7 +31,7 @@ namespace {
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
-  testAssert(VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) == "tune3_gpuAppleM2_x19_y19_c96_mv8.txt");
+  testAssert(VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) == "tune4_gpuAppleM2_x19_y19_c96_mv8.txt");
 
   MakeDir::make("tests/scratch");
   const string filename = "tests/scratch/vulkantuner-roundtrip.txt";
@@ -48,11 +48,14 @@ void Tests::runVulkanTunerPersistenceTests() {
   defaults.vulkan.canUseFP16Compute = true;
   defaults.vulkan.canUseCooperativMatrix = true;
   defaults.vulkan.canUseSubgroup = true;
+  VulkanTuner::ModelInfoForTuning modelInfo;
+  modelInfo.trunkNumChannels = 96;
+  modelInfo.modelVersion = 8;
   testAssert(
-    VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, {96, 8}, deviceInfo, nullptr) == defaults
+    VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, modelInfo, deviceInfo, nullptr) == defaults
   );
   vector<string> defaultLines = FileUtils::readFileLines(defaultsFilename, '\n');
-  testAssert(defaultLines[0] == "VERSION=3");
+  testAssert(defaultLines[0] == "VERSION=4");
   testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");
   testAssert(defaultLines[2] == "vulkan.canUseFP16Compute=1");
   testAssert(defaultLines[3] == "vulkan.canUseCooperativMatrix=1");
@@ -69,6 +72,21 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.conv5x5.outputTransformLocalXSize = 16;
   params.xgemm.KWG = 32;
   params.xgemmDirect.KWID = 1;
+  params.addChannelBiases.XY_ELTS_PER_THREAD = 2;
+  params.addChannelBiases.NC_ELTS_PER_THREAD = 8;
+  params.pointwise.LOCAL_SIZE = 128;
+  params.pointwise.ELTS_PER_THREAD = 2;
+  params.gPool.XYSTRIDE = 16;
+  params.gPool.CHANNELSTRIDE = 2;
+  params.gPool.BATCHSTRIDE = 2;
+  params.transformer.ATTN_BLOCK_Q = 64;
+  params.transformer.ATTN_BLOCK_KV = 16;
+  params.transformer.Q_PER_THREAD = 2;
+  params.rmsNorm.WG_C_SIZE = 64;
+  params.rmsNorm.WG_XY_SIZE = 4;
+  params.rmsNorm.C_PER_THREAD = 2;
+  params.spatialRMSNorm.TILE_SIZE = 64;
+  params.spatialRMSNorm.APPLY_ELTS_PER_THREAD = 4;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());
@@ -77,7 +95,7 @@ void Tests::runVulkanTunerPersistenceTests() {
 
   writeText(filename, "VERSION=1\n");
   testAssert(loadThrows(filename));
-  writeText(filename, "VERSION=3\nvulkan.canUseFP16Storage=not-an-int\n");
+  writeText(filename, "VERSION=4\nvulkan.canUseFP16Storage=not-an-int\n");
   testAssert(loadThrows(filename));
 
   VulkanTuneParams invalid = params;
