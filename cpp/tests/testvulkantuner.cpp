@@ -90,6 +90,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.rmsNorm.C_PER_THREAD = 2;
   params.spatialRMSNorm.TILE_SIZE = 64;
   params.spatialRMSNorm.APPLY_ELTS_PER_THREAD = 4;
+  params.vulkan.canUseFP16Storage = true;
+  params.vulkan.canUseFP16Compute = true;
+  params.vulkan.shouldUseFP16Storage = true;
+  params.vulkan.shouldUseFP16Compute = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());

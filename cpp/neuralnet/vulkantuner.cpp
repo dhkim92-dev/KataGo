@@ -7,6 +7,7 @@
 #include <map>
 #include <algorithm>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 
@@ -442,6 +443,21 @@ namespace {
     configs = unique;
   }
 
+  void logTuningPipelines(
+    const TuningContext& context,
+    size_t candidateIndex,
+    size_t totalCandidates,
+    const vector<const Pipeline*>& pipelines
+  ) {
+    for(const Pipeline* pipeline: pipelines) {
+      const string message = "(" + to_string(candidateIndex) + " / " + to_string(totalCandidates) + ") " + pipeline->name + "...";
+      if(context.logger != nullptr)
+        context.logger->write(message);
+      if(context.logger == nullptr || (!context.logger->isLoggingToStdout() && !context.logger->isLoggingToStderr()))
+        cerr << message << endl;
+    }
+  }
+
   class VulkanTimestampTimer {
    public:
     explicit VulkanTimestampTimer(const VulkanDevice* device)
@@ -819,6 +835,7 @@ namespace {
     VulkanTuneParams defaults;
     configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
     dedupCandidates(configs);
+    const size_t validCandidateCount = count_if(configs.begin(), configs.end(), Tuner::isValid);
 
     VulkanTimestampTimer timer(context.device);
     if(!timer.isUsable()) {
@@ -829,15 +846,18 @@ namespace {
 
     bool found = false;
     double bestSeconds = numeric_limits<double>::infinity();
+    size_t candidateIndex = 0;
     for(const VulkanTuneParams& candidate: configs) {
       if(!Tuner::isValid(candidate))
         continue;
+      candidateIndex += 1;
       try {
         vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
         vector<const Pipeline*> targets;
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS)
           continue;
+        logTuningPipelines(context, candidateIndex, validCandidateCount, targets);
         double seconds = 0.0;
         string error;
         if(!timer.measure(targets, candidate, context, seconds, error) || !isfinite(seconds) || seconds <= 0.0)
@@ -1112,6 +1132,144 @@ namespace {
       return result;
     }
   };
+
+  void runOperationTuners(const TuningContext& context, VulkanTuneParams& config) {
+    runTuner<XgemmDirectTuner>(context, config);
+    runTuner<XgemmTuner>(context, config);
+    runTuner<Conv3x3Tuner>(context, config);
+    runTuner<Conv5x5Tuner>(context, config);
+    runTuner<GPoolTuner>(context, config);
+    runTuner<PointwiseTuner>(context, config);
+    runTuner<AddChannelBiasesTuner>(context, config);
+    if(context.modelInfo.transformerHeadDim > 0) {
+      runTuner<TransformerTuner>(context, config);
+      runTuner<TransformerRMSNormTuner>(context, config);
+    }
+    runTuner<SpatialRMSNormTuner>(context, config);
+  }
+
+  struct FP16ProfileTuner {
+    static VkResult create(
+      const TuningContext& context,
+      const VulkanTuneParams& config,
+      vk_shader::ComputePipelines& pipelines,
+      vector<const Pipeline*>& targets
+    ) {
+      VkResult result = XgemmDirectTuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = XgemmTuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = Conv3x3Tuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = Conv5x5Tuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = GPoolTuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = PointwiseTuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      result = AddChannelBiasesTuner::create(context, config, pipelines, targets);
+      if(result != VK_SUCCESS) return result;
+      if(context.modelInfo.transformerHeadDim > 0) {
+        result = TransformerTuner::create(context, config, pipelines, targets);
+        if(result != VK_SUCCESS) return result;
+        result = TransformerRMSNormTuner::create(context, config, pipelines, targets);
+        if(result != VK_SUCCESS) return result;
+      }
+      return SpatialRMSNormTuner::create(context, config, pipelines, targets);
+    }
+
+    static bool measure(
+      const TuningContext& context,
+      const VulkanTuneParams& config,
+      size_t candidateIndex,
+      size_t totalCandidates,
+      double& seconds,
+      string& error
+    ) {
+      try {
+        vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
+        vector<const Pipeline*> targets;
+        const VkResult result = create(context, config, pipelines, targets);
+        if(result != VK_SUCCESS) {
+          error = "could not create FP16 profile pipelines: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        logTuningPipelines(context, candidateIndex, totalCandidates, targets);
+        VulkanTimestampTimer timer(context.device);
+        return timer.measure(targets, config, context, seconds, error) && isfinite(seconds) && seconds > 0.0;
+      }
+      catch(const StringError& e) {
+        error = e.what();
+        return false;
+      }
+    }
+  };
+
+  bool runFP16ProfileTuner(const TuningContext& context, VulkanTuneParams& config) {
+    config.vulkan.shouldUseFP16Storage = false;
+    config.vulkan.shouldUseFP16Compute = false;
+    config.vulkan.shouldUseCooperativeMatrix = false;
+
+    if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan FP16 profile tuning: FP16 storage or compute is unavailable");
+      return false;
+    }
+
+    VulkanTimestampTimer timer(context.device);
+    if(!timer.isUsable()) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan FP16 profile tuning: compute timestamps are unavailable");
+      return false;
+    }
+
+    VulkanTuneParams fp32Config = config;
+    fp32Config.vulkan.shouldUseFP16Storage = false;
+    fp32Config.vulkan.shouldUseFP16Compute = false;
+    double fp32Seconds = 0.0;
+    string error;
+    if(!FP16ProfileTuner::measure(context, fp32Config, 1, 3, fp32Seconds, error)) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan FP16 profile tuning: FP32 profile failed: " + error);
+      return false;
+    }
+
+    VulkanTuneParams selectedConfig = fp32Config;
+    double selectedSeconds = fp32Seconds;
+    for(int useFP16Compute = 0; useFP16Compute <= 1; useFP16Compute++) {
+      VulkanTuneParams candidate = config;
+      candidate.vulkan.shouldUseFP16Storage = true;
+      candidate.vulkan.shouldUseFP16Compute = useFP16Compute != 0;
+      double candidateSeconds = 0.0;
+      if(!FP16ProfileTuner::measure(context, candidate, useFP16Compute + 2, 3, candidateSeconds, error)) {
+        if(context.logger != nullptr)
+          context.logger->write(
+            "Vulkan FP16 profile candidate was excluded: " +
+            string(useFP16Compute != 0 ? "p16s16" : "p32s16") + ": " + error
+          );
+        continue;
+      }
+      if(candidateSeconds * 1.2 <= fp32Seconds && candidateSeconds < selectedSeconds) {
+        selectedConfig = candidate;
+        selectedSeconds = candidateSeconds;
+      }
+    }
+
+    if(!selectedConfig.vulkan.shouldUseFP16Storage) {
+      if(context.logger != nullptr)
+        context.logger->write("Vulkan FP16 profiles did not reach the required 1.2x speedup over FP32");
+      return false;
+    }
+
+    config = selectedConfig;
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan FP16 profile selected: " +
+        string(config.vulkan.shouldUseFP16Compute ? "p16s16" : "p32s16")
+      );
+    }
+    return true;
+  }
 }
 
 void VulkanTuner::tune(
@@ -1129,18 +1287,12 @@ void VulkanTuner::tune(
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger};
-  runTuner<XgemmDirectTuner>(context, tunedConfig);
-  runTuner<XgemmTuner>(context, tunedConfig);
-  runTuner<Conv3x3Tuner>(context, tunedConfig);
-  runTuner<Conv5x5Tuner>(context, tunedConfig);
-  runTuner<GPoolTuner>(context, tunedConfig);
-  runTuner<PointwiseTuner>(context, tunedConfig);
-  runTuner<AddChannelBiasesTuner>(context, tunedConfig);
-  if(modelInfo.transformerHeadDim > 0) {
-    runTuner<TransformerTuner>(context, tunedConfig);
-    runTuner<TransformerRMSNormTuner>(context, tunedConfig);
-  }
-  runTuner<SpatialRMSNormTuner>(context, tunedConfig);
+  tunedConfig.vulkan.shouldUseFP16Storage = false;
+  tunedConfig.vulkan.shouldUseFP16Compute = false;
+  tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
+  runOperationTuners(context, tunedConfig);
+  if(runFP16ProfileTuner(context, tunedConfig))
+    runOperationTuners(context, tunedConfig);
 }
 
 VulkanTuneParams VulkanTuner::loadOrCreate(

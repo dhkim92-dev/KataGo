@@ -319,7 +319,13 @@ namespace vk_shader {
     }
   }
 
-  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim) {
+  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print) {
+    struct PrintGuard {
+      bool& value;
+      bool oldValue;
+      ~PrintGuard() { value = oldValue; }
+    } guard{printPipelineCreation, printPipelineCreation};
+    printPipelineCreation = print;
     VkResult result;
     // Tile base conv no longer used.
     // createConv2dFp32();
@@ -544,11 +550,13 @@ namespace vk_shader {
     outPipeline.localSizeZ = localSizeZ;
     outPipeline.bindingCount = static_cast<uint32_t>(bindingSize);
     outPipeline.pushConstantSize = pushConstantSize;
-    const std::string message = "Built Vulkan compute pipeline with shader: " + pipelineName;
-    if(logger != nullptr)
-      logger->write(message);
-    if(logger == nullptr || (!logger->isLoggingToStdout() && !logger->isLoggingToStderr()))
-      std::cerr << message << std::endl;
+    if(printPipelineCreation) {
+      const std::string message = "Built Vulkan compute pipeline with shader: " + pipelineName;
+      if(logger != nullptr)
+        logger->write(message);
+      if(logger == nullptr || (!logger->isLoggingToStdout() && !logger->isLoggingToStderr()))
+        std::cerr << message << std::endl;
+    }
     vkDestroyShaderModule(device, shaderModule, nullptr);
     return VK_SUCCESS;
   }

@@ -323,7 +323,7 @@ struct ComputeContext {
             );
           }
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
-          VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second);
+          VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
           if(result != VK_SUCCESS)
             throw StringError("Failed to create Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
         }

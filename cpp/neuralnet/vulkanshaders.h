@@ -1319,6 +1319,7 @@ struct LocalDimHash {
     VkDevice device;
     VkPipelineCache cache;
     Logger* logger;
+    bool printPipelineCreation = false;
 
     // In this code, assume that NCHW is default format if no postfix is given.
 
@@ -1393,7 +1394,7 @@ struct LocalDimHash {
 
     ~ComputePipelines();
 
-    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim);
+    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print);
     VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
