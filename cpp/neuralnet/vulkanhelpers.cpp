@@ -346,6 +346,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
       if(logger == nullptr || (!logger->isLoggingToStdout() && !logger->isLoggingToStderr()))
         std::cerr << message << std::endl;
     };
+    writeFeatureSupport("Vulkan device features: " + deviceInfo.deviceName);
     writeFeatureSupport("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Shader Int8 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderInt8 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Storage Buffer 16Bit Support: " + std::string(deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ? "Yes" : "No"));
