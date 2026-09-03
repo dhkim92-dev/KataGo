@@ -35,14 +35,38 @@ extern "C" {
   extern const unsigned char* _binary_winograd_input_transform_fp32_end;
   extern const size_t _binary_winograd_input_transform_fp32_size;
 
+  extern const unsigned char _binary_winograd_input_transform_p32s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_p32s16_end;
+  extern const size_t _binary_winograd_input_transform_p32s16_size;
+
+  extern const unsigned char _binary_winograd_input_transform_p16s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_p16s16_end;
+  extern const size_t _binary_winograd_input_transform_p16s16_size;
+
   extern const unsigned char _binary_winograd_input_transform_bnact_fp32_start[];
   extern const unsigned char* _binary_winograd_input_transform_bnact_fp32_end;
   extern const size_t _binary_winograd_input_transform_bnact_fp32_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_p32s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_p32s16_end;
+  extern const size_t _binary_winograd_input_transform_bnact_p32s16_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_p16s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_p16s16_end;
+  extern const size_t _binary_winograd_input_transform_bnact_p16s16_size;
 
   // winograd_output_transform.glsl
   extern const unsigned char _binary_winograd_output_transform_fp32_start[];
   extern const unsigned char* _binary_winograd_output_transform_fpo32__end;
   extern const size_t _binary_winograd_output_transform_fp32_size;
+
+  extern const unsigned char _binary_winograd_output_transform_p32s16_start[];
+  extern const unsigned char* _binary_winograd_output_transform_p32s16_end;
+  extern const size_t _binary_winograd_output_transform_p32s16_size;
+
+  extern const unsigned char _binary_winograd_output_transform_p16s16_start[];
+  extern const unsigned char* _binary_winograd_output_transform_p16s16_end;
+  extern const size_t _binary_winograd_output_transform_p16s16_size;
 
   // add_pointwise_fp32.glsl
   extern const unsigned char _binary_add_pointwise_fp32_start[];
@@ -205,6 +229,14 @@ extern "C" {
   extern const unsigned char _binary_add_channel_bias_nchw_fp32_start[];
   extern const unsigned char* _binary_add_channel_bias_nchw_fp32_end;
   extern const size_t _binary_add_channel_bias_nchw_fp32_size;
+
+  extern const unsigned char _binary_add_channel_bias_nchw_p32s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_nchw_p32s16_end;
+  extern const size_t _binary_add_channel_bias_nchw_p32s16_size;
+
+  extern const unsigned char _binary_add_channel_bias_nchw_p16s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_nchw_p16s16_end;
+  extern const size_t _binary_add_channel_bias_nchw_p16s16_size;
 
   // add_channel_bias_nc_identity_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_identity_fp32_start[];
@@ -372,11 +404,29 @@ namespace vk_shader {
   extern const unsigned char* spirv_winograd_input_transform_fp32;
   extern size_t spirv_winograd_input_transform_fp32_size;
 
+  extern const unsigned char* spirv_winograd_input_transform_p32s16;
+  extern size_t spirv_winograd_input_transform_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_p16s16;
+  extern size_t spirv_winograd_input_transform_p16s16_size;
+
   extern const unsigned char* spirv_winograd_input_transform_bnact_fp32;
   extern size_t spirv_winograd_input_transform_bnact_fp32_size;
 
+  extern const unsigned char* spirv_winograd_input_transform_bnact_p32s16;
+  extern size_t spirv_winograd_input_transform_bnact_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_bnact_p16s16;
+  extern size_t spirv_winograd_input_transform_bnact_p16s16_size;
+
   extern const unsigned char* spirv_winograd_output_transform_fp32;
   extern size_t spirv_winograd_output_transform_fp32_size;
+
+  extern const unsigned char* spirv_winograd_output_transform_p32s16;
+  extern size_t spirv_winograd_output_transform_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_output_transform_p16s16;
+  extern size_t spirv_winograd_output_transform_p16s16_size;
 
   // Convolution layers 3x3 with identity activation function
   // extern const unsigned char* spirv_conv2d_3x3_bn_fp32;
@@ -519,6 +569,12 @@ namespace vk_shader {
   // add_channel_bias_nchw_fp32 - Add channel bias (identity)
   extern const unsigned char* spirv_add_channel_bias_nchw_fp32;
   extern size_t spirv_add_channel_bias_nchw_fp32_size;
+
+  extern const unsigned char* spirv_add_channel_bias_nchw_p32s16;
+  extern size_t spirv_add_channel_bias_nchw_p32s16_size;
+
+  extern const unsigned char* spirv_add_channel_bias_nchw_p16s16;
+  extern size_t spirv_add_channel_bias_nchw_p16s16_size;
 
   // add_channel_bias_nc_identity_fp32 - Add channel bias + Identity
   extern const unsigned char* spirv_add_channel_bias_nc_identity_fp32;
@@ -1114,9 +1170,6 @@ struct LocalDimHash {
       uint32_t outputTransformLocalXSize;
       uint32_t outputTransformLocalYSize;
       uint32_t outputTransformLocalZSize;
-      uint32_t transLocalSizeX=128;
-      uint32_t transLocalSizeY=1;
-      uint32_t untransLocalSizeX=8;
     };
 
     struct XgemmTuneParams {
@@ -1158,7 +1211,19 @@ struct LocalDimHash {
       int APPLY_ELTS_PER_THREAD = 16;
     };
 
+    struct VulkanParams {
+      bool canUseFP16Storage = false;
+      bool canUseFP16Compute = false;
+      bool canUseCooperativMatrix = false;
+      bool canUseSubgroup = false;
+      bool shouldUseFP16Storage = false;
+      bool shouldUseFP16Compute = false;
+      bool shouldUseCooperativeMatrix = false;
+      bool shouldUseSubgroup = false;
+    };
+
     struct VulkanTuneParams {
+      VulkanParams vulkan;
       AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
       GPoolTuneParams gPool;
@@ -1190,10 +1255,7 @@ struct LocalDimHash {
           .inputTransformLocalYSize = 2,
           .outputTransformLocalXSize = 8,
           .outputTransformLocalYSize = 2,
-          .outputTransformLocalZSize = 2,
-          .transLocalSizeX = 128,
-          .transLocalSizeY = 1,
-          .untransLocalSizeX = 8
+          .outputTransformLocalZSize = 2
         };
         conv5x5 = ConvTuneParams{
           .inTileYSize = 6,
@@ -1204,10 +1266,7 @@ struct LocalDimHash {
           .inputTransformLocalYSize = 2,
           .outputTransformLocalXSize = 8,
           .outputTransformLocalYSize = 2,
-          .outputTransformLocalZSize = 2,
-          .transLocalSizeX = 128,
-          .transLocalSizeY = 1,
-          .untransLocalSizeX = 8
+          .outputTransformLocalZSize = 2
         };
         // xgemm = XgemmTuneParams{
         //   .MDIMC = 16,
@@ -1239,13 +1298,9 @@ struct LocalDimHash {
   }
 
   struct ComputePipelines {
-    // const VulkanTuneParams tuneParams;
-    // const bool usingFP16Storage;
-    // const bool usingFP16Compute;
-    // const bool usingFP16TensorCores;
     VkDevice device;
-    const tune::VulkanTuneParams tuneParams;
     VkPipelineCache cache;
+    Logger* logger;
 
     // In this code, assume that NCHW is default format if no postfix is given.
 
@@ -1313,18 +1368,46 @@ struct LocalDimHash {
     Pipeline transformerSpatialRMSNormReduce;
     Pipeline transformerSpatialRMSNormSumSq;
 
-    ComputePipelines(VkDevice device_, const tune::VulkanTuneParams& tuneParams_, int qHeadDim, int vHeadDim);
+    ComputePipelines(VkDevice device_, Logger* logger_);
     ComputePipelines() = delete;
     ComputePipelines(const ComputePipelines&) = delete;
     ComputePipelines& operator=(const ComputePipelines&) = delete;
 
     ~ComputePipelines();
 
-  private :
-    void createPipelines(int qHeadDim, int vHeadDim);
-    void destroyPipelines();
+    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim);
+    VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
+    VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
+    VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
+    VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createXgemmBatched(Pipeline& pipeline, const tune::XgemmTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createGlobalPoolingChannelsFp32(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createValueHeadPoolingChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
+    VkResult createSumChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCHW(Pipeline& pipeline, const tune::AddChannelBiasesNCHWTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createExtractChannel0NCHWFp32(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormReduce(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     void destroyPipeline(Pipeline& pipeline);
-    void createPipeline(
+    VkResult createPipeline(
       std::string pipelineName,
       const unsigned char* spirvBytes,
       size_t spirvSize,
@@ -1336,158 +1419,9 @@ struct LocalDimHash {
       uint32_t localSizeY = 1,
       uint32_t localSizeZ = 1
     );
-    /**
-     * @brief Create a Conv2d Fp32 object
-    */
-    // void createConv2dFp32();
 
-    void createWinogradInputTransform();
-
-    void createWinogradInputTransformBnAct();
-
-    void createWinogradOutputTransform();
-
-    /**
-     * @brief Create a Conv2d3x3 Bn + Identity Activation fused Fp32 objects.
-     */
-    // void createConv2d3x3BnFp32();
-
-    /**
-     * @brief Create a Conv2d3x3 Bn + ReLU Activation fused Fp32 objects.
-     */
-    // void createConv2d3x3BnReluFp32();
-    /**
-     * @brief Create a Conv2d3x3 Bn Mish Fp32 object
-     */
-    // void createConv2d3x3BnMishFp32();
-
-    /**
-     * @brief Create a Conv2d5x5 Bn + Identity Activation fused Fp32 objects.
-     */
-    // void createConv2d5x5BnFp32();
-
-    /**
-     * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
-     */
-    // void createConv2d5x5BnReluFp32();
-
-    /**
-     * @brief Create a Conv2d5x5 Bn + ReLU Activation fused Fp32 objects.
-     */
-    // void createConv2d5x5BnReluFp32();
-
-    /**
-     * @brief Create a Conv2d5x5 Bn Mish Fp32 object
-     */
-    // void createConv2d5x5BnMishFp32();
-
-    /**
-     * @brief Create a Add Point Wise Fp32 object
-     */
-    void createAddPointWise();
-
-    /**
-     * @brief Create a Batched XGEMM Direct Fp32 object
-     */
-    void createXgemmDirectBatchedTT();
-
-    /**
-     * @brief Create a XGEMM Batched Fp32 object
-     */
-    void createXgemmBatched();
-
-     /**
-     * @brief Create a Strided Batched Matmul Fp32 object
-     */
-    void createXgemmStridedBatched();
-
-    /**
-     * @brief Create a BatchNorm Mask Fp32 object
-     */
-    void createBatchNormMaskIdentity();
-
-    /**
-     * @brief Create a BatchNorm Mask + ReLU object
-     */
-    void createBatchNormMaskRelu();
-
-    /**
-     * @brief Create a BatchNorm Mask + Mish object
-     */
-    void createBatchNormMaskMish();
-
-    /**
-     * @brief Create a BatchNorm Mask + Mish + Scale8 object
-     */
-    void createBatchNormMaskMishScale8();
-
-    void createBatchNormMaskSilu();
-
-    /**
-     * @brief Create a Global Average Pool Fp32 object
-     */
-    void createGlobalPoolingChannelsFp32();
-
-    /**
-     * @brief Create a Value Head Pool Channels Fp32 object
-     */
-    void createValueHeadPoolingChannels();
-
-    /**
-     * @brief Create a Sum Channels Fp32 object
-     */
-    void createSumChannels();
-
-    /**
-     * @brief Create a Add Channel Bias NCHW Fp32 object
-     */
-    void createAddChannelBiasNCHW();
-
-    /**
-     * @brief Create a Add Channel Bias NC
-     */
-    void createAddChannelBiasNCIdentity();
-
-    /**
-     * @brief Create a Add Channel Bias NC + ReLU
-     */
-    void createAddChannelBiasNCRelu();
-
-    /**
-     * @brief Create a Add Channel Bias NC + Mish
-     */
-    void createAddChannelBiasNCMish();
-
-    /**
-     * @brief Create a Add Channel Bias NC + Mish + Scale8
-     */
-    void createAddChannelBiasNCMishScale8();
-
-    /**
-     * @brief Create a Add Channel Bias NC + Silu
-     */
-    void createAddChannelBiasNCSilu();
-    
-    /**
-     * @brief Create a Extract Channel 0 NCHW Fp32 object
-     */
-    void createExtractChannel0NCHWFp32();
-
-    void createTransformerRMSNorm();
-
-    void createTransformerApplyRoPE();
-
-    void createTransformerScaleDotProduct(int qHeadDim, int vHeadDim);
-
-    void createTransformerScaleDotProductNaive(int qHeadDim, int vHeadDim);
-
-    void createTransformerSwiGLU();
-
-    void createTransformerSpatialRMSNormApply();
-
-    void createTransformerSpatialRMSNormReduce();
-
-    void createTransformerSpatialRMSNormSumSq();
+  private :
+    void destroyPipelines();
   };
 }
 

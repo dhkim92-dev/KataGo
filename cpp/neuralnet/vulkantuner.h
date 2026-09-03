@@ -4,13 +4,14 @@
 
 #include "../core/logger.h"
 #include "../neuralnet/desc.h"
+#include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
 
 using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 1;
+  constexpr int TUNER_VERSION = 3;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   struct ModelInfoForTuning {
@@ -32,6 +33,7 @@ namespace VulkanTuner {
     int nnXLen,
     int nnYLen,
     const ModelInfoForTuning& modelInfo,
+    const VulkanDeviceInfo& deviceInfo,
     Logger* logger);
 }  // namespace VulkanTuner
 

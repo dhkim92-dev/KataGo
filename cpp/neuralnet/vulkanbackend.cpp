@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <memory>
 #include <chrono>
+#include <iostream>
 #include "../core/global.h"
 #include "../core/simpleallocator.h"
 #include "../core/test.h"
@@ -191,6 +192,7 @@ struct ComputeContext {
   const enabled_t usingNHWCMode;
   VulkanContext* vulkanContext;
   std::unordered_map<uint32_t, vk_shader::ComputePipelines *> pipelinesPerDev;
+  std::unordered_map<uint32_t, vk_shader::tune::VulkanTuneParams> tuneParamsPerDev;
   std::pair<int, int> transformerHeadDims = {-1, -1};
   Logger* logger;
 
@@ -276,13 +278,25 @@ struct ComputeContext {
         std::vector<const char*> requiredExtensions = {
         };
 
-        // Check for FP16 support if requested
-        if ( usingFP16Mode == enabled_t::True && !isDeviceSupportFp16(deviceInfo) ) {
-          throw StringError("Requested FP16 mode but device " + deviceInfo.deviceName + " does not support it");
+        const bool supportsFP16Storage =
+          deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
+          deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
+        const bool supportsFP16Compute = isDeviceSupportFp16(deviceInfo);
+
+        if ( usingFP16Mode == enabled_t::True && (!supportsFP16Storage || !supportsFP16Compute) ) {
+          throw StringError("Requested FP16 mode but device " + deviceInfo.deviceName + " does not support FP16 storage and compute");
         }
 
-        if ( usingFP16Mode != enabled_t::False && isDeviceSupportFp16(deviceInfo) ) {
+        if ( usingFP16Mode != enabled_t::False && supportsFP16Compute ) {
           requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+        }
+        if (
+          usingFP16Mode != enabled_t::False &&
+          supportsFP16Storage &&
+          VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
+          VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
+        ) {
+          requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
         }
 
         // TODO: Not like OpenCL, Vulkan can access Tensor cores via extensions. I will support it later.
@@ -300,17 +314,21 @@ struct ComputeContext {
           logger
         );
         vk_shader::ComputePipelines* pipelines = nullptr;
+        VulkanTuneParams tuneParams;
         try {
-          VulkanTuneParams tuneParams;
           if(modelInfo != nullptr) {
             tuneParams = VulkanTuner::loadOrCreate(
               tunerFile,homeDataDirOverride,deviceInfo.deviceName,
-              nnXLen,nnYLen,*modelInfo,logger
+              nnXLen,nnYLen,*modelInfo,vulkanDevice->info,logger
             );
           }
-          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device,tuneParams, transformerHeadDims.first, transformerHeadDims.second);
+          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
+          VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second);
+          if(result != VK_SUCCESS)
+            throw StringError("Failed to create Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
         }
         catch(...) {
+          delete pipelines;
           delete vulkanDevice;
           throw;
         }
@@ -319,6 +337,7 @@ struct ComputeContext {
           logger->write("Created Vulkan Compute Pipelines for device: " + deviceInfo.deviceName);
         }
         this->pipelinesPerDev.emplace(gpuIdx, pipelines);
+        this->tuneParamsPerDev.emplace(gpuIdx, tuneParams);
       }
 
       vulkanContext = new VulkanContext(
@@ -622,27 +641,24 @@ struct BatchNormLayer {
     assert(desc->mergedScale.size() == static_cast<size_t>(numChannels));
     assert(desc->mergedBias.size() == static_cast<size_t>(numChannels));
 
-    // TODO: FP16 support
     // Precompute merged scale and bias
     std::vector<float> mergedScale = desc->mergedScale;
     std::vector<float> mergedBias = desc->mergedBias;
 
     VkResult res;
 
-    mergedBiasBuf = vk_helper::createDeviceBufferWithData(
+    mergedBiasBuf = vk_helper::createReadOnlyBuffer(
       handle->vulkanDevice,
-      sizeof(float) * mergedBias.size(),
-      mergedBias.data(),
-      true,
+      mergedBias,
+      useFP16,
       &res
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged bias buffer", res);
 
-    mergedScaleBuf = vk_helper::createDeviceBufferWithData(
+    mergedScaleBuf = vk_helper::createReadOnlyBuffer(
       handle->vulkanDevice,
-      sizeof(float) * mergedScale.size(),
-      mergedScale.data(),
-      true,
+      mergedScale,
+      useFP16,
       &res
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
@@ -841,12 +857,10 @@ struct ConvLayer {
           transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
         }
       }
-      // TODO: FP16 support
-      filterBuf = vk_helper::createDeviceBufferWithData(
+      filterBuf = vk_helper::createReadOnlyBuffer(
         handle->vulkanDevice,
-        sizeof(float) * transWeights.size(),
-        transWeights.data(),
-        true,
+        transWeights,
+        useFP16,
         &res
       );
     } else if( (convXSize == 3 && convYSize == 3) || (convXSize==5 &&convYSize == 5)) {
@@ -880,20 +894,18 @@ struct ConvLayer {
         inTileYSize, inTileXSize
       );
 
-      filterBuf = vk_helper::createDeviceBufferWithData(
+      filterBuf = vk_helper::createReadOnlyBuffer(
         handle->vulkanDevice,
-        sizeof(float) * winogradWeights.size(),
-        winogradWeights.data(),
-        true,
+        winogradWeights,
+        useFP16,
         &res
       );
     } else {
       // For larger convolutions, use weights as-is
-      filterBuf = vk_helper::createDeviceBufferWithData(
+      filterBuf = vk_helper::createReadOnlyBuffer(
         handle->vulkanDevice,
-        sizeof(float) * desc->weights.size(),
-        desc->weights.data(),
-        true,
+        desc->weights,
+        useFP16,
         &res
       );
     }
@@ -4585,26 +4597,24 @@ struct Buffers {
     inputGlobalElts = m.numInputGlobalChannels * batchElts;
     inputMetaElts = m.numInputMetaChannels * batchElts;
 
-    // TODO:  Modify this when fp16 input is supported.
-    const size_t dtypeSize = sizeof(float);
-    // input = createReadWriteBuffer(handle, inputElts, useFP16);
+    const size_t spatialDtypeSize = useFP16 ? sizeof(half_t) : sizeof(float);
     VkResult res = VK_SUCCESS;
-    input = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputElts, false, &res);
+    input = vk_helper::createDeviceBuffer(handle->vulkanDevice, spatialDtypeSize * inputElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input buffer", res);
-    inputGlobal = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputGlobalElts, false, &res);
+    inputGlobal = vk_helper::createDeviceBuffer(handle->vulkanDevice, sizeof(float) * inputGlobalElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input global buffer", res);
     if(m.numInputMetaChannels > 0) {
-      inputMeta = vk_helper::createDeviceBuffer(handle->vulkanDevice, dtypeSize * inputMetaElts, false, &res);
+      inputMeta = vk_helper::createDeviceBuffer(handle->vulkanDevice, sizeof(float) * inputMetaElts, false, &res);
     }
     else {
       inputMeta = NULL;
     }
 
-    mask = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchXYElts * dtypeSize, false, &res);
+    mask = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchXYElts * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create mask buffer", res);
-    maskSum = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchElts * dtypeSize, false, &res);
+    maskSum = vk_helper::createDeviceBuffer(handle->vulkanDevice, batchElts * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create mask sum buffer", res);
-    trunk = vk_helper::createDeviceBuffer(handle->vulkanDevice, m.trunk->trunkNumChannels * batchXYElts * dtypeSize, false, &res);
+    trunk = vk_helper::createDeviceBuffer(handle->vulkanDevice, m.trunk->trunkNumChannels * batchXYElts * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create trunk buffer", res);
 
     if(m.modelVersion >= 17)
@@ -4617,22 +4627,22 @@ struct Buffers {
       testAssert(m.policyHead->p2Channels == 1);
 
     policyPassElts = m.policyHead->p2Channels * batchElts;
-    policyPass = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyPassElts * dtypeSize, false, &res);
+    policyPass = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyPassElts * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create policy pass buffer", res);
     policyElts = m.policyHead->p2Channels * batchXYElts;
-    policy = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyElts * dtypeSize, false, &res);
+    policy = vk_helper::createDeviceBuffer(handle->vulkanDevice, policyElts * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create policy buffer", res);
 
     valueElts = m.valueHead->valueChannels * batchElts;
-    value = vk_helper::createDeviceBuffer(handle->vulkanDevice, valueElts * dtypeSize, false, &res);
+    value = vk_helper::createDeviceBuffer(handle->vulkanDevice, valueElts * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create value buffer", res);
 
     scoreValueElts = m.valueHead->scoreValueChannels * batchElts;
-    scoreValue = vk_helper::createDeviceBuffer(handle->vulkanDevice, scoreValueElts * dtypeSize, false, &res);
+    scoreValue = vk_helper::createDeviceBuffer(handle->vulkanDevice, scoreValueElts * sizeof(float), false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create score value buffer", res);
 
     ownershipElts = m.valueHead->ownershipChannels * batchXYElts;
-    ownership = vk_helper::createDeviceBuffer(handle->vulkanDevice, ownershipElts * dtypeSize, false, &res);
+    ownership = vk_helper::createDeviceBuffer(handle->vulkanDevice, ownershipElts * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create ownership buffer", res);
 
     // TODO: Implement workspace allocation when winograd or other conv algorithms are added.
@@ -4640,9 +4650,9 @@ struct Buffers {
 
     std::printf("Conv workspace elts needed: size1=%zu, size2=%zu\n", convWorkspaceElts.size1, convWorkspaceElts.size2);
 
-    convWorkspace = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size1 * sizeof(float), false, &res);
+    convWorkspace = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size1 * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create conv workspace buffer", res);
-    convWorkspace2 = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size2 * sizeof(float), false, &res);
+    convWorkspace2 = vk_helper::createDeviceBuffer(handle->vulkanDevice, convWorkspaceElts.size2 * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create conv workspace2 buffer", res);
   }
 
@@ -4729,8 +4739,8 @@ ComputeHandleInternal::ComputeHandleInternal(
 ):
   context(ctx),
   vulkanDevice(ctx->vulkanContext->findGpuExn(gpuIdx)),
-  tuneParams(ctx->pipelinesPerDev.at(vulkanDevice->info.deviceId)->tuneParams),
   pipelines(ctx->pipelinesPerDev.at(vulkanDevice->info.deviceId)),
+  tuneParams(ctx->tuneParamsPerDev.at(vulkanDevice->info.deviceId)),
   qHeadDim(ctx->transformerHeadDims.first),
   vHeadDim(ctx->transformerHeadDims.second)
 {
@@ -4738,6 +4748,29 @@ ComputeHandleInternal::ComputeHandleInternal(
   this->device = this->vulkanDevice->device;
   this->nnXLen = ctx->nnXLen;
   this->nnYLen = ctx->nnYLen;
+
+  const VulkanParams& vulkanParams = tuneParams.vulkan;
+  if(ctx->usingFP16Mode == enabled_t::True) {
+    usingFP16Storage = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute;
+    usingFP16Compute = vulkanParams.canUseFP16Compute;
+  }
+  else if(ctx->usingFP16Mode == enabled_t::Auto) {
+    usingFP16Storage =
+      vulkanParams.canUseFP16Storage &&
+      vulkanParams.canUseFP16Compute &&
+      vulkanParams.shouldUseFP16Storage;
+    usingFP16Compute = vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Compute;
+  }
+
+  if(usingFP16Storage || usingFP16Compute) {
+    const std::string message =
+      "Vulkan FP16 enabled (storage: " + std::string(usingFP16Storage ? "Yes" : "No") +
+      ", compute: " + std::string(usingFP16Compute ? "Yes" : "No") + ")";
+    if(ctx->logger != nullptr)
+      ctx->logger->write(message);
+    if(ctx->logger == nullptr || (!ctx->logger->isLoggingToStdout() && !ctx->logger->isLoggingToStderr()))
+      std::cerr << message << std::endl;
+  }
 
   if ( usingFP16TensorCoresFor1x1 ) {
     throw StringError("Define paddedNNXYLen required for WMMA 1x1 conv");
@@ -4824,7 +4857,7 @@ void NeuralNet::freeComputeHandle(ComputeHandle* handle) {
 }
 
 bool NeuralNet::isUsingFP16(const ComputeHandle *handle) {
-  return false;
+  return handle->handle->usingFP16Storage;
 }
 
 bool NeuralNet::setIsWarmup(const ComputeHandle* handle, bool isWarmup) {
@@ -5038,7 +5071,7 @@ void NeuralNet::getOutput(
   assert(inputBuffers->singleOwnershipResultElts == nnXLen*nnYLen);
 
   ComputeHandleInternal* handle = computeHandle->handle.get();
-  bool useFP16Storage = false; // TODO: enable fp16 storage.
+  bool useFP16Storage = handle->usingFP16Storage;
 
   VkResult res = VK_ERROR_UNKNOWN;
 
@@ -5062,7 +5095,15 @@ void NeuralNet::getOutput(
       }
     }
 
-    // TODO: complete fp16 device memory allocation for inputs.
+    vk_helper::copyHostToDeviceBuffer(
+      handle->vulkanDevice,
+      inputBuffers->userInputBufferHalf,
+      buffers->input,
+      static_cast<VkDeviceSize>(paddedInputElts * sizeof(half_t)),
+      false,
+      &res
+    );
+    CHECK_VK_MSG("Copy FP16 input buffer to device", res);
 
   } else {
 
@@ -5079,7 +5120,9 @@ void NeuralNet::getOutput(
     } else {
       ASSERT_UNREACHABLE;
     }
+  }
 
+  {
     vk_helper::copyHostToDeviceBuffer(
       handle->vulkanDevice,
       inputBuffers->userInputGlobalBuffer, // Host pointer
@@ -5167,7 +5210,25 @@ void NeuralNet::getOutput(
     // Read back Policy result
     size_t paddedPolicyElts = static_cast<size_t>(numPolicyChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
-      // TODO: implement fp16 storage path
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice,
+        buffers->policy,
+        static_cast<VkDeviceSize>(paddedPolicyElts * sizeof(half_t)),
+        inputBuffers->policyResultsHalf,
+        true,
+        &res
+      );
+      CHECK_VK_MSG("Copy FP16 policy results buffer to host", res);
+
+      size_t totalChannels = static_cast<size_t>(numPolicyChannels) * batchSize;
+      if ( paddedNNXYLen == nnXYLen ) {
+        for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
+          inputBuffers->policyResults[i] = inputBuffers->policyResultsHalf[i];
+      } else {
+        for ( size_t c = 0 ; c < totalChannels ; ++c )
+          for ( int xy = 0 ; xy < nnXYLen ; ++xy )
+            inputBuffers->policyResults[c * nnXYLen + xy] = inputBuffers->policyResultsHalf[c * paddedNNXYLen + xy];
+      }
     } else {
       if ( paddedNNXYLen == nnXYLen ) {
         vk_helper::copyDeviceBufferToHost(
@@ -5233,7 +5294,25 @@ void NeuralNet::getOutput(
     // Read back Ownership result
     size_t paddedOwnershipElts = static_cast<size_t>(computeHandle->model->numOwnershipChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
-      // TODO: implement fp16 storage path
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice,
+        buffers->ownership,
+        static_cast<VkDeviceSize>(paddedOwnershipElts * sizeof(half_t)),
+        inputBuffers->ownershipResultsHalf,
+        true,
+        &res
+      );
+      CHECK_VK_MSG("Copy FP16 ownership results buffer to host", res);
+
+      size_t totalChannels = static_cast<size_t>(computeHandle->model->numOwnershipChannels) * batchSize;
+      if ( paddedNNXYLen == nnXYLen ) {
+        for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
+          inputBuffers->ownershipResults[i] = inputBuffers->ownershipResultsHalf[i];
+      } else {
+        for ( size_t c = 0 ; c < totalChannels ; ++c )
+          for ( int xy = 0 ; xy < nnXYLen ; ++xy )
+            inputBuffers->ownershipResults[c * nnXYLen + xy] = inputBuffers->ownershipResultsHalf[c * paddedNNXYLen + xy];
+      }
     } else {
       if ( paddedNNXYLen == nnXYLen ) {
         vk_helper::copyDeviceBufferToHost(
@@ -5392,7 +5471,6 @@ void NeuralNet::getOutput(
   #endif
     }
   }
-
   #ifdef VULKAN_DEBUG
   // exit(0);
   #endif

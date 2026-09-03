@@ -74,7 +74,7 @@ struct ComputeHandleInternal {
   int qHeadDim=-1, vHeadDim=-1;
 
   bool usingFP16Storage = false;
-  bool usingFp16Compute = false;
+  bool usingFP16Compute = false;
   bool usingFP16TensorCores = false;
   bool usingFP16TensorCoresFor1x1 = false;
 

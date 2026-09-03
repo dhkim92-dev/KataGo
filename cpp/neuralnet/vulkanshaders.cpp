@@ -6,6 +6,8 @@
 #ifdef USE_VULKAN_BACKEND
 #include "../neuralnet/vulkanshaders.h"
 
+#include <iostream>
+
 using namespace vk_shader;
 using namespace vk_shader::push;
 using namespace vk_shader::spec;
@@ -26,6 +28,7 @@ namespace vk_shader {
           info(vk_helper::createSpecializationInfo(data, mapEntries))
       {}
     };
+
   }
 
 
@@ -44,18 +47,34 @@ namespace vk_shader {
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
   size_t spirv_winograd_input_transform_fp32_size = _binary_winograd_input_transform_fp32_size;
+  const unsigned char* spirv_winograd_input_transform_p32s16 = _binary_winograd_input_transform_p32s16_start;
+  size_t spirv_winograd_input_transform_p32s16_size = _binary_winograd_input_transform_p32s16_size;
+  const unsigned char* spirv_winograd_input_transform_p16s16 = _binary_winograd_input_transform_p16s16_start;
+  size_t spirv_winograd_input_transform_p16s16_size = _binary_winograd_input_transform_p16s16_size;
 
   // winograd_input_transform_bnact
   const unsigned char* spirv_winograd_input_transform_bnact_fp32 = _binary_winograd_input_transform_bnact_fp32_start;
   size_t spirv_winograd_input_transform_bnact_fp32_size = _binary_winograd_input_transform_bnact_fp32_size;
+  const unsigned char* spirv_winograd_input_transform_bnact_p32s16 = _binary_winograd_input_transform_bnact_p32s16_start;
+  size_t spirv_winograd_input_transform_bnact_p32s16_size = _binary_winograd_input_transform_bnact_p32s16_size;
+  const unsigned char* spirv_winograd_input_transform_bnact_p16s16 = _binary_winograd_input_transform_bnact_p16s16_start;
+  size_t spirv_winograd_input_transform_bnact_p16s16_size = _binary_winograd_input_transform_bnact_p16s16_size;
 
   // winograd_output_transform
   const unsigned char* spirv_winograd_output_transform_fp32 = _binary_winograd_output_transform_fp32_start;
   size_t spirv_winograd_output_transform_fp32_size = _binary_winograd_output_transform_fp32_size;
+  const unsigned char* spirv_winograd_output_transform_p32s16 = _binary_winograd_output_transform_p32s16_start;
+  size_t spirv_winograd_output_transform_p32s16_size = _binary_winograd_output_transform_p32s16_size;
+  const unsigned char* spirv_winograd_output_transform_p16s16 = _binary_winograd_output_transform_p16s16_start;
+  size_t spirv_winograd_output_transform_p16s16_size = _binary_winograd_output_transform_p16s16_size;
 
   // add_pointwise_fp32
   const unsigned char* spirv_add_pointwise_fp32 = _binary_add_pointwise_fp32_start;
   size_t spirv_add_pointwise_fp32_size = _binary_add_pointwise_fp32_size;
+  const unsigned char* spirv_add_pointwise_p32s16 = _binary_add_pointwise_p32s16_start;
+  size_t spirv_add_pointwise_p32s16_size = _binary_add_pointwise_p32s16_size;
+  const unsigned char* spirv_add_pointwise_p16s16 = _binary_add_pointwise_p16s16_start;
+  size_t spirv_add_pointwise_p16s16_size = _binary_add_pointwise_p16s16_size;
 
   // xgemm_batched_fp32
   const unsigned char* spirv_xgemm_batched_fp32 = _binary_xgemm_batched_fp32_start;
@@ -180,6 +199,10 @@ namespace vk_shader {
   // add_channel_bias_nchw_fp32
   const unsigned char* spirv_add_channel_bias_nchw_fp32 = _binary_add_channel_bias_nchw_fp32_start;
   size_t spirv_add_channel_bias_nchw_fp32_size = _binary_add_channel_bias_nchw_fp32_size;
+  const unsigned char* spirv_add_channel_bias_nchw_p32s16 = _binary_add_channel_bias_nchw_p32s16_start;
+  size_t spirv_add_channel_bias_nchw_p32s16_size = _binary_add_channel_bias_nchw_p32s16_size;
+  const unsigned char* spirv_add_channel_bias_nchw_p16s16 = _binary_add_channel_bias_nchw_p16s16_start;
+  size_t spirv_add_channel_bias_nchw_p16s16_size = _binary_add_channel_bias_nchw_p16s16_size;
 
   // add_channel_bias_nc_fp32
   const unsigned char* spirv_add_channel_bias_nc_identity_fp32 = _binary_add_channel_bias_nc_identity_fp32_start;
@@ -280,24 +303,11 @@ namespace vk_shader {
   const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p16s16 = _binary_transformer_spatial_rms_norm_sum_sq_p16s16_start;
   size_t spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size = _binary_transformer_spatial_rms_norm_sum_sq_p16s16_size;
 
-  ComputePipelines::ComputePipelines(
-    VkDevice device_,
-    const vk_shader::tune::VulkanTuneParams& params,
-    int qHeadDim, int vHeadDim
-  ): device(device_), tuneParams(params) {
+  ComputePipelines::ComputePipelines(VkDevice device_, Logger* logger_): device(device_), logger(logger_) {
     VkResult res = VK_ERROR_UNKNOWN;
     cache = vk_helper::createPipelineCache(device, &res);
     if(res != VK_SUCCESS)
       throw StringError("Failed to create Vulkan pipeline cache: " + vk_helper::vkErrorToString(res));
-    try {
-      createPipelines(qHeadDim, vHeadDim);
-    }
-    catch(...) {
-      destroyPipelines();
-      vkDestroyPipelineCache(device,cache,nullptr);
-      cache = VK_NULL_HANDLE;
-      throw;
-    }
   }
 
   ComputePipelines::~ComputePipelines() {
@@ -309,42 +319,73 @@ namespace vk_shader {
     }
   }
 
-  void ComputePipelines::createPipelines(int qHeadDim, int vHeadDim) {
+  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim) {
+    VkResult result;
     // Tile base conv no longer used.
     // createConv2dFp32();
-    createWinogradInputTransform();
-    createWinogradInputTransformBnAct();
-    createWinogradOutputTransform();
-    createAddPointWise();
-    createXgemmDirectBatchedTT();
-    createXgemmBatched();
-    createXgemmStridedBatched();
-    createBatchNormMaskIdentity();
-    createBatchNormMaskRelu();
-    createBatchNormMaskMish();
-    createBatchNormMaskMishScale8();
-    createBatchNormMaskSilu();
-    createGlobalPoolingChannelsFp32();
-    createValueHeadPoolingChannels();
-    createSumChannels();
-    createAddChannelBiasNCHW();
-    createAddChannelBiasNCIdentity();
-    createAddChannelBiasNCRelu();
-    createAddChannelBiasNCMish();
-    createAddChannelBiasNCMishScale8();
-    createAddChannelBiasNCSilu();
-    createExtractChannel0NCHWFp32();
-    createTransformerRMSNorm();
-    createTransformerApplyRoPE();
-    createTransformerSwiGLU();
-    createTransformerSpatialRMSNormApply();
-    createTransformerSpatialRMSNormReduce();
-    createTransformerSpatialRMSNormSumSq();
+    if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    struct PipelineActivation { Pipeline* pipeline; int activation; };
+    const PipelineActivation winogradBnActPipelines[] = {
+      {&winogradInputTransform3x3_bnact_identity, ACTIVATION_IDENTITY},
+      {&winogradInputTransform3x3_bnact_relu, ACTIVATION_RELU},
+      {&winogradInputTransform3x3_bnact_mish, ACTIVATION_MISH},
+      {&winogradInputTransform3x3_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
+      {&winogradInputTransform5x5_bnact_identity, ACTIVATION_IDENTITY},
+      {&winogradInputTransform5x5_bnact_relu, ACTIVATION_RELU},
+      {&winogradInputTransform5x5_bnact_mish, ACTIVATION_MISH},
+      {&winogradInputTransform5x5_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
+    };
+    for(int i = 0; i < 8; i++) {
+      const int convSize = i < 4 ? 3 : 5;
+      const ConvTuneParams& convParams = convSize == 3 ? tuneParams.conv3x3 : tuneParams.conv5x5;
+      if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    }
+    if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskMishScale8(batchNormMaskMishScale8, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskSilu(batchNormMaskSilu, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createGlobalPoolingChannelsFp32(globalPoolingChannelsFp32, tuneParams.gPool, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    for(uint32_t localSizeY = 1; localSizeY <= static_cast<uint32_t>(tuneParams.gPool.CHANNELSTRIDE); localSizeY *= 2) {
+      for(uint32_t localSizeZ = 1; localSizeZ <= static_cast<uint32_t>(tuneParams.gPool.BATCHSTRIDE); localSizeZ *= 2) {
+        LocalDim dim = {tuneParams.gPool.XYSTRIDE, static_cast<int>(localSizeY), static_cast<int>(localSizeZ)};
+        Pipeline pipeline;
+        if((result = createValueHeadPoolingChannels(pipeline, tuneParams.gPool, localSizeY, localSizeZ, tuneParams.vulkan)) != VK_SUCCESS) return result;
+        valueHeadPoolingChannels.emplace(dim, pipeline);
+      }
+    }
+    for(uint32_t localSizeZ = 1; localSizeZ <= static_cast<uint32_t>(tuneParams.gPool.BATCHSTRIDE); localSizeZ *= 2) {
+      LocalDim dim = {tuneParams.gPool.XYSTRIDE, 1, static_cast<int>(localSizeZ)};
+      Pipeline pipeline;
+      if((result = createSumChannels(pipeline, tuneParams.gPool, localSizeZ, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      sumChannels.emplace(dim, pipeline);
+    }
+    if((result = createAddChannelBiasNCHW(addChannelBiasNCHW, tuneParams.addChannelBiases, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBiasNCIdentity(addChannelBiasNCIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBiasNCRelu(addChannelBiasNCRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBiasNCMish(addChannelBiasNCMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBiasNCMishScale8(addChannelBiasNCMishScale8, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBiasNCSilu(addChannelBiasNCSilu, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createExtractChannel0NCHWFp32(extractChannel0NCHWFp32, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSpatialRMSNormApply(transformerSpatialRMSNormApply, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSpatialRMSNormReduce(transformerSpatialRMSNormReduce, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSq, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
 
     if ( qHeadDim != -1 && vHeadDim != -1 ) {
-      createTransformerScaleDotProduct(qHeadDim, vHeadDim);
-      createTransformerScaleDotProductNaive(qHeadDim, vHeadDim);
+      if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }
+    return VK_SUCCESS;
   }
 
   void ComputePipelines::destroyPipelines() {
@@ -416,9 +457,10 @@ namespace vk_shader {
       vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
       pipeline.descriptorSetLayout = VK_NULL_HANDLE;
     }
+    pipeline.name.clear();
   }
 
-  void ComputePipelines::createPipeline(
+  VkResult ComputePipelines::createPipeline(
     std::string pipelineName,
     const unsigned char* spirvBytes,
     size_t spirvSize,
@@ -431,10 +473,8 @@ namespace vk_shader {
     uint32_t localSizeZ
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
-
-    if(spirvSize % 4 != 0) {
-      throw StringError(pipelineName + " SPIR-V size is not a multiple of 4 bytes");
-    }
+    if(spirvSize % 4 != 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
 
     size_t numWords = spirvSize / 4;
     std::vector<uint32_t> spirvWords(numWords);
@@ -445,7 +485,7 @@ namespace vk_shader {
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    const auto fail = [&](const std::string& operation, VkResult result) {
+    const auto fail = [&](VkResult result) {
       if(pipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(device,pipeline,nullptr);
       if(layout != VK_NULL_HANDLE)
@@ -454,7 +494,7 @@ namespace vk_shader {
         vkDestroyDescriptorSetLayout(device,descriptorSetLayout,nullptr);
       if(shaderModule != VK_NULL_HANDLE)
         vkDestroyShaderModule(device,shaderModule,nullptr);
-      throw StringError(pipelineName + " " + operation + " failed: " + vk_helper::vkErrorToString(result));
+      return result;
     };
     VkShaderModuleCreateInfo shaderModuleCI = {};
     shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -463,7 +503,7 @@ namespace vk_shader {
     // std::cout << "Creating Compute Pipeline: " << pipelineName <<  " code size : " << shaderModuleCI.codeSize << std::endl;
     res = vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule);
     if(res != VK_SUCCESS)
-      fail("shader module creation",res);
+      return fail(res);
     std::vector<VkDescriptorSetLayoutBinding> bindings;
     for ( size_t i = 0 ; i < bindingSize ; i++ ) {
       bindings.push_back(
@@ -476,7 +516,7 @@ namespace vk_shader {
 
     descriptorSetLayout = vk_helper::createDescriptorSetLayout(device,bindings,&res);
     if(res != VK_SUCCESS)
-      fail("descriptor set layout creation",res);
+      return fail(res);
 
     std::vector<VkPushConstantRange> pushConstants;
     VkPushConstantRange pushConstant = {};
@@ -489,20 +529,26 @@ namespace vk_shader {
     }
     layout = vk_helper::createPipelineLayout(device,{ descriptorSetLayout }, pushConstants, &res);
     if(res != VK_SUCCESS)
-      fail("pipeline layout creation",res);
+      return fail(res);
 
     pipeline = vk_helper::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
 
     if(res != VK_SUCCESS)
-      fail("compute pipeline creation",res);
+      return fail(res);
     outPipeline.descriptorSetLayout = descriptorSetLayout;
     outPipeline.layout = layout;
     outPipeline.pipeline = pipeline;
+    outPipeline.name = pipelineName;
     outPipeline.localSizeX = localSizeX;
     outPipeline.localSizeY = localSizeY;
     outPipeline.localSizeZ = localSizeZ;
-    // std::cout << "Created Compute Pipeline: " << pipelineName << " result : " << res << std::endl;
+    const std::string message = "Built Vulkan compute pipeline with shader: " + pipelineName;
+    if(logger != nullptr)
+      logger->write(message);
+    if(logger == nullptr || (!logger->isLoggingToStdout() && !logger->isLoggingToStderr()))
+      std::cerr << message << std::endl;
     vkDestroyShaderModule(device, shaderModule, nullptr);
+    return VK_SUCCESS;
   }
 
   /**
@@ -514,132 +560,75 @@ namespace vk_shader {
     // createPipeline("Conv2dFp32", vk_shader::spirv_conv2d_fp32, vk_shader::spirv_conv2d_fp32_size, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   // }
 
-  void ComputePipelines::createWinogradInputTransform() {
+  VkResult ComputePipelines::createWinogradInputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams) {
     WinogradInputTransformSpec spec;
-    spec.localSizeX = (tuneParams.conv3x3.inputTransformLocalXSize);
-    spec.localSizeY = (tuneParams.conv3x3.inputTransformLocalYSize);
+    spec.localSizeX = tuneParams.inputTransformLocalXSize;
+    spec.localSizeY = tuneParams.inputTransformLocalYSize;
     spec.localSizeZ = 1;
-    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
-    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
-    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
-    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
-    spec.inTileYOffset= -1;
-    spec.inTileXOffset= -1;
-    spec.convY = 3;
-    spec.convX = 3;
-    std::vector<int32_t> specData_3322 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322.size());
-    VkSpecializationInfo si3322 = vk_helper::createSpecializationInfo(specData_3322, specEntry);
-
-    createPipeline("WinogradInputTransform for 3x3 kernels", vk_shader::spirv_winograd_input_transform_fp32, vk_shader::spirv_winograd_input_transform_fp32_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform3x3, &si3322, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    spec.convX = 5;
-    spec.convY = 5;
-    spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize = tuneParams.conv5x5.outTileYSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYOffset= -2;
-    spec.inTileXOffset= -2;
-    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
-    std::vector<int32_t> specData_5544 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformSpec));
-    VkSpecializationInfo si5544 = vk_helper::createSpecializationInfo(specData_5544, specEntry);
-    createPipeline("WinogradInputTransform for 5x5 kernels", vk_shader::spirv_winograd_input_transform_fp32, vk_shader::spirv_winograd_input_transform_fp32_size, 2, sizeof(WinogradInputTransformParams), winogradInputTransform5x5, &si5544, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    spec.inTileYSize = static_cast<int>(tuneParams.inTileYSize);
+    spec.inTileXSize = static_cast<int>(tuneParams.inTileXSize);
+    spec.outTileYSize = static_cast<int>(tuneParams.outTileYSize);
+    spec.outTileXSize = static_cast<int>(tuneParams.outTileXSize);
+    spec.inTileYOffset = -convSize / 2;
+    spec.inTileXOffset = -convSize / 2;
+    spec.convY = convSize;
+    spec.convX = convSize;
+    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("winograd_input_transform_p16s16", spirv_winograd_input_transform_p16s16, spirv_winograd_input_transform_p16s16_size, 2, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("winograd_input_transform_p32s16", spirv_winograd_input_transform_p32s16, spirv_winograd_input_transform_p32s16_size, 2, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("winograd_input_transform_fp32", spirv_winograd_input_transform_fp32, spirv_winograd_input_transform_fp32_size, 2, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createWinogradInputTransformBnAct() {
+  VkResult ComputePipelines::createWinogradInputTransformBnAct(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, int activation, const VulkanParams& vulkanParams) {
     auto spec = WinogradInputTransformBnActSpec();
-    spec.localSizeX = tuneParams.conv3x3.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv3x3.inputTransformLocalYSize;
+    spec.localSizeX = tuneParams.inputTransformLocalXSize;
+    spec.localSizeY = tuneParams.inputTransformLocalYSize;
     spec.localSizeZ = 1;
-    spec.inTileYSize = static_cast<int>(tuneParams.conv3x3.inTileYSize);
-    spec.inTileXSize = static_cast<int>(tuneParams.conv3x3.inTileXSize);
-    spec.outTileYSize = static_cast<int>(tuneParams.conv3x3.outTileYSize);
-    spec.outTileXSize = static_cast<int>(tuneParams.conv3x3.outTileXSize);
-    spec.inTileYOffset= -1;
-    spec.inTileXOffset= -1;
-    spec.convY = 3;
-    spec.convX = 3;
-    spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_3322_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_3322_identity.size());
-    VkSpecializationInfo si3322_identity = vk_helper::createSpecializationInfo(specData_3322_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 identity", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_identity, &si3322_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-
-    spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_3322_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_relu = vk_helper::createSpecializationInfo(specData_3322_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 relu", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_relu, &si3322_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-
-    spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_3322_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish = vk_helper::createSpecializationInfo(specData_3322_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3 mish", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish, &si3322_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-
-    spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_3322_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si3322_mish_scale8 = vk_helper::createSpecializationInfo(specData_3322_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct3x3_2x2_mish_scale8", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform3x3_bnact_mish_scale8, &si3322_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-
-    // 5x5
-    spec.convX = 5;
-    spec.convY = 5;
-    spec.outTileXSize = tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize = tuneParams.conv5x5.outTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.inTileXOffset= -2;
-    spec.inTileYOffset= -2;
-    spec.localSizeX = tuneParams.conv5x5.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.inputTransformLocalYSize;
-    spec.activation = ACTIVATION_IDENTITY;
-    std::vector<int32_t> specData_55_identity = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_identity = vk_helper::createSpecializationInfo(specData_55_identity, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act identity", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_identity, &si55_identity, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    spec.activation = ACTIVATION_RELU;
-    std::vector<int32_t> specData_55_relu = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_relu = vk_helper::createSpecializationInfo(specData_55_relu, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act relu", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_relu, &si55_relu, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    spec.activation = ACTIVATION_MISH;
-    std::vector<int32_t> specData_55_mish = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish = vk_helper::createSpecializationInfo(specData_55_mish, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish, &si55_mish, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    spec.activation = ACTIVATION_MISH_SCALE8;
-    std::vector<int32_t> specData_55_mish_scale8 = vk_helper::createSpecData(&spec, sizeof(WinogradInputTransformBnActSpec));
-    VkSpecializationInfo si55_mish_scale8 = vk_helper::createSpecializationInfo(specData_55_mish_scale8, specEntry);
-    createPipeline("winogradInputTransformBnAct5x5 bn act mish scale8", vk_shader::spirv_winograd_input_transform_bnact_fp32, vk_shader::spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), winogradInputTransform5x5_bnact_mish_scale8, &si55_mish_scale8, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    spec.inTileYSize = static_cast<int>(tuneParams.inTileYSize);
+    spec.inTileXSize = static_cast<int>(tuneParams.inTileXSize);
+    spec.outTileYSize = static_cast<int>(tuneParams.outTileYSize);
+    spec.outTileXSize = static_cast<int>(tuneParams.outTileXSize);
+    spec.inTileYOffset = -convSize / 2;
+    spec.inTileXOffset = -convSize / 2;
+    spec.convY = convSize;
+    spec.convX = convSize;
+    spec.activation = activation;
+    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("winograd_input_transform_bnact_p16s16", spirv_winograd_input_transform_bnact_p16s16, spirv_winograd_input_transform_bnact_p16s16_size, 5, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("winograd_input_transform_bnact_p32s16", spirv_winograd_input_transform_bnact_p32s16, spirv_winograd_input_transform_bnact_p32s16_size, 5, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("winograd_input_transform_bnact_fp32", spirv_winograd_input_transform_bnact_fp32, spirv_winograd_input_transform_bnact_fp32_size, 5, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createWinogradOutputTransform() {
+  VkResult ComputePipelines::createWinogradOutputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams) {
     WinogradOutputTransformSpec spec;
-    // Ensure specialization constants for the 3x3 output transform
-    // match the dispatch-local sizes used at runtime (8,2,2).
-    spec.localSizeX = tuneParams.conv3x3.outputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv3x3.outputTransformLocalYSize;
-    spec.localSizeZ = tuneParams.conv3x3.outputTransformLocalZSize;
-    spec.outTileXSize= tuneParams.conv3x3.outTileXSize;
-    spec.outTileYSize= tuneParams.conv3x3.outTileYSize;
-    spec.inTileXSize = tuneParams.conv3x3.inTileXSize;
-    spec.inTileYSize = tuneParams.conv3x3.inTileYSize;
-    spec.convX = 3;
-    spec.convY = 3;
-    std::vector<int32_t> specData_33 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData_33.size());
-    VkSpecializationInfo si33 = vk_helper::createSpecializationInfo(specData_33, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform_fp32, vk_shader::spirv_winograd_output_transform_fp32_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform3x3, &si33, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-
-    spec.localSizeX = tuneParams.conv5x5.outputTransformLocalXSize;
-    spec.localSizeY = tuneParams.conv5x5.outputTransformLocalYSize;
-    spec.localSizeZ =  tuneParams.conv5x5.outputTransformLocalZSize;
-    spec.outTileXSize= tuneParams.conv5x5.outTileXSize;
-    spec.outTileYSize= tuneParams.conv5x5.outTileYSize;
-    spec.inTileXSize = tuneParams.conv5x5.inTileXSize;
-    spec.inTileYSize = tuneParams.conv5x5.inTileYSize;
-    spec.convX = 5;
-    spec.convY = 5;
-    std::vector<int32_t> specData_55 = vk_helper::createSpecData(&spec, sizeof(WinogradOutputTransformSpec));
-    VkSpecializationInfo si55 = vk_helper::createSpecializationInfo(specData_55, specEntry);
-    createPipeline("WinogradOutputTransform", vk_shader::spirv_winograd_output_transform_fp32, vk_shader::spirv_winograd_output_transform_fp32_size, 2, sizeof(WinogradOutputTransformParams), winogradOutputTransform5x5, &si55, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    spec.localSizeX = tuneParams.outputTransformLocalXSize;
+    spec.localSizeY = tuneParams.outputTransformLocalYSize;
+    spec.localSizeZ = tuneParams.outputTransformLocalZSize;
+    spec.outTileXSize = tuneParams.outTileXSize;
+    spec.outTileYSize = tuneParams.outTileYSize;
+    spec.inTileXSize = tuneParams.inTileXSize;
+    spec.inTileYSize = tuneParams.inTileYSize;
+    spec.convX = convSize;
+    spec.convY = convSize;
+    std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("winograd_output_transform_p16s16", spirv_winograd_output_transform_p16s16, spirv_winograd_output_transform_p16s16_size, 2, sizeof(WinogradOutputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("winograd_output_transform_p32s16", spirv_winograd_output_transform_p32s16, spirv_winograd_output_transform_p32s16_size, 2, sizeof(WinogradOutputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("winograd_output_transform_fp32", spirv_winograd_output_transform_fp32, spirv_winograd_output_transform_fp32_size, 2, sizeof(WinogradOutputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   /**
@@ -686,239 +675,288 @@ namespace vk_shader {
   /**
    * @brief Create a Add Point Wise object
    */
-  void ComputePipelines::createAddPointWise() {
+  VkResult ComputePipelines::createAddPointWise(Pipeline& pipeline, const AddPointWiseTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = AddPointWiseSpec();
-    spec.ELTS_PER_THREAD = tuneParams.pointwise.ELTS_PER_THREAD;
-    spec.localSizeX = tuneParams.pointwise.LOCAL_SIZE;
+    spec.ELTS_PER_THREAD = tuneParams.ELTS_PER_THREAD;
+    spec.localSizeX = tuneParams.LOCAL_SIZE;
     SpecializationData specData(spec);
-    createPipeline("AddPointWise", vk_shader::spirv_add_pointwise_fp32, vk_shader::spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), addPointWise, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("add_pointwise_p16s16", spirv_add_pointwise_p16s16, spirv_add_pointwise_p16s16_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("add_pointwise_p32s16", spirv_add_pointwise_p32s16, spirv_add_pointwise_p32s16_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("add_pointwise_fp32", spirv_add_pointwise_fp32, spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createXgemmDirectBatchedTT() {
+  VkResult ComputePipelines::createXgemmDirectBatchedTT(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = XgemmDirectSpec();
-    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
-    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
+    spec.localSizeX = tuneParams.MDIMCD;
+    spec.localSizeY = tuneParams.NDIMCD;
     spec.localSizeZ = 1;
-    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
-    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
-    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
-    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
-    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
-    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
-    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
-    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
+    spec.WGD = static_cast<int>(tuneParams.WGD);
+    spec.MDIMCD = static_cast<int>(tuneParams.MDIMCD);
+    spec.NDIMCD = static_cast<int>(tuneParams.NDIMCD);
+    spec.MDIMAD = static_cast<int>(tuneParams.MDIMAD);
+    spec.NDIMBD = static_cast<int>(tuneParams.NDIMBD);
+    spec.KWID = static_cast<int>(tuneParams.KWID);
+    spec.PADA = static_cast<int>(tuneParams.PADA);
+    spec.PADB = static_cast<int>(tuneParams.PADB);
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("BatchedXGEMMDirect", vk_shader::spirv_xgemm_direct_batched_tt_fp32, vk_shader::spirv_xgemm_direct_batched_tt_fp32_size, 3, sizeof(XgemmDirectBatchedTTParams), xgemmDirectBatchedTT, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("xgemm_direct_batched_tt_fp32", vk_shader::spirv_xgemm_direct_batched_tt_fp32, vk_shader::spirv_xgemm_direct_batched_tt_fp32_size, 3, sizeof(XgemmDirectBatchedTTParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createXgemmBatched() {
+  VkResult ComputePipelines::createXgemmBatched(Pipeline& pipeline, const XgemmTuneParams& tuneParams, const VulkanParams& vulkanParams) {
 
     auto spec = XGEMMBatchedSpec();
-    spec.localSizeX = tuneParams.xgemm.MDIMC;
-    spec.localSizeY = tuneParams.xgemm.NDIMC;
+    spec.localSizeX = tuneParams.MDIMC;
+    spec.localSizeY = tuneParams.NDIMC;
     spec.localSizeZ = 1;
-    spec.MWG = tuneParams.xgemm.MWG;
-    spec.NWG = tuneParams.xgemm.NWG;
-    spec.KWG = tuneParams.xgemm.KWG;
-    spec.MDIMC = tuneParams.xgemm.MDIMC;
-    spec.NDIMC = tuneParams.xgemm.NDIMC;
-    spec.MDIMA = tuneParams.xgemm.MDIMA;
-    spec.NDIMB = tuneParams.xgemm.NDIMB;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MDIMC = tuneParams.MDIMC;
+    spec.NDIMC = tuneParams.NDIMC;
+    spec.MDIMA = tuneParams.MDIMA;
+    spec.NDIMB = tuneParams.NDIMB;
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMBatched", vk_shader::spirv_xgemm_batched_fp32, vk_shader::spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), xgemmBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("xgemm_batched_p16s16", spirv_xgemm_batched_p16s16, spirv_xgemm_batched_p16s16_size, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("xgemm_batched_p32s16", spirv_xgemm_batched_p32s16, spirv_xgemm_batched_p32s16_size, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("xgemm_batched_fp32", spirv_xgemm_batched_fp32, spirv_xgemm_batched_fp32_size, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createXgemmStridedBatched() {
+  VkResult ComputePipelines::createXgemmStridedBatched(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = XgemmDirectSpec();
-    spec.localSizeX = tuneParams.xgemmDirect.MDIMCD;
-    spec.localSizeY = tuneParams.xgemmDirect.NDIMCD;
+    spec.localSizeX = tuneParams.MDIMCD;
+    spec.localSizeY = tuneParams.NDIMCD;
     spec.localSizeZ = 1;
-    spec.WGD = static_cast<int>(tuneParams.xgemmDirect.WGD);
-    spec.MDIMCD = static_cast<int>(tuneParams.xgemmDirect.MDIMCD);
-    spec.NDIMCD = static_cast<int>(tuneParams.xgemmDirect.NDIMCD);
-    spec.MDIMAD = static_cast<int>(tuneParams.xgemmDirect.MDIMAD);
-    spec.NDIMBD = static_cast<int>(tuneParams.xgemmDirect.NDIMBD);
-    spec.KWID = static_cast<int>(tuneParams.xgemmDirect.KWID);
-    spec.PADA = static_cast<int>(tuneParams.xgemmDirect.PADA);
-    spec.PADB = static_cast<int>(tuneParams.xgemmDirect.PADB);
+    spec.WGD = static_cast<int>(tuneParams.WGD);
+    spec.MDIMCD = static_cast<int>(tuneParams.MDIMCD);
+    spec.NDIMCD = static_cast<int>(tuneParams.NDIMCD);
+    spec.MDIMAD = static_cast<int>(tuneParams.MDIMAD);
+    spec.NDIMBD = static_cast<int>(tuneParams.NDIMBD);
+    spec.KWID = static_cast<int>(tuneParams.KWID);
+    spec.PADA = static_cast<int>(tuneParams.PADA);
+    spec.PADB = static_cast<int>(tuneParams.PADB);
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    createPipeline("XGEMMStridedBatched", vk_shader::spirv_xgemm_strided_batched_nn_fp32, vk_shader::spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), xgemmStridedBatchedFp32, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("xgemm_strided_batched_nn_p16s16", spirv_xgemm_strided_batched_nn_p16s16, spirv_xgemm_strided_batched_nn_p16s16_size, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("xgemm_strided_batched_nn_p32s16", spirv_xgemm_strided_batched_nn_p32s16, spirv_xgemm_strided_batched_nn_p32s16_size, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("xgemm_strided_batched_nn_fp32", spirv_xgemm_strided_batched_nn_fp32, spirv_xgemm_strided_batched_nn_fp32_size, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskIdentity() {
+  VkResult ComputePipelines::createBatchNormMaskIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskFp32", vk_shader::spirv_bn_mask_identity_fp32, vk_shader::spirv_bn_mask_identity_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskIdentity, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("bn_mask_identity_p16s16", spirv_bn_mask_identity_p16s16, spirv_bn_mask_identity_p16s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("bn_mask_identity_p32s16", spirv_bn_mask_identity_p32s16, spirv_bn_mask_identity_p32s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("bn_mask_identity_fp32", spirv_bn_mask_identity_fp32, spirv_bn_mask_identity_fp32_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskRelu() {
+  VkResult ComputePipelines::createBatchNormMaskRelu(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_relu_fp32, vk_shader::spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskRelu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("bn_mask_relu_p16s16", spirv_bn_mask_relu_p16s16, spirv_bn_mask_relu_p16s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("bn_mask_relu_p32s16", spirv_bn_mask_relu_p32s16, spirv_bn_mask_relu_p32s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("bn_mask_relu_fp32", spirv_bn_mask_relu_fp32, spirv_bn_mask_relu_fp32_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskMish() {
+  VkResult ComputePipelines::createBatchNormMaskMish(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskMishFp32", vk_shader::spirv_bn_mask_mish_fp32, vk_shader::spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMish, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("bn_mask_mish_p16s16", spirv_bn_mask_mish_p16s16, spirv_bn_mask_mish_p16s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("bn_mask_mish_p32s16", spirv_bn_mask_mish_p32s16, spirv_bn_mask_mish_p32s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("bn_mask_mish_fp32", spirv_bn_mask_mish_fp32, spirv_bn_mask_mish_fp32_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskMishScale8() {
+  VkResult ComputePipelines::createBatchNormMaskMishScale8(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskMishScale8Fp32", vk_shader::spirv_bn_mask_mish_scale8_fp32, vk_shader::spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskMishScale8, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("bn_mask_mish_scale8_p16s16", spirv_bn_mask_mish_scale8_p16s16, spirv_bn_mask_mish_scale8_p16s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("bn_mask_mish_scale8_p32s16", spirv_bn_mask_mish_scale8_p32s16, spirv_bn_mask_mish_scale8_p32s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("bn_mask_mish_scale8_fp32", spirv_bn_mask_mish_scale8_fp32, spirv_bn_mask_mish_scale8_fp32_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createBatchNormMaskSilu() {
+  VkResult ComputePipelines::createBatchNormMaskSilu(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = BatchNormMaskSpec();
     SpecializationData specData(spec);
-    createPipeline("BatchNormMaskReluFp32", vk_shader::spirv_bn_mask_silu_fp32, vk_shader::spirv_bn_mask_silu_fp32_size, 5, sizeof(BatchNormMaskParams), batchNormMaskSilu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("bn_mask_silu_p16s16", spirv_bn_mask_silu_p16s16, spirv_bn_mask_silu_p16s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("bn_mask_silu_p32s16", spirv_bn_mask_silu_p32s16, spirv_bn_mask_silu_p32s16_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("bn_mask_silu_fp32", spirv_bn_mask_silu_fp32, spirv_bn_mask_silu_fp32_size, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createGlobalPoolingChannelsFp32() {
+  VkResult ComputePipelines::createGlobalPoolingChannelsFp32(Pipeline& pipeline, const GPoolTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     // TODO: create multiple local sizes pipelines to optimize performance.
     auto spec = GlobalPoolingChannelsSpec();
-    spec.localSizeX = tuneParams.gPool.XYSTRIDE;
-    spec.localSizeY = tuneParams.gPool.CHANNELSTRIDE;
-    spec.localSizeZ = tuneParams.gPool.BATCHSTRIDE;
-    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
-    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
-    spec.LOCALSIZE_TOTAL = spec.XYSTRIDE * spec.CHANNELSTRIDE * tuneParams.gPool.BATCHSTRIDE;
+    spec.localSizeX = tuneParams.XYSTRIDE;
+    spec.localSizeY = tuneParams.CHANNELSTRIDE;
+    spec.localSizeZ = tuneParams.BATCHSTRIDE;
+    spec.XYSTRIDE = tuneParams.XYSTRIDE;
+    spec.CHANNELSTRIDE = tuneParams.CHANNELSTRIDE;
+    spec.LOCALSIZE_TOTAL = spec.XYSTRIDE * spec.CHANNELSTRIDE * tuneParams.BATCHSTRIDE;
     SpecializationData specData(spec);
-    createPipeline("GlobalPoolingChannelsFp32", vk_shader::spirv_global_pooling_channels_fp32, vk_shader::spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), globalPoolingChannelsFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage)
+      return createPipeline("global_pooling_channels_p32s16", spirv_global_pooling_channels_p32s16, spirv_global_pooling_channels_p32s16_size, 4, sizeof(GlobalPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("global_pooling_channels_fp32", spirv_global_pooling_channels_fp32, spirv_global_pooling_channels_fp32_size, 4, sizeof(GlobalPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createValueHeadPoolingChannels() {
+  VkResult ComputePipelines::createValueHeadPoolingChannels(Pipeline& pipeline, const GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const VulkanParams& vulkanParams) {
     auto spec = ValueHeadPoolingChannelsSpec();
-    spec.localSizeX = tuneParams.gPool.XYSTRIDE;
-    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
-    spec.CHANNELSTRIDE = tuneParams.gPool.CHANNELSTRIDE;
-    spec.LOCALSIZE_TOTAL = tuneParams.gPool.XYSTRIDE * tuneParams.gPool.CHANNELSTRIDE * tuneParams.gPool.BATCHSTRIDE;
-
-    for (uint32_t localSizeY = 1 ; localSizeY <= tuneParams.gPool.CHANNELSTRIDE ; localSizeY *= 2 ) {
-      for (uint32_t localSizeZ = 1 ; localSizeZ <= tuneParams.gPool.BATCHSTRIDE ; localSizeZ *= 2 ) {
-        spec.localSizeY = localSizeY;
-        spec.localSizeZ = localSizeZ;
-        LocalDim dim = {
-          static_cast<int>(spec.localSizeX),
-          static_cast<int>(spec.localSizeY),
-          static_cast<int>(spec.localSizeZ)
-        };
-        SpecializationData specData(spec);
-        Pipeline pipeline;
-        createPipeline("ValueHeadPoolingChannels", vk_shader::spirv_value_head_pool_channels_fp32, vk_shader::spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-        valueHeadPoolingChannels.emplace(dim, pipeline);
-      }
-    }
+    spec.localSizeX = tuneParams.XYSTRIDE;
+    spec.localSizeY = localSizeY;
+    spec.localSizeZ = localSizeZ;
+    spec.XYSTRIDE = tuneParams.XYSTRIDE;
+    spec.CHANNELSTRIDE = tuneParams.CHANNELSTRIDE;
+    spec.LOCALSIZE_TOTAL = tuneParams.XYSTRIDE * tuneParams.CHANNELSTRIDE * tuneParams.BATCHSTRIDE;
+    SpecializationData specData(spec);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage)
+      return createPipeline("value_head_pool_channels_p32s16", spirv_value_head_pool_channels_p32s16, spirv_value_head_pool_channels_p32s16_size, 3, sizeof(ValueHeadPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("value_head_pool_channels_fp32", spirv_value_head_pool_channels_fp32, spirv_value_head_pool_channels_fp32_size, 3, sizeof(ValueHeadPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createSumChannels() {
+  VkResult ComputePipelines::createSumChannels(Pipeline& pipeline, const GPoolTuneParams& tuneParams, uint32_t localSizeZ, const VulkanParams& vulkanParams) {
     auto spec = SumChannelsSpec();
     spec.CHANNELSTRIDE = 1;
-    spec.XYSTRIDE = tuneParams.gPool.XYSTRIDE;
-    spec.LOCALSIZE_TOTAL = tuneParams.gPool.BATCHSTRIDE * tuneParams.gPool.CHANNELSTRIDE * tuneParams.gPool.XYSTRIDE;
+    spec.XYSTRIDE = tuneParams.XYSTRIDE;
+    spec.LOCALSIZE_TOTAL = tuneParams.BATCHSTRIDE * tuneParams.CHANNELSTRIDE * tuneParams.XYSTRIDE;
     spec.localSizeX = spec.XYSTRIDE;
     spec.localSizeY = 1;
-    sumChannels.clear();
-    for (uint32_t localSizeZ = 1 ; localSizeZ <= tuneParams.gPool.BATCHSTRIDE ; localSizeZ*=2) {
-      spec.localSizeZ = localSizeZ;
-      SpecializationData specData(spec);
-      Pipeline pipeline{};
-      LocalDim dim = {
-        static_cast<int>(spec.localSizeX),
-        static_cast<int>(spec.localSizeY),
-        static_cast<int>(spec.localSizeZ)
-      };
-      createPipeline("SumChannels", vk_shader::spirv_sum_channels_fp32, vk_shader::spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      sumChannels.emplace(dim, pipeline);
-    }
+    spec.localSizeZ = localSizeZ;
+    SpecializationData specData(spec);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage)
+      return createPipeline("sum_channels_p32s16", spirv_sum_channels_p32s16, spirv_sum_channels_p32s16_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("sum_channels_fp32", spirv_sum_channels_fp32, spirv_sum_channels_fp32_size, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCHW() {
+  VkResult ComputePipelines::createAddChannelBiasNCHW(Pipeline& pipeline, const AddChannelBiasesNCHWTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = AddChannelBiasNCHWSpec();
-    spec.XY_ELTS_PER_THREAD = tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
-    spec.NC_ELTS_PER_THREAD = tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
+    spec.XY_ELTS_PER_THREAD = tuneParams.XY_ELTS_PER_THREAD;
+    spec.NC_ELTS_PER_THREAD = tuneParams.NC_ELTS_PER_THREAD;
     spec.localSizeX=32;
     spec.localSizeY=1;
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCHW", vk_shader::spirv_add_channel_bias_nchw_fp32, vk_shader::spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), addChannelBiasNCHW, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("add_channel_bias_nchw_p16s16", spirv_add_channel_bias_nchw_p16s16, spirv_add_channel_bias_nchw_p16s16_size, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("add_channel_bias_nchw_p32s16", spirv_add_channel_bias_nchw_p32s16, spirv_add_channel_bias_nchw_p32s16_size, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("add_channel_bias_nchw_fp32", spirv_add_channel_bias_nchw_fp32, spirv_add_channel_bias_nchw_fp32_size, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCIdentity() {
+  VkResult ComputePipelines::createAddChannelBiasNCIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCIdentity", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCIdentity, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_nc_identity_fp32", vk_shader::spirv_add_channel_bias_nc_identity_fp32, vk_shader::spirv_add_channel_bias_nc_identity_fp32_size, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCRelu() {
+  VkResult ComputePipelines::createAddChannelBiasNCRelu(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCRelu", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCRelu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_nc_relu_fp32", vk_shader::spirv_add_channel_bias_nc_relu_fp32, vk_shader::spirv_add_channel_bias_nc_relu_fp32_size, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCMish() {
+  VkResult ComputePipelines::createAddChannelBiasNCMish(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCMish", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMish, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_nc_mish_fp32", vk_shader::spirv_add_channel_bias_nc_mish_fp32, vk_shader::spirv_add_channel_bias_nc_mish_fp32_size, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCMishScale8() {
+  VkResult ComputePipelines::createAddChannelBiasNCMishScale8(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCMishScale8", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCMishScale8, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_nc_mish_scale8_fp32", vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32, vk_shader::spirv_add_channel_bias_nc_mish_scale8_fp32_size, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createAddChannelBiasNCSilu() {
+  VkResult ComputePipelines::createAddChannelBiasNCSilu(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {
     auto spec = AddChannelBiasNCSpec();
     SpecializationData specData(spec);
-    createPipeline("AddChannelBiasNCSilu", vk_shader::spirv_add_channel_bias_nc_silu_fp32, vk_shader::spirv_add_channel_bias_nc_silu_fp32_size, 2, sizeof(AddChannelBiasNCParams), addChannelBiasNCSilu, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_nc_silu_fp32", vk_shader::spirv_add_channel_bias_nc_silu_fp32, vk_shader::spirv_add_channel_bias_nc_silu_fp32_size, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createExtractChannel0NCHWFp32() {
+  VkResult ComputePipelines::createExtractChannel0NCHWFp32(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = ExtractChannel0NCHWSpec();
     SpecializationData specData(spec);
-    createPipeline("ExtractChannel0NCHWFp32", vk_shader::spirv_extract_channel0_nchw_fp32, vk_shader::spirv_extract_channel0_nchw_fp32_size, 2, sizeof(ExtractChannel0NCHWParams), extractChannel0NCHWFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("extract_channel0_nchw_p16s16", spirv_extract_channel0_nchw_p16s16, spirv_extract_channel0_nchw_p16s16_size, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("extract_channel0_nchw_p32s16", spirv_extract_channel0_nchw_p32s16, spirv_extract_channel0_nchw_p32s16_size, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("extract_channel0_nchw_fp32", spirv_extract_channel0_nchw_fp32, spirv_extract_channel0_nchw_fp32_size, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerRMSNorm() {
+  VkResult ComputePipelines::createTransformerRMSNorm(Pipeline& pipeline, const TransformerRMSNormTuneParms& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = TransformerRMSNormSpec();
-    spec.localSizeX = tuneParams.rmsNorm.WG_C_SIZE * tuneParams.rmsNorm.WG_XY_SIZE;
+    spec.localSizeX = tuneParams.WG_C_SIZE * tuneParams.WG_XY_SIZE;
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
-    spec.C_PER_THREAD = tuneParams.rmsNorm.C_PER_THREAD;
-    spec.WG_C_SIZE = tuneParams.rmsNorm.WG_C_SIZE;
-    spec.WG_XY_SIZE = tuneParams.rmsNorm.WG_XY_SIZE;
+    spec.C_PER_THREAD = tuneParams.C_PER_THREAD;
+    spec.WG_C_SIZE = tuneParams.WG_C_SIZE;
+    spec.WG_XY_SIZE = tuneParams.WG_XY_SIZE;
     SpecializationData specData(spec);
-    createPipeline("createRMSNormFP32", vk_shader::spirv_transformer_rms_norm_fp32, vk_shader::spirv_transformer_rms_norm_fp32_size, 5, sizeof(TransformerRMSNormPushParams), transformerRmsNorm, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_rms_norm_p16s16", spirv_transformer_rms_norm_p16s16, spirv_transformer_rms_norm_p16s16_size, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_rms_norm_p32s16", spirv_transformer_rms_norm_p32s16, spirv_transformer_rms_norm_p32s16_size, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_rms_norm_fp32", spirv_transformer_rms_norm_fp32, spirv_transformer_rms_norm_fp32_size, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerApplyRoPE() {
+  VkResult ComputePipelines::createTransformerApplyRoPE(Pipeline& pipeline, const VulkanParams& vulkanParams) {
     auto spec = TransformerApplyRoPESpec();
     SpecializationData specData(spec);
-    createPipeline("createTransformerApplyRoPE", vk_shader::spirv_transformer_apply_rope_fp32, vk_shader::spirv_transformer_apply_rope_fp32_size, 3, sizeof(TransformerApplyRoPEPushParams), transformerApplyRoPE, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_apply_rope_p16s16", spirv_transformer_apply_rope_p16s16, spirv_transformer_apply_rope_p16s16_size, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_apply_rope_p32s16", spirv_transformer_apply_rope_p32s16, spirv_transformer_apply_rope_p32s16_size, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_apply_rope_fp32", spirv_transformer_apply_rope_fp32, spirv_transformer_apply_rope_fp32_size, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerScaleDotProduct(int qHeadDim, int vHeadDim) {
+  VkResult ComputePipelines::createTransformerScaleDotProduct(Pipeline& pipeline, const TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {
     auto spec = ScaleDotProductSpec();
-    spec.ATTN_BLOCK_KV = tuneParams.transformer.ATTN_BLOCK_KV;
-    spec.ATTN_BLOCK_Q = tuneParams.transformer.ATTN_BLOCK_Q;
+    spec.ATTN_BLOCK_KV = tuneParams.ATTN_BLOCK_KV;
+    spec.ATTN_BLOCK_Q = tuneParams.ATTN_BLOCK_Q;
     spec.ATTN_HEAD_DIM = qHeadDim;
     spec.ATTN_V_HEAD_DIM = vHeadDim;
-    spec.Q_PER_THREAD = tuneParams.transformer.Q_PER_THREAD;
+    spec.Q_PER_THREAD = tuneParams.Q_PER_THREAD;
     spec.localSizeX = spec.ATTN_BLOCK_Q;
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
     SpecializationData specData(spec);
-    createPipeline("TransformerScaleDotProduct", vk_shader::spirv_transformer_scale_dot_product_fp32, vk_shader::spirv_transformer_scale_dot_product_fp32_size, 5, sizeof(ScaleDotProductPushParam), transformerScaleDotProduct, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_scale_dot_product_p16s16", spirv_transformer_scale_dot_product_p16s16, spirv_transformer_scale_dot_product_p16s16_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_scale_dot_product_p32s16", spirv_transformer_scale_dot_product_p32s16, spirv_transformer_scale_dot_product_p32s16_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_scale_dot_product_fp32", spirv_transformer_scale_dot_product_fp32, spirv_transformer_scale_dot_product_fp32_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerScaleDotProductNaive(int qHeadDim, int vHeadDim) {
+  VkResult ComputePipelines::createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {
     auto spec = ScaleDotProductNaiveSpec();
     spec.ATTN_HEAD_DIM = qHeadDim;
     spec.ATTN_V_HEAD_DIM = vHeadDim;
@@ -926,38 +964,63 @@ namespace vk_shader {
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
     SpecializationData specData(spec);
-    createPipeline("TransformerScaleDotProductNaive", vk_shader::spirv_transformer_scale_dot_product_naive_fp32, vk_shader::spirv_transformer_scale_dot_product_naive_fp32_size, 5, sizeof(ScaleDotProductPushParam), transformerScaleDotProductNaive, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_scale_dot_product_naive_p16s16", spirv_transformer_scale_dot_product_naive_p16s16, spirv_transformer_scale_dot_product_naive_p16s16_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_scale_dot_product_naive_p32s16", spirv_transformer_scale_dot_product_naive_p32s16, spirv_transformer_scale_dot_product_naive_p32s16_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_scale_dot_product_naive_fp32", spirv_transformer_scale_dot_product_naive_fp32, spirv_transformer_scale_dot_product_naive_fp32_size, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerSwiGLU() {
+  VkResult ComputePipelines::createTransformerSwiGLU(Pipeline& pipeline, const AddPointWiseTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = TransformerSwiGLUSpec();
-    spec.ELTS_PER_THREAD = tuneParams.pointwise.ELTS_PER_THREAD;
-    spec.localSizeX = tuneParams.pointwise.LOCAL_SIZE;
+    spec.ELTS_PER_THREAD = tuneParams.ELTS_PER_THREAD;
+    spec.localSizeX = tuneParams.LOCAL_SIZE;
     SpecializationData specData(spec);
-    createPipeline("TransformerSwiGLU", vk_shader::spirv_transformer_swiglu_fp32, vk_shader::spirv_transformer_swiglu_fp32_size, 3, sizeof(TransformerSwiGLUPushParams), transformerSwiGLU, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_swiglu_p16s16", spirv_transformer_swiglu_p16s16, spirv_transformer_swiglu_p16s16_size, 3, sizeof(TransformerSwiGLUPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_swiglu_p32s16", spirv_transformer_swiglu_p32s16, spirv_transformer_swiglu_p32s16_size, 3, sizeof(TransformerSwiGLUPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_swiglu_fp32", spirv_transformer_swiglu_fp32, spirv_transformer_swiglu_fp32_size, 3, sizeof(TransformerSwiGLUPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerSpatialRMSNormApply() {
+  VkResult ComputePipelines::createTransformerSpatialRMSNormApply(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = TransformerSpatialRMSNormApplySpec();
-    spec.APPLY_ELTS_PER_THREAD = tuneParams.spatialRMSNorm.APPLY_ELTS_PER_THREAD;
+    spec.APPLY_ELTS_PER_THREAD = tuneParams.APPLY_ELTS_PER_THREAD;
     SpecializationData specData(spec);
-    createPipeline("TransformerSpatialRMSNormApply", vk_shader::spirv_transformer_spatial_rms_norm_apply_fp32, vk_shader::spirv_transformer_spatial_rms_norm_apply_fp32_size, 7, sizeof(TransformerSpatialRMSNormApplyPushParams), transformerSpatialRMSNormApply, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_spatial_rms_norm_apply_p16s16", spirv_transformer_spatial_rms_norm_apply_p16s16, spirv_transformer_spatial_rms_norm_apply_p16s16_size, 7, sizeof(TransformerSpatialRMSNormApplyPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_spatial_rms_norm_apply_p32s16", spirv_transformer_spatial_rms_norm_apply_p32s16, spirv_transformer_spatial_rms_norm_apply_p32s16_size, 7, sizeof(TransformerSpatialRMSNormApplyPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_spatial_rms_norm_apply_fp32", spirv_transformer_spatial_rms_norm_apply_fp32, spirv_transformer_spatial_rms_norm_apply_fp32_size, 7, sizeof(TransformerSpatialRMSNormApplyPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerSpatialRMSNormReduce() {
+  VkResult ComputePipelines::createTransformerSpatialRMSNormReduce(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = TransformerSpatialRMSNormReduceSpec();
-    spec.TILE_SIZE = tuneParams.spatialRMSNorm.TILE_SIZE;
+    spec.TILE_SIZE = tuneParams.TILE_SIZE;
     spec.localSizeX = spec.TILE_SIZE;
     SpecializationData specData(spec);
-    createPipeline("TransformerSpatialRMSNormReduce", vk_shader::spirv_transformer_spatial_rms_norm_reduce_fp32, vk_shader::spirv_transformer_spatial_rms_norm_reduce_fp32_size, 2, sizeof(TransformerSpatialRMSNormReducePushParams), transformerSpatialRMSNormReduce, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_spatial_rms_norm_reduce_p16s16", spirv_transformer_spatial_rms_norm_reduce_p16s16, spirv_transformer_spatial_rms_norm_reduce_p16s16_size, 2, sizeof(TransformerSpatialRMSNormReducePushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_spatial_rms_norm_reduce_p32s16", spirv_transformer_spatial_rms_norm_reduce_p32s16, spirv_transformer_spatial_rms_norm_reduce_p32s16_size, 2, sizeof(TransformerSpatialRMSNormReducePushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_spatial_rms_norm_reduce_fp32", spirv_transformer_spatial_rms_norm_reduce_fp32, spirv_transformer_spatial_rms_norm_reduce_fp32_size, 2, sizeof(TransformerSpatialRMSNormReducePushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  void ComputePipelines::createTransformerSpatialRMSNormSumSq() {
+  VkResult ComputePipelines::createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = TransformerSpatialRMSNormSumSqSpec();
-    spec.TILE_SIZE = tuneParams.spatialRMSNorm.TILE_SIZE;
+    spec.TILE_SIZE = tuneParams.TILE_SIZE;
     spec.localSizeX = spec.TILE_SIZE;
     SpecializationData specData(spec);
-    createPipeline("TransformerSpatialRMSNormSumSq", vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32, vk_shader::spirv_transformer_spatial_rms_norm_sum_sq_fp32_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), transformerSpatialRMSNormSumSq, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
+      if(vulkanParams.shouldUseFP16Compute)
+        return createPipeline("transformer_spatial_rms_norm_sum_sq_p16s16", spirv_transformer_spatial_rms_norm_sum_sq_p16s16, spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_spatial_rms_norm_sum_sq_p32s16", spirv_transformer_spatial_rms_norm_sum_sq_p32s16, spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    }
+    return createPipeline("transformer_spatial_rms_norm_sum_sq_fp32", spirv_transformer_spatial_rms_norm_sum_sq_fp32, spirv_transformer_spatial_rms_norm_sum_sq_fp32_size, 3, sizeof(TransformerSpatialRMSNormSumSqPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 }
 #endif

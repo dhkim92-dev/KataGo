@@ -22,12 +22,19 @@ struct VulkanDeviceInfo {
   std::string vendor;
   VkPhysicalDeviceType deviceType;
   std::string deviceName;
-  VkPhysicalDeviceFeatures features;
+
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memoryProperties;
+  VkPhysicalDeviceSubgroupProperties subgroupProperties;
+  VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeProperties;
+  VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooopertavieMatrixProperties;
+
+  VkPhysicalDeviceFeatures features;
+  VkPhysicalDevice16BitStorageFeatures storage16BitFeatures;
   VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
   VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
+  VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures;
 };
 
 struct VulkanDevice {
@@ -82,6 +89,7 @@ struct WriteDescriptorSet {
 
 
 struct Pipeline {
+  std::string name;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;

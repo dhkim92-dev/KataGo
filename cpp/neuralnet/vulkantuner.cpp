@@ -14,7 +14,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace {
-  const char* VERSION_LINE = "VERSION=1";
+  const char* VERSION_LINE = "VERSION=3";
 
   bool isMultipleOf(uint64_t x, uint64_t y) {
     return y != 0 && x % y == 0;
@@ -32,6 +32,26 @@ namespace {
     if(!Global::tryStringToInt(iter->second, value) || value < 0)
       throw IOError("VulkanTuneParams::load: invalid integer for " + name + " in " + filename);
     return static_cast<uint32_t>(value);
+  }
+
+  bool getBoolParam(const map<string, string>& values, const string& name, const string& filename) {
+    uint32_t value = getParam(values, name, filename);
+    if(value > 1)
+      throw IOError("VulkanTuneParams::load: invalid boolean for " + name + " in " + filename);
+    return value == 1;
+  }
+
+  VulkanParams makeVulkanParams(const VulkanDeviceInfo& deviceInfo) {
+    VulkanParams params;
+    params.canUseFP16Storage =
+      deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
+      deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
+    params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
+    params.canUseCooperativMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+    params.canUseSubgroup =
+      (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+    return params;
   }
 
 }  // namespace
@@ -92,7 +112,15 @@ bool VulkanTuneParams::isValid() const {
 }
 
 bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
-  return conv3x3.inTileYSize == other.conv3x3.inTileYSize && conv3x3.inTileXSize == other.conv3x3.inTileXSize &&
+  return vulkan.canUseFP16Storage == other.vulkan.canUseFP16Storage &&
+         vulkan.canUseFP16Compute == other.vulkan.canUseFP16Compute &&
+         vulkan.canUseCooperativMatrix == other.vulkan.canUseCooperativMatrix &&
+         vulkan.canUseSubgroup == other.vulkan.canUseSubgroup &&
+         vulkan.shouldUseFP16Storage == other.vulkan.shouldUseFP16Storage &&
+         vulkan.shouldUseFP16Compute == other.vulkan.shouldUseFP16Compute &&
+         vulkan.shouldUseCooperativeMatrix == other.vulkan.shouldUseCooperativeMatrix &&
+         vulkan.shouldUseSubgroup == other.vulkan.shouldUseSubgroup &&
+         conv3x3.inTileYSize == other.conv3x3.inTileYSize && conv3x3.inTileXSize == other.conv3x3.inTileXSize &&
          conv3x3.outTileYSize == other.conv3x3.outTileYSize && conv3x3.outTileXSize == other.conv3x3.outTileXSize &&
          conv3x3.inputTransformLocalXSize == other.conv3x3.inputTransformLocalXSize &&
          conv3x3.inputTransformLocalYSize == other.conv3x3.inputTransformLocalYSize &&
@@ -121,6 +149,14 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   ofstream out;
   FileUtils::open(out, filename);
   out << VERSION_LINE << "\n";
+  writeParam(out, "vulkan.canUseFP16Storage", config.vulkan.canUseFP16Storage);
+  writeParam(out, "vulkan.canUseFP16Compute", config.vulkan.canUseFP16Compute);
+  writeParam(out, "vulkan.canUseCooperativMatrix", config.vulkan.canUseCooperativMatrix);
+  writeParam(out, "vulkan.canUseSubgroup", config.vulkan.canUseSubgroup);
+  writeParam(out, "vulkan.shouldUseFP16Storage", config.vulkan.shouldUseFP16Storage);
+  writeParam(out, "vulkan.shouldUseFP16Compute", config.vulkan.shouldUseFP16Compute);
+  writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
+  writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
 #define WRITE_CONV(prefix, p) \
   writeParam(out, prefix ".inTileYSize", p.inTileYSize); \
   writeParam(out, prefix ".inTileXSize", p.inTileXSize); \
@@ -177,10 +213,18 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 33)
+  if(values.size() != 41)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   VulkanTuneParams config;
+  config.vulkan.canUseFP16Storage = getBoolParam(values, "vulkan.canUseFP16Storage", filename);
+  config.vulkan.canUseFP16Compute = getBoolParam(values, "vulkan.canUseFP16Compute", filename);
+  config.vulkan.canUseCooperativMatrix = getBoolParam(values, "vulkan.canUseCooperativMatrix", filename);
+  config.vulkan.canUseSubgroup = getBoolParam(values, "vulkan.canUseSubgroup", filename);
+  config.vulkan.shouldUseFP16Storage = getBoolParam(values, "vulkan.shouldUseFP16Storage", filename);
+  config.vulkan.shouldUseFP16Compute = getBoolParam(values, "vulkan.shouldUseFP16Compute", filename);
+  config.vulkan.shouldUseCooperativeMatrix = getBoolParam(values, "vulkan.shouldUseCooperativeMatrix", filename);
+  config.vulkan.shouldUseSubgroup = getBoolParam(values, "vulkan.shouldUseSubgroup", filename);
 #define READ_CONV(prefix, p) \
   p.inTileYSize = getParam(values, prefix ".inTileYSize", filename); \
   p.inTileXSize = getParam(values, prefix ".inTileXSize", filename); \
@@ -254,6 +298,7 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
   int nnXLen,
   int nnYLen,
   const ModelInfoForTuning& modelInfo,
+  const VulkanDeviceInfo& deviceInfo,
   Logger* logger) {
   string filename = tunerFile;
   if(filename.empty()) {
@@ -270,6 +315,7 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
   }
 
   VulkanTuneParams params;
+  params.vulkan = makeVulkanParams(deviceInfo);
   VulkanTuneParams::save(filename, params);
   if(logger != nullptr)
     logger->write("Saved default Vulkan tuning parameters to: " + filename);

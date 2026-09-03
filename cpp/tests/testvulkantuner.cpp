@@ -31,16 +31,36 @@ namespace {
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
-  testAssert(VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) == "tune1_gpuAppleM2_x19_y19_c96_mv8.txt");
+  testAssert(VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) == "tune3_gpuAppleM2_x19_y19_c96_mv8.txt");
 
   MakeDir::make("tests/scratch");
   const string filename = "tests/scratch/vulkantuner-roundtrip.txt";
   const string defaultsFilename = "tests/scratch/vulkantuner-defaults.txt";
   FileUtils::tryRemoveFile(defaultsFilename);
   VulkanTuneParams defaults;
+  VulkanDeviceInfo deviceInfo = {};
+  deviceInfo.storage16BitFeatures.storageBuffer16BitAccess = VK_TRUE;
+  deviceInfo.shaderFloat16Int8Features.shaderFloat16 = VK_TRUE;
+  deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
+  deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+  deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  defaults.vulkan.canUseFP16Storage = true;
+  defaults.vulkan.canUseFP16Compute = true;
+  defaults.vulkan.canUseCooperativMatrix = true;
+  defaults.vulkan.canUseSubgroup = true;
   testAssert(
-    VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, {96, 8}, nullptr) == defaults
+    VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, {96, 8}, deviceInfo, nullptr) == defaults
   );
+  vector<string> defaultLines = FileUtils::readFileLines(defaultsFilename, '\n');
+  testAssert(defaultLines[0] == "VERSION=3");
+  testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");
+  testAssert(defaultLines[2] == "vulkan.canUseFP16Compute=1");
+  testAssert(defaultLines[3] == "vulkan.canUseCooperativMatrix=1");
+  testAssert(defaultLines[4] == "vulkan.canUseSubgroup=1");
+  testAssert(defaultLines[5] == "vulkan.shouldUseFP16Storage=0");
+  testAssert(defaultLines[6] == "vulkan.shouldUseFP16Compute=0");
+  testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
+  testAssert(defaultLines[8] == "vulkan.shouldUseSubgroup=0");
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
 
   VulkanTuneParams params;
@@ -49,13 +69,15 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.conv5x5.outputTransformLocalXSize = 16;
   params.xgemm.KWG = 32;
   params.xgemmDirect.KWID = 1;
+  params.vulkan.canUseSubgroup = true;
+  params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());
   VulkanTuneParams::save(filename, params);
   testAssert(VulkanTuneParams::load(filename) == params);
 
-  writeText(filename, "VERSION=2\n");
+  writeText(filename, "VERSION=1\n");
   testAssert(loadThrows(filename));
-  writeText(filename, "VERSION=1\nxgemm.MDIMC=not-an-int\n");
+  writeText(filename, "VERSION=3\nvulkan.canUseFP16Storage=not-an-int\n");
   testAssert(loadThrows(filename));
 
   VulkanTuneParams invalid = params;
