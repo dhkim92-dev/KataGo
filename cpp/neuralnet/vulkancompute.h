@@ -123,7 +123,19 @@ namespace vkcompute {
     VkResult* result
   );
 
-  void doHgemmNCHW(
+  void doHgemmCooperativeMatrix(
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    const VkCommandBuffer cb,
+    const VkDescriptorSet descriptorSet,
+    const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+    const int batchSize,
+    const int M, const int N, const int K,
+    VkResult *result
+  );
+
+  void doHgemmCooperativeMatrixNCHW(
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,

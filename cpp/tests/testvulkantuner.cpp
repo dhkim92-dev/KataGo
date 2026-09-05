@@ -49,7 +49,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
   defaults.vulkan.canUseFP16Storage = true;
   defaults.vulkan.canUseFP16Compute = true;
-  defaults.vulkan.canUseCooperativMatrix = true;
+  defaults.vulkan.canUseCooperativeMatrix = true;
   defaults.vulkan.canUseSubgroup = true;
   VulkanTuner::ModelInfoForTuning modelInfo;
   modelInfo.trunkNumChannels = 96;
@@ -61,12 +61,12 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[0] == "VERSION=" + to_string(VulkanTuner::TUNER_VERSION));
   testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");
   testAssert(defaultLines[2] == "vulkan.canUseFP16Compute=1");
-  testAssert(defaultLines[3] == "vulkan.canUseCooperativMatrix=1");
+  testAssert(defaultLines[3] == "vulkan.canUseCooperativeMatrix=1");
   testAssert(defaultLines[4] == "vulkan.canUseSubgroup=1");
   testAssert(defaultLines[5] == "vulkan.shouldUseFP16Storage=0");
   testAssert(defaultLines[6] == "vulkan.shouldUseFP16Compute=0");
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
-  testAssert(defaultLines[8] == "vulkan.shouldUseHgemmNCHW=0");
+  testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
 
@@ -95,14 +95,14 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.vulkan.canUseFP16Compute = true;
   params.vulkan.shouldUseFP16Storage = true;
   params.vulkan.shouldUseFP16Compute = true;
-  params.vulkan.shouldUseHgemmNCHW = true;
+  params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());
   VulkanTuneParams::save(filename, params);
   testAssert(VulkanTuneParams::load(filename) == params);
 
-  writeText(filename, "VERSION=1\n");
+  writeText(filename, "VERSION=999\n");
   testAssert(loadThrows(filename));
   writeText(filename, "VERSION=" + to_string(VulkanTuner::TUNER_VERSION) + "\nvulkan.canUseFP16Storage=not-an-int\n");
   testAssert(loadThrows(filename));

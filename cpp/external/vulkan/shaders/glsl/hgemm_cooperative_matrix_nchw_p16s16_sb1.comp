@@ -4,4 +4,4 @@
 #define VWM 4
 #define VWN 4
 
-#include "hgemm_nchw.glsl"
+#include "hgemm_cooperative_matrix_nchw.glsl"

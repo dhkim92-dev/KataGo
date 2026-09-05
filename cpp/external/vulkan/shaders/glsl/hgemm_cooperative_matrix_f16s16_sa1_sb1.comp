@@ -1,0 +1,4 @@
+#version 460
+#define SA 1
+#define SB 1
+#include "hgemm_cooperative_matrix.glsl"

@@ -30,14 +30,31 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_p16s16_end;
   extern const size_t _binary_conv2d_p16s16_size;
 
-  // hgemm_nchw_p16s16_sb{0,1}.comp
-  extern const unsigned char _binary_hgemm_nchw_p16s16_sb0_start[];
-  extern const unsigned char* _binary_hgemm_nchw_p16s16_sb0_end;
-  extern const size_t _binary_hgemm_nchw_p16s16_sb0_size;
+  // hgemm_cooperative_matrix_nchw_p16s16_sb{0,1}.comp
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
 
-  extern const unsigned char _binary_hgemm_nchw_p16s16_sb1_start[];
-  extern const unsigned char* _binary_hgemm_nchw_p16s16_sb1_end;
-  extern const size_t _binary_hgemm_nchw_p16s16_sb1_size;
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+
+  // hgemm_cooperative_matrix_f16s16_sa{0,1}_sb{0,1}.comp
+  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
 
   // winograd_input_transform.glsl
   extern const unsigned char _binary_winograd_input_transform_fp32_start[];
@@ -410,11 +427,23 @@ namespace vk_shader {
   extern const unsigned char* spirv_conv2d_p16s16;
   extern size_t spirv_conv2d_p16s16_size;
 
-  extern const unsigned char* spirv_hgemm_nchw_p16s16_sb0;
-  extern size_t spirv_hgemm_nchw_p16s16_sb0_size;
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0;
+  extern size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
 
-  extern const unsigned char* spirv_hgemm_nchw_p16s16_sb1;
-  extern size_t spirv_hgemm_nchw_p16s16_sb1_size;
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1;
+  extern size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0;
+  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1;
+  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
+
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0;
+  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
+
+  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1;
+  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
 
   extern const unsigned char* spirv_winograd_input_transform_fp32;
   extern size_t spirv_winograd_input_transform_fp32_size;
@@ -867,12 +896,27 @@ struct LocalDimHash {
       int PADB = 1;
     };
 
+    /** Specialization constants for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+    };
+
     /**
-     * Specialization constants for hgemm_nchw. The first three fields map to
+     * Specialization constants for hgemm_cooperative_matrix_nchw. The first three fields map to
      * local_size_*_id 0..2; the remaining fields map to constant IDs 3..12 in
      * the shader and therefore must remain in this order.
      */
-    struct HGemmNCHWSpec {
+    struct HGemmCooperativeMatrixNCHWSpec {
       static constexpr int COMPONENT_TYPE_FLOAT16 = 0;
       static constexpr int COMPONENT_TYPE_FLOAT32 = 1;
 
@@ -1129,11 +1173,18 @@ struct LocalDimHash {
       uint32_t W; // Width
     };
 
-    /** Push constants for hgemm_nchw. */
-    struct HGemmNCHWParams {
+    /** Push constants for hgemm_cooperative_matrix_nchw. */
+    struct HGemmCooperativeMatrixNCHWParams {
       int cSize;
       int hwSize;
       int ocSize;
+    };
+
+    /** Push constants for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixParams {
+      int M;
+      int N;
+      int K;
     };
 
     struct TransformerRMSNormPushParams {
@@ -1251,13 +1302,32 @@ struct LocalDimHash {
       bool isValid() const;
     };
 
+    /** Runtime tuning parameters for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixTuneParams {
+      // MWARP/NWARP/KDIM and subgroupSize are selected from device properties.
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      int SA = 0;
+      int SB = 0;
+
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
     /**
-     * Runtime tuning parameters for hgemm_nchw. SB selects the shader binary
+     * Runtime tuning parameters for hgemm_cooperative_matrix_nchw. SB selects the shader binary
      * (shared-memory or direct-filter load); MWG through NWAVE are passed as
      * specialization constants when a pipeline is created. VWM/VWN are fixed
      * to the OpenCL port's Vulkan-compatible values.
      */
-    struct HGemmNCHWTuneParams {
+    struct HGemmCooperativeMatrixNCHWTuneParams {
       // These values come from VkCooperativeMatrixPropertiesKHR and are not
       // tuner candidates.
       int MWARP = 16;
@@ -1269,8 +1339,8 @@ struct LocalDimHash {
       int KWG = 16;
       int MWAVE = 16;
       int NWAVE = 16;
-      int CType = spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16;
-      int ResultType = spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      int CType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      int ResultType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
       int SB = 0;
       // OpenCL vectorization is fixed at four for the Vulkan port.
       int VWM = 4;
@@ -1308,12 +1378,12 @@ struct LocalDimHash {
     struct VulkanParams {
       bool canUseFP16Storage = false;
       bool canUseFP16Compute = false;
-      bool canUseCooperativMatrix = false;
+      bool canUseCooperativeMatrix = false;
       bool canUseSubgroup = false;
       bool shouldUseFP16Storage = false;
       bool shouldUseFP16Compute = false;
       bool shouldUseCooperativeMatrix = false;
-      bool shouldUseHgemmNCHW = false;
+      bool shouldUseHgemmCooperativeMatrixNCHW = false;
       bool shouldUseSubgroup = false;
     };
 
@@ -1324,7 +1394,8 @@ struct LocalDimHash {
       GPoolTuneParams gPool;
       ConvTuneParams conv3x3;
       ConvTuneParams conv5x5;
-      HGemmNCHWTuneParams hgemmNCHW;
+      HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
+      HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
       XgemmTuneParams xgemm;
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
@@ -1420,8 +1491,8 @@ struct LocalDimHash {
     Pipeline addPointWise;  // operation for skipping connections
 
     // Pipeline for matrix multiplication
-    // Pipeline batchedXgemmDirect;
-    Pipeline hgemmNCHW;
+    Pipeline hgemmCooperativeMatrix;
+    Pipeline hgemmCooperativeMatrixNCHW;
     Pipeline xgemmDirectBatchedTT;
     Pipeline xgemmBatchedFp32;
 
@@ -1477,7 +1548,8 @@ struct LocalDimHash {
     VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
     VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
-    VkResult createHgemmNCHW(Pipeline& pipeline, const tune::HGemmNCHWTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrix(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
     VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createXgemmBatched(Pipeline& pipeline, const tune::XgemmTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);

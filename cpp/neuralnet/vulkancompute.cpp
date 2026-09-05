@@ -489,7 +489,56 @@ void batchedXGemmDirect_MK_NK_MN(
     vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
-void doHgemmNCHW(
+void doHgemmCooperativeMatrix(
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  const VkCommandBuffer cb,
+  const VkDescriptorSet descriptorSet,
+  const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+  const int batchSize,
+  const int M, const int N, const int K,
+  VkResult *result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(A != nullptr && B != nullptr && C != nullptr);
+  assert(result != nullptr);
+
+  const auto& params = tuneParams.hgemmCooperativeMatrix;
+  if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 ||
+     !params.isValid() || M % params.MWG != 0 || N % params.NWG != 0 || K % params.KWG != 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for hgemmCooperativeMatrix", *result);
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+
+  const vk_shader::push::HGemmCooperativeMatrixParams pushParams = {M, N, K};
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+  vkCmdDispatch(
+    cb,
+    static_cast<uint32_t>(M / params.MWG),
+    static_cast<uint32_t>(N / params.NWG),
+    static_cast<uint32_t>(batchSize)
+  );
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
+}
+
+void doHgemmCooperativeMatrixNCHW(
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -507,9 +556,9 @@ void doHgemmNCHW(
   assert(A != nullptr && B != nullptr && C != nullptr);
   assert(result != nullptr);
   if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 ||
-     !tuneParams.hgemmNCHW.isValid() ||
-     N % tuneParams.hgemmNCHW.getRequiredCDivisor() != 0 ||
-     K % tuneParams.hgemmNCHW.getRequiredCDivisor() != 0) {
+     !tuneParams.hgemmCooperativeMatrixNCHW.isValid() ||
+     N % tuneParams.hgemmCooperativeMatrixNCHW.getRequiredCDivisor() != 0 ||
+     K % tuneParams.hgemmCooperativeMatrixNCHW.getRequiredCDivisor() != 0) {
     *result = VK_ERROR_INITIALIZATION_FAILED;
     return;
   }
@@ -520,21 +569,21 @@ void doHgemmNCHW(
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
-  CHECK_VK_MSG("Update Descriptor Sets for hgemmNCHW", *result);
+  CHECK_VK_MSG("Update Descriptor Sets for hgemmCooperativeMatrixNCHW", *result);
 
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(
     cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
   );
 
-  const vk_shader::push::HGemmNCHWParams params = {K, M, N};
+  const vk_shader::push::HGemmCooperativeMatrixNCHWParams params = {K, M, N};
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
   const uint32_t wgCountX = static_cast<uint32_t>(
-    (M + tuneParams.hgemmNCHW.MWG - 1) / tuneParams.hgemmNCHW.MWG
+    (M + tuneParams.hgemmCooperativeMatrixNCHW.MWG - 1) / tuneParams.hgemmCooperativeMatrixNCHW.MWG
   );
   const uint32_t wgCountY = static_cast<uint32_t>(
-    (N + tuneParams.hgemmNCHW.NWG - 1) / tuneParams.hgemmNCHW.NWG
+    (N + tuneParams.hgemmCooperativeMatrixNCHW.NWG - 1) / tuneParams.hgemmCooperativeMatrixNCHW.NWG
   );
   vkCmdDispatch(cb, wgCountX, wgCountY, static_cast<uint32_t>(batchSize));
   vk_helper::barrierCommandBufferForBuffer(cb, C);

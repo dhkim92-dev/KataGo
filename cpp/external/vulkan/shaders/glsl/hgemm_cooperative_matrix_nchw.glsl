@@ -18,7 +18,7 @@
 #define VWN 4
 #endif
 #if VWM != 4 || VWN != 4
-#error "hgemm_nchw requires VWM=4 and VWN=4"
+#error "hgemm_cooperative_matrix_nchw requires VWM=4 and VWN=4"
 #endif
 
 #define GroupId0() (int(gl_WorkGroupID.x))
@@ -77,7 +77,7 @@ layout(set = 0, binding = 2) writeonly buffer Output {
   f16vec4 d_output[];
 };
 
-layout(push_constant) uniform HGemmNCHWParams {
+layout(push_constant) uniform HGemmCooperativeMatrixNCHWParams {
   int cSize;
   int hwSize;
   int ocSize;
@@ -150,8 +150,8 @@ void main() {
   const int batchInputBase = batch * cSize * hwSize;
   const int batchOutputBase = batch * ocSize * hwSize;
 
-  // OpenCL's hgemmWmmaNCHW requires cSize to be divisible by KWG and KWG to
-  // be divisible by the WMMA K dimension. The same contract is used here.
+  // The OpenCL source requires cSize to be divisible by KWG and KWG to be
+  // divisible by the cooperative-matrix K dimension. The same contract is used here.
   for(int kBase = 0; kBase < cSize; kBase += KWG) {
     loadBTile(kBase);
 

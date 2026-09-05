@@ -529,9 +529,9 @@ VulkanDevice* vk_helper::createVulkanDevice(
   vulkanDevice->descriptorPool = vk_helper::createDescriptorPool(
     vulkanDevice,
     {
-      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
     },
-    1024,      
+    4096,      
     &res
   );
   CHECK_VK_MSG("CreateDescriptorPool for device : " + deviceInfo.deviceName, res);

@@ -44,11 +44,21 @@ namespace vk_shader {
   const unsigned char* spirv_conv2d_p16s16 = _binary_conv2d_p16s16_start;
   size_t spirv_conv2d_p16s16_size = _binary_conv2d_p16s16_size;
 
-  // hgemm_nchw_p16s16_sb{0,1}
-  const unsigned char* spirv_hgemm_nchw_p16s16_sb0 = _binary_hgemm_nchw_p16s16_sb0_start;
-  size_t spirv_hgemm_nchw_p16s16_sb0_size = _binary_hgemm_nchw_p16s16_sb0_size;
-  const unsigned char* spirv_hgemm_nchw_p16s16_sb1 = _binary_hgemm_nchw_p16s16_sb1_start;
-  size_t spirv_hgemm_nchw_p16s16_sb1_size = _binary_hgemm_nchw_p16s16_sb1_size;
+  // hgemm_cooperative_matrix_nchw_p16s16_sb{0,1}
+  const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0 = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_start;
+  size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1 = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_start;
+  size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+
+  // hgemm_cooperative_matrix_f16s16_sa{0,1}_sb{0,1}
+  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0 = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_start;
+  size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1 = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_start;
+  size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0 = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_start;
+  size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1 = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_start;
+  size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
 
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
@@ -333,13 +343,20 @@ namespace vk_shader {
     } guard{printPipelineCreation, printPipelineCreation};
     printPipelineCreation = print;
     VkResult result;
-    if(tuneParams.vulkan.canUseCooperativMatrix &&
+    if(tuneParams.vulkan.canUseCooperativeMatrix &&
+       tuneParams.vulkan.shouldUseCooperativeMatrix &&
+       tuneParams.vulkan.canUseFP16Storage &&
+       tuneParams.vulkan.canUseFP16Compute &&
+       tuneParams.vulkan.shouldUseFP16Storage) {
+      if((result = createHgemmCooperativeMatrix(hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
+    }
+    if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.shouldUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseHgemmNCHW) {
-      if((result = createHgemmNCHW(hgemmNCHW, tuneParams.hgemmNCHW)) != VK_SUCCESS) return result;
+       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
+      if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
     }
     // Tile base conv no longer used.
     // createConv2dFp32();
@@ -410,7 +427,8 @@ namespace vk_shader {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
-    destroyPipeline(hgemmNCHW);
+    destroyPipeline(hgemmCooperativeMatrix);
+    destroyPipeline(hgemmCooperativeMatrixNCHW);
     destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
@@ -713,11 +731,64 @@ namespace vk_shader {
     return createPipeline("add_pointwise_fp32", spirv_add_pointwise_fp32, spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createHgemmNCHW(Pipeline& pipeline, const HGemmNCHWTuneParams& tuneParams) {
+  VkResult ComputePipelines::createHgemmCooperativeMatrix(Pipeline& pipeline, const HGemmCooperativeMatrixTuneParams& tuneParams) {
     if(!tuneParams.isValid())
       return VK_ERROR_INITIALIZATION_FAILED;
 
-    HGemmNCHWSpec spec;
+    HGemmCooperativeMatrixSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MWARP;
+    spec.NSize = tuneParams.NWARP;
+    spec.KSize = tuneParams.KDIM;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    SpecializationData specData(spec);
+
+    const unsigned char* spirv = nullptr;
+    size_t spirvSize = 0;
+    const char* name = nullptr;
+    // SA/SB are compile-time choices, so select the matching SPIR-V module.
+    // Do not silently map an invalid combination to the SA1/SB1 binary.
+    switch((tuneParams.SA << 1) | tuneParams.SB) {
+      case 0:
+        name = "hgemm_cooperative_matrix_f16s16_sa0_sb0";
+        spirv = spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0;
+        spirvSize = spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+        break;
+      case 1:
+        name = "hgemm_cooperative_matrix_f16s16_sa0_sb1";
+        spirv = spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1;
+        spirvSize = spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
+        break;
+      case 2:
+        name = "hgemm_cooperative_matrix_f16s16_sa1_sb0";
+        spirv = spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0;
+        spirvSize = spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
+        break;
+      case 3:
+        name = "hgemm_cooperative_matrix_f16s16_sa1_sb1";
+        spirv = spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1;
+        spirvSize = spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
+        break;
+      default:
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    return createPipeline(
+      name, spirv, spirvSize, 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
+      &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+    );
+  }
+
+  VkResult ComputePipelines::createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const HGemmCooperativeMatrixNCHWTuneParams& tuneParams) {
+    if(!tuneParams.isValid())
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+    HGemmCooperativeMatrixNCHWSpec spec;
     spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
     spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
     spec.localSizeZ = 1;
@@ -735,11 +806,11 @@ namespace vk_shader {
 
     if(tuneParams.SB == 1)
       return createPipeline(
-        "hgemm_nchw_p16s16_sb1",
-        spirv_hgemm_nchw_p16s16_sb1,
-        spirv_hgemm_nchw_p16s16_sb1_size,
+        "hgemm_cooperative_matrix_nchw_p16s16_sb1",
+        spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1,
+        spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size,
         3,
-        sizeof(HGemmNCHWParams),
+        sizeof(HGemmCooperativeMatrixNCHWParams),
         pipeline,
         &specData.info,
         spec.localSizeX,
@@ -747,11 +818,11 @@ namespace vk_shader {
         spec.localSizeZ
       );
     return createPipeline(
-      "hgemm_nchw_p16s16_sb0",
-      spirv_hgemm_nchw_p16s16_sb0,
-      spirv_hgemm_nchw_p16s16_sb0_size,
+      "hgemm_cooperative_matrix_nchw_p16s16_sb0",
+      spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0,
+      spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size,
       3,
-      sizeof(HGemmNCHWParams),
+      sizeof(HGemmCooperativeMatrixNCHWParams),
       pipeline,
       &specData.info,
       spec.localSizeX,
