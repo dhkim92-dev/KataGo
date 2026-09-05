@@ -30,6 +30,15 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_p16s16_end;
   extern const size_t _binary_conv2d_p16s16_size;
 
+  // hgemm_nchw_p16s16_sb{0,1}.comp
+  extern const unsigned char _binary_hgemm_nchw_p16s16_sb0_start[];
+  extern const unsigned char* _binary_hgemm_nchw_p16s16_sb0_end;
+  extern const size_t _binary_hgemm_nchw_p16s16_sb0_size;
+
+  extern const unsigned char _binary_hgemm_nchw_p16s16_sb1_start[];
+  extern const unsigned char* _binary_hgemm_nchw_p16s16_sb1_end;
+  extern const size_t _binary_hgemm_nchw_p16s16_sb1_size;
+
   // winograd_input_transform.glsl
   extern const unsigned char _binary_winograd_input_transform_fp32_start[];
   extern const unsigned char* _binary_winograd_input_transform_fp32_end;
@@ -400,6 +409,12 @@ namespace vk_shader {
 
   extern const unsigned char* spirv_conv2d_p16s16;
   extern size_t spirv_conv2d_p16s16_size;
+
+  extern const unsigned char* spirv_hgemm_nchw_p16s16_sb0;
+  extern size_t spirv_hgemm_nchw_p16s16_sb0_size;
+
+  extern const unsigned char* spirv_hgemm_nchw_p16s16_sb1;
+  extern size_t spirv_hgemm_nchw_p16s16_sb1_size;
 
   extern const unsigned char* spirv_winograd_input_transform_fp32;
   extern size_t spirv_winograd_input_transform_fp32_size;
@@ -852,6 +867,30 @@ struct LocalDimHash {
       int PADB = 1;
     };
 
+    /**
+     * Specialization constants for hgemm_nchw. The first three fields map to
+     * local_size_*_id 0..2; the remaining fields map to constant IDs 3..12 in
+     * the shader and therefore must remain in this order.
+     */
+    struct HGemmNCHWSpec {
+      static constexpr int COMPONENT_TYPE_FLOAT16 = 0;
+      static constexpr int COMPONENT_TYPE_FLOAT32 = 1;
+
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 16;
+      int NWG = 16;
+      int KWG = 16;
+      int MWAVE = 16;
+      int NWAVE = 16;
+      int CType = COMPONENT_TYPE_FLOAT16;
+      int ResultType = COMPONENT_TYPE_FLOAT16;
+    };
+
     struct TransformerRMSNormSpec {
       uint32_t localSizeX;
       uint32_t localSizeY;
@@ -1090,6 +1129,13 @@ struct LocalDimHash {
       uint32_t W; // Width
     };
 
+    /** Push constants for hgemm_nchw. */
+    struct HGemmNCHWParams {
+      int cSize;
+      int hwSize;
+      int ocSize;
+    };
+
     struct TransformerRMSNormPushParams {
       int nSize;
       int cSize;
@@ -1205,6 +1251,36 @@ struct LocalDimHash {
       bool isValid() const;
     };
 
+    /**
+     * Runtime tuning parameters for hgemm_nchw. SB selects the shader binary
+     * (shared-memory or direct-filter load); MWG through NWAVE are passed as
+     * specialization constants when a pipeline is created. VWM/VWN are fixed
+     * to the OpenCL port's Vulkan-compatible values.
+     */
+    struct HGemmNCHWTuneParams {
+      // These values come from VkCooperativeMatrixPropertiesKHR and are not
+      // tuner candidates.
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 16;
+      int NWG = 16;
+      int KWG = 16;
+      int MWAVE = 16;
+      int NWAVE = 16;
+      int CType = spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      int ResultType = spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      int SB = 0;
+      // OpenCL vectorization is fixed at four for the Vulkan port.
+      int VWM = 4;
+      int VWN = 4;
+
+      int getRequiredCDivisor() const;
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
     struct TransformerTuneParams {
       int ATTN_BLOCK_Q=128  ;
       int ATTN_BLOCK_KV=32;
@@ -1237,6 +1313,7 @@ struct LocalDimHash {
       bool shouldUseFP16Storage = false;
       bool shouldUseFP16Compute = false;
       bool shouldUseCooperativeMatrix = false;
+      bool shouldUseHgemmNCHW = false;
       bool shouldUseSubgroup = false;
     };
 
@@ -1247,6 +1324,7 @@ struct LocalDimHash {
       GPoolTuneParams gPool;
       ConvTuneParams conv3x3;
       ConvTuneParams conv5x5;
+      HGemmNCHWTuneParams hgemmNCHW;
       XgemmTuneParams xgemm;
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
@@ -1343,6 +1421,7 @@ struct LocalDimHash {
 
     // Pipeline for matrix multiplication
     // Pipeline batchedXgemmDirect;
+    Pipeline hgemmNCHW;
     Pipeline xgemmDirectBatchedTT;
     Pipeline xgemmBatchedFp32;
 
@@ -1398,6 +1477,7 @@ struct LocalDimHash {
     VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
     VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createHgemmNCHW(Pipeline& pipeline, const tune::HGemmNCHWTuneParams& tuneParams);
     VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createXgemmBatched(Pipeline& pipeline, const tune::XgemmTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);

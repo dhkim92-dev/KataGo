@@ -283,6 +283,10 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     VulkanDeviceInfo deviceInfo = {};
     deviceInfo.deviceId = i;
     deviceInfo.physicalDevice = physicalDevice;
+    deviceInfo.cooperativeMatrixPropertiesFn =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+        vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR")
+      );
 
     // Get device properties
     VkPhysicalDeviceProperties2 properties2 = {};

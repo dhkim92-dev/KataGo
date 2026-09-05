@@ -66,7 +66,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[5] == "vulkan.shouldUseFP16Storage=0");
   testAssert(defaultLines[6] == "vulkan.shouldUseFP16Compute=0");
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
-  testAssert(defaultLines[8] == "vulkan.shouldUseSubgroup=0");
+  testAssert(defaultLines[8] == "vulkan.shouldUseHgemmNCHW=0");
+  testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
 
   VulkanTuneParams params;
@@ -94,6 +95,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.vulkan.canUseFP16Compute = true;
   params.vulkan.shouldUseFP16Storage = true;
   params.vulkan.shouldUseFP16Compute = true;
+  params.vulkan.shouldUseHgemmNCHW = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());

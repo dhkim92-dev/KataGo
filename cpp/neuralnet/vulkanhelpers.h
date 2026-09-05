@@ -28,6 +28,7 @@ struct VulkanDeviceInfo {
   VkPhysicalDeviceSubgroupProperties subgroupProperties;
   VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeProperties;
   VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooopertavieMatrixProperties;
+  PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR cooperativeMatrixPropertiesFn = nullptr;
 
   VkPhysicalDeviceFeatures features;
   VkPhysicalDevice16BitStorageFeatures storage16BitFeatures;

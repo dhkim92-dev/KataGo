@@ -11,7 +11,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 6;
+  constexpr int TUNER_VERSION = 9;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   struct ModelInfoForTuning {
@@ -29,6 +29,13 @@ namespace VulkanTuner {
     int transformerFFNChannels = 0;
 
     static ModelInfoForTuning ofDesc(const ModelDesc& desc);
+  };
+
+  struct HgemmNCHWTuner {
+    static bool selectCooperativeMatrixProperties(
+      const VulkanDevice* device,
+      HGemmNCHWTuneParams& params
+    );
   };
 
   void tune(

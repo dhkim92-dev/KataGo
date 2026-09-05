@@ -108,6 +108,7 @@ namespace vkcompute {
     uint32_t numBatchElts,
     VkResult *result
   );
+
   void batchedXGemmDirect_MK_NK_MN(
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
@@ -120,6 +121,19 @@ namespace vkcompute {
     VulkanBuffer* C,
     int numBatchElts,
     VkResult* result
+  );
+
+  void doHgemmNCHW(
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    const VkCommandBuffer cb,
+    const VkDescriptorSet descriptorSet,
+    const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+    const int batchSize,
+    // Matrix dimensions are M=HW, N=OC, K=C for the NCHW layout.
+    const int M, const int N, const int K,
+    VkResult *result
   );
 
   struct SpatialRMSNormSizing {

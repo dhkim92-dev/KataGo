@@ -299,8 +299,9 @@ struct ComputeContext {
           requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
         }
 
-        // TODO: Not like OpenCL, Vulkan can access Tensor cores via extensions. I will support it later.
-        //       VK_KHR_cooperative_matrix extension is required for tensor cores usage.
+        if (deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE) {
+          requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+        }
 
         // Check for NHWC support if requested
         if ( usingNHWCMode != enabled_t::False ) {
@@ -662,8 +663,7 @@ struct BatchNormLayer {
       &res
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
 
     switch ( activation ) {
       case ACTIVATION_IDENTITY:
@@ -851,6 +851,16 @@ struct ConvLayer {
     int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
 
     if (convXSize == 1 && convYSize == 1) {
+      const auto& hgemmParams = handle_->tuneParams.hgemmNCHW;
+      usingHGemmWmmaNCHW =
+        handle_->usingFP16Storage &&
+        handle_->tuneParams.vulkan.canUseCooperativMatrix &&
+        handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
+        handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+        handle_->tuneParams.vulkan.shouldUseHgemmNCHW &&
+        hgemmParams.isValid() &&
+        inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
+        outChannels % hgemmParams.getRequiredCDivisor() == 0;
       std::vector<float> transWeights(inChannels * outChannels);
       for (int oc = 0; oc < outChannels; oc++) {
         for (int ic = 0; ic < inChannels; ic++) {
@@ -860,7 +870,7 @@ struct ConvLayer {
       filterBuf = vk_helper::createReadOnlyBuffer(
         handle->vulkanDevice,
         transWeights,
-        useFP16,
+        usingHGemmWmmaNCHW || useFP16,
         &res
       );
     } else if( (convXSize == 3 && convYSize == 3) || (convXSize==5 &&convYSize == 5)) {
@@ -1017,7 +1027,9 @@ struct ConvLayer {
     VulkanBuffer* output
   ) {
     VkResult res;
-    Pipeline targetPipeline = handle->context->pipelinesPerDev.at(handle->vulkanDevice->info.deviceId)->xgemmStridedBatchedFp32;
+    Pipeline targetPipeline = usingHGemmWmmaNCHW
+      ? handle->pipelines->hgemmNCHW
+      : handle->pipelines->xgemmStridedBatchedFp32;
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
       descriptorSet = vk_helper::allocateDescriptorSet(
@@ -1026,6 +1038,29 @@ struct ConvLayer {
         &res
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
+    }
+
+    if(usingHGemmWmmaNCHW) {
+      SHADER_PROFILE_START("HGEMM1x1", cb);
+      vkcompute::doHgemmNCHW(
+        handle->vulkanDevice,
+        handle->tuneParams,
+        &targetPipeline,
+        cb,
+        descriptorSet,
+        input,
+        filterBuf,
+        output,
+        batchSize,
+        paddedNNXYLen,
+        outChannels,
+        inChannels,
+        &res
+      );
+      SHADER_PROFILE_END("HGEMM1x1", cb);
+      CHECK_VK_MSG("Execute hgemmNCHW for ConvLayer: " + name, res);
+      vk_helper::barrierCommandBuffer(cb);
+      return;
     }
 
     int filterStride = 0;
@@ -1061,7 +1096,7 @@ struct ConvLayer {
   ) {
     // Implement convolution logic here if needed
     VkResult res = VK_ERROR_UNKNOWN;
-    auto *pipelines = this->handle->context->pipelinesPerDev.at(handle->vulkanDevice->info.deviceId);
+    const auto *pipelines = this->handle->pipelines;
     Pipeline winogradInputTransformBnActMaskPipeline;
     Pipeline xgemmBatchedPipeline = pipelines->xgemmBatchedFp32;
     Pipeline winogradOutputTransformPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradOutputTransform3x3 
@@ -1207,7 +1242,7 @@ struct ConvLayer {
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
     const VulkanDevice* device = handle->vulkanDevice;
-    const vk_shader::ComputePipelines *pipelines = handle->context->pipelinesPerDev.at(device->info.deviceId);
+    const vk_shader::ComputePipelines *pipelines = handle->pipelines;
 
     Pipeline inputTransformPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradInputTransform3x3
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5
@@ -1486,8 +1521,7 @@ struct MatBiasLayer {
   void forward(VkCommandBuffer& cb, int batchSize, VulkanBuffer* input) {
     assert(cb != VK_NULL_HANDLE);
     VkResult res = VK_ERROR_UNKNOWN;
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
     Pipeline targetPipeline;
 
     switch ( activation ) {
@@ -1686,8 +1720,7 @@ void performExtractChannel0NCHW(
   int nnXYLen,
   bool begin = true
 ) {
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
   Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
@@ -1760,8 +1793,7 @@ void performAddChannelBiases(
   int nnXYLen,
   bool begin = true
 ) {
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
   Pipeline targetPipeline = pipelines->addChannelBiasNCHW;
 
   if( commandBuffer == VK_NULL_HANDLE ) {
@@ -1850,8 +1882,7 @@ void performAddPointWise(
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
   }
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
 
   if ( descriptorSet == VK_NULL_HANDLE ) {
     descriptorSet = vk_helper::allocateDescriptorSet(
@@ -1919,8 +1950,7 @@ void performGpoolMask(
   VkResult* result,
   bool begin = true
 ) {
-  uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  vk_shader::ComputePipelines* pipelines = handle->context->pipelinesPerDev.at(gpuId);
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
   Pipeline pipeline = pipelines->globalPoolingChannelsFp32;
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
@@ -2095,7 +2125,7 @@ struct TransformerMatMulLayer {
   const int inChannels;
   const int outChannels;
   const int paddedNNXYLen;
-  bool usingHGemmWmmaNHWC;
+  bool usingHGemmWmmaNCHW;
   VkDescriptorSet descriptorSet;
   VulkanBuffer* filter;
 
@@ -2108,28 +2138,32 @@ struct TransformerMatMulLayer {
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
     paddedNNXYLen(handle->paddedNNXYLen),
-    filter(nullptr),
+    usingHGemmWmmaNCHW(false),
     descriptorSet(VK_NULL_HANDLE),
-    usingHGemmWmmaNHWC(false)
+    filter(nullptr)
   {
     testAssert(desc->weights.size() == static_cast<size_t>(inChannels * outChannels));
-    uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-    auto pipelines = handle->context->pipelinesPerDev.at(gpuId);
     std::vector<float> weights = desc->weights;
-    bool useFP16 = handle->usingFP16Storage;
+    const auto& hgemmParams = handle->tuneParams.hgemmNCHW;
+    usingHGemmWmmaNCHW =
+      handle->usingFP16Storage &&
+      handle->tuneParams.vulkan.canUseCooperativMatrix &&
+      handle->tuneParams.vulkan.shouldUseCooperativeMatrix &&
+      handle->tuneParams.vulkan.shouldUseFP16Storage &&
+      handle->tuneParams.vulkan.shouldUseHgemmNCHW &&
+      hgemmParams.isValid() &&
+      inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
+      outChannels % hgemmParams.getRequiredCDivisor() == 0;
+    bool useFP16 = handle->usingFP16Storage || usingHGemmWmmaNCHW;
     VkResult res = VK_ERROR_UNKNOWN;
     filter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, useFP16, &res);
     CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatmulLayer()] create filter vulkan buffer", res);
-    auto tuneParams = handle->tuneParams;
 
-    if ( handle->usingFP16TensorCoresFor1x1) {
-      throw StringError("vulkan backend doesn't support tensorcore yet.");
-    }   
-
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->xgemmStridedBatchedFp32.descriptorSetLayout, &res);
+    const Pipeline& descriptorPipeline = usingHGemmWmmaNCHW
+      ? handle->pipelines->hgemmNCHW
+      : handle->pipelines->xgemmStridedBatchedFp32;
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, descriptorPipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate descriptorSet", res);
-
-    // TODO: FP16 support and tensor cores.
   }
 
   ~TransformerMatMulLayer() {
@@ -2147,7 +2181,7 @@ struct TransformerMatMulLayer {
     VulkanBuffer* convWorkspace
   ) {
     VkResult res;
-    if (!usingHGemmWmmaNHWC) {
+    if (!usingHGemmWmmaNCHW) {
       int filterStride = 0;
       int inputStride = paddedNNXYLen * inChannels;
       int outputStride = paddedNNXYLen * outChannels;
@@ -2165,9 +2199,24 @@ struct TransformerMatMulLayer {
         static_cast<uint32_t>(batchSize), &res
       );
     } else {
-      throw StringError("Transformer Tensorcore not supported yet.");
-      // TODO: implement this block after cooperative_matrix support
+      Pipeline pipeline = handle->pipelines->hgemmNCHW;
+      vkcompute::doHgemmNCHW(
+        handle->vulkanDevice,
+        handle->tuneParams,
+        &pipeline,
+        cb,
+        descriptorSet,
+        input,
+        filter,
+        output,
+        batchSize,
+        paddedNNXYLen,
+        outChannels,
+        inChannels,
+        &res
+      );
     }
+    CHECK_VK_MSG("Execute matmul for TransformerMatMulLayer: " + name, res);
   }
 
   void debug(
@@ -2212,8 +2261,7 @@ struct TransformerApplyRoPELayer {
   ): 
     handle(handle)
   {
-    int gpuId = this->handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
     pipeline = pipelines->transformerApplyRoPE;
     
     VkResult res = VK_ERROR_UNKNOWN;
@@ -2328,8 +2376,7 @@ struct TransformerAttentionLayer {
     useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0)
   {
 
-    int gpuId = handle->vulkanDevice->info.deviceId;
-    vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
+    const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
     params.seqLen = handle->paddedNNXYLen;
     params.numHeads = numHeads;
     params.numKVHeads = numKVHeads;
@@ -4775,8 +4822,17 @@ ComputeHandleInternal::ComputeHandleInternal(
       std::cerr << message << std::endl;
   }
 
-  if ( usingFP16TensorCoresFor1x1 ) {
-    throw StringError("Define paddedNNXYLen required for WMMA 1x1 conv");
+  usingFP16TensorCoresFor1x1 =
+    tuneParams.vulkan.canUseFP16Storage &&
+    tuneParams.vulkan.canUseFP16Compute &&
+    tuneParams.vulkan.canUseCooperativMatrix &&
+    tuneParams.vulkan.shouldUseCooperativeMatrix &&
+    tuneParams.vulkan.shouldUseFP16Storage &&
+    tuneParams.vulkan.shouldUseHgemmNCHW &&
+    usingFP16Storage;
+  if(usingFP16TensorCoresFor1x1) {
+    const int spatialAlignment = std::max(16, tuneParams.hgemmNCHW.MWARP);
+    this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
   } else {
     this->paddedNNXYLen = nnXLen * nnYLen;
   }

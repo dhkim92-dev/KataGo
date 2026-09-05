@@ -1,0 +1,7 @@
+#version 460
+
+#define SB 1
+#define VWM 4
+#define VWN 4
+
+#include "hgemm_nchw.glsl"

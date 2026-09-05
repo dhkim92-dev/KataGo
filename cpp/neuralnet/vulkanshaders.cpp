@@ -44,6 +44,12 @@ namespace vk_shader {
   const unsigned char* spirv_conv2d_p16s16 = _binary_conv2d_p16s16_start;
   size_t spirv_conv2d_p16s16_size = _binary_conv2d_p16s16_size;
 
+  // hgemm_nchw_p16s16_sb{0,1}
+  const unsigned char* spirv_hgemm_nchw_p16s16_sb0 = _binary_hgemm_nchw_p16s16_sb0_start;
+  size_t spirv_hgemm_nchw_p16s16_sb0_size = _binary_hgemm_nchw_p16s16_sb0_size;
+  const unsigned char* spirv_hgemm_nchw_p16s16_sb1 = _binary_hgemm_nchw_p16s16_sb1_start;
+  size_t spirv_hgemm_nchw_p16s16_sb1_size = _binary_hgemm_nchw_p16s16_sb1_size;
+
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
   size_t spirv_winograd_input_transform_fp32_size = _binary_winograd_input_transform_fp32_size;
@@ -327,6 +333,14 @@ namespace vk_shader {
     } guard{printPipelineCreation, printPipelineCreation};
     printPipelineCreation = print;
     VkResult result;
+    if(tuneParams.vulkan.canUseCooperativMatrix &&
+       tuneParams.vulkan.shouldUseCooperativeMatrix &&
+       tuneParams.vulkan.canUseFP16Storage &&
+       tuneParams.vulkan.canUseFP16Compute &&
+       tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseHgemmNCHW) {
+      if((result = createHgemmNCHW(hgemmNCHW, tuneParams.hgemmNCHW)) != VK_SUCCESS) return result;
+    }
     // Tile base conv no longer used.
     // createConv2dFp32();
     if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -396,6 +410,7 @@ namespace vk_shader {
 
   void ComputePipelines::destroyPipelines() {
     destroyPipeline(conv2dFp32);
+    destroyPipeline(hgemmNCHW);
     destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
@@ -696,6 +711,53 @@ namespace vk_shader {
       return createPipeline("add_pointwise_p32s16", spirv_add_pointwise_p32s16, spirv_add_pointwise_p32s16_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
     return createPipeline("add_pointwise_fp32", spirv_add_pointwise_fp32, spirv_add_pointwise_fp32_size, 2, sizeof(AddPointWiseParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  VkResult ComputePipelines::createHgemmNCHW(Pipeline& pipeline, const HGemmNCHWTuneParams& tuneParams) {
+    if(!tuneParams.isValid())
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+    HGemmNCHWSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MWARP;
+    spec.NSize = tuneParams.NWARP;
+    spec.KSize = tuneParams.KDIM;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    spec.CType = tuneParams.CType;
+    spec.ResultType = tuneParams.ResultType;
+    SpecializationData specData(spec);
+
+    if(tuneParams.SB == 1)
+      return createPipeline(
+        "hgemm_nchw_p16s16_sb1",
+        spirv_hgemm_nchw_p16s16_sb1,
+        spirv_hgemm_nchw_p16s16_sb1_size,
+        3,
+        sizeof(HGemmNCHWParams),
+        pipeline,
+        &specData.info,
+        spec.localSizeX,
+        spec.localSizeY,
+        spec.localSizeZ
+      );
+    return createPipeline(
+      "hgemm_nchw_p16s16_sb0",
+      spirv_hgemm_nchw_p16s16_sb0,
+      spirv_hgemm_nchw_p16s16_sb0_size,
+      3,
+      sizeof(HGemmNCHWParams),
+      pipeline,
+      &specData.info,
+      spec.localSizeX,
+      spec.localSizeY,
+      spec.localSizeZ
+    );
   }
 
   VkResult ComputePipelines::createXgemmDirectBatchedTT(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams [[maybe_unused]]) {

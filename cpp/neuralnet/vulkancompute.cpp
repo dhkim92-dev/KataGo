@@ -489,6 +489,57 @@ void batchedXGemmDirect_MK_NK_MN(
     vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
+void doHgemmNCHW(
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  const VkCommandBuffer cb,
+  const VkDescriptorSet descriptorSet,
+  const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+  const int batchSize,
+  const int M, const int N, const int K,
+  VkResult *result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(A != nullptr && B != nullptr && C != nullptr);
+  assert(result != nullptr);
+  if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 ||
+     !tuneParams.hgemmNCHW.isValid() ||
+     N % tuneParams.hgemmNCHW.getRequiredCDivisor() != 0 ||
+     K % tuneParams.hgemmNCHW.getRequiredCDivisor() != 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for hgemmNCHW", *result);
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+
+  const vk_shader::push::HGemmNCHWParams params = {K, M, N};
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+
+  const uint32_t wgCountX = static_cast<uint32_t>(
+    (M + tuneParams.hgemmNCHW.MWG - 1) / tuneParams.hgemmNCHW.MWG
+  );
+  const uint32_t wgCountY = static_cast<uint32_t>(
+    (N + tuneParams.hgemmNCHW.NWG - 1) / tuneParams.hgemmNCHW.NWG
+  );
+  vkCmdDispatch(cb, wgCountX, wgCountY, static_cast<uint32_t>(batchSize));
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
+}
+
 SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
   SpatialRMSNormSizing sizing;
   // Choose numCHWWorkgroups for pass 1 such that:

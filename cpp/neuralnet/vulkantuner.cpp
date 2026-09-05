@@ -118,6 +118,45 @@ bool XgemmDirectTuneParams::isValid() const {
          isMultipleOf(WGD, workgroupSize / NDIMBD);
 }
 
+bool HGemmNCHWTuneParams::isValid() const {
+  if(MWARP <= 0 || NWARP <= 0 || KDIM <= 0 || subgroupSize == 0 ||
+     MWG <= 0 || NWG <= 0 || KWG <= 0 ||
+     MWAVE <= 0 || NWAVE <= 0 || SB < 0 || SB > 1 ||
+     VWM != 4 || VWN != 4)
+    return false;
+  const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
+  const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
+  if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
+    return false;
+  if((CType != spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16 &&
+      CType != spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT32) ||
+     (ResultType != spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16 &&
+      ResultType != spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT32) ||
+     CType != ResultType)
+    return false;
+  if(!isMultipleOf(MWARP, 4) || !isMultipleOf(NWARP, 4))
+    return false;
+  if(!isMultipleOf(getRequiredCDivisor(), NWG) ||
+     !isMultipleOf(getRequiredCDivisor(), KWG))
+    return false;
+  return isMultipleOf(MWG, MWAVE) && isMultipleOf(NWG, NWAVE) &&
+         isMultipleOf(KWG, KDIM) && isMultipleOf(MWAVE, MWARP) &&
+         isMultipleOf(NWAVE, NWARP);
+}
+
+int HGemmNCHWTuneParams::getRequiredCDivisor() const {
+  // Keep the Vulkan NCHW HGEMM channel contract identical to OpenCL.
+  return 32;
+}
+
+bool HGemmNCHWTuneParams::isSimple() const {
+  if(MWAVE != MWARP && MWAVE == MWG)
+    return false;
+  if(NWAVE != NWARP && NWAVE == NWG)
+    return false;
+  return MWG == NWG;
+}
+
 bool TransformerTuneParams::isValid() const {
   if(USE_TILED_ATTN != 0 && USE_TILED_ATTN != 1)
     return false;
@@ -135,7 +174,8 @@ bool TransformerSpatialRmsNormTuneParams::isValid() const {
 
 bool VulkanTuneParams::isValid() const {
   return addChannelBiases.isValid() && pointwise.isValid() && gPool.isValid() &&
-         conv3x3.isValid(4) && conv5x5.isValid(2) && xgemm.isValid() && xgemmDirect.isValid() &&
+         conv3x3.isValid(4) && conv5x5.isValid(2) && hgemmNCHW.isValid() &&
+         xgemm.isValid() && xgemmDirect.isValid() &&
          transformer.isValid() && rmsNorm.isValid() && spatialRMSNorm.isValid();
 }
 
@@ -147,6 +187,7 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          vulkan.shouldUseFP16Storage == other.vulkan.shouldUseFP16Storage &&
          vulkan.shouldUseFP16Compute == other.vulkan.shouldUseFP16Compute &&
          vulkan.shouldUseCooperativeMatrix == other.vulkan.shouldUseCooperativeMatrix &&
+         vulkan.shouldUseHgemmNCHW == other.vulkan.shouldUseHgemmNCHW &&
          vulkan.shouldUseSubgroup == other.vulkan.shouldUseSubgroup &&
          addChannelBiases.XY_ELTS_PER_THREAD == other.addChannelBiases.XY_ELTS_PER_THREAD &&
          addChannelBiases.NC_ELTS_PER_THREAD == other.addChannelBiases.NC_ELTS_PER_THREAD &&
@@ -169,6 +210,20 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          conv5x5.outputTransformLocalXSize == other.conv5x5.outputTransformLocalXSize &&
          conv5x5.outputTransformLocalYSize == other.conv5x5.outputTransformLocalYSize &&
          conv5x5.outputTransformLocalZSize == other.conv5x5.outputTransformLocalZSize &&
+         hgemmNCHW.MWARP == other.hgemmNCHW.MWARP &&
+         hgemmNCHW.NWARP == other.hgemmNCHW.NWARP &&
+         hgemmNCHW.KDIM == other.hgemmNCHW.KDIM &&
+         hgemmNCHW.subgroupSize == other.hgemmNCHW.subgroupSize &&
+         hgemmNCHW.MWG == other.hgemmNCHW.MWG &&
+         hgemmNCHW.NWG == other.hgemmNCHW.NWG &&
+         hgemmNCHW.KWG == other.hgemmNCHW.KWG &&
+         hgemmNCHW.MWAVE == other.hgemmNCHW.MWAVE &&
+         hgemmNCHW.NWAVE == other.hgemmNCHW.NWAVE &&
+         hgemmNCHW.CType == other.hgemmNCHW.CType &&
+         hgemmNCHW.ResultType == other.hgemmNCHW.ResultType &&
+         hgemmNCHW.SB == other.hgemmNCHW.SB &&
+         hgemmNCHW.VWM == other.hgemmNCHW.VWM &&
+         hgemmNCHW.VWN == other.hgemmNCHW.VWN &&
          xgemm.MDIMC == other.xgemm.MDIMC && xgemm.NDIMC == other.xgemm.NDIMC && xgemm.MWG == other.xgemm.MWG &&
          xgemm.NWG == other.xgemm.NWG && xgemm.KWG == other.xgemm.KWG && xgemm.MDIMA == other.xgemm.MDIMA &&
          xgemm.NDIMB == other.xgemm.NDIMB && xgemmDirect.WGD == other.xgemmDirect.WGD &&
@@ -200,6 +255,7 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "vulkan.shouldUseFP16Storage", config.vulkan.shouldUseFP16Storage);
   writeParam(out, "vulkan.shouldUseFP16Compute", config.vulkan.shouldUseFP16Compute);
   writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
+  writeParam(out, "vulkan.shouldUseHgemmNCHW", config.vulkan.shouldUseHgemmNCHW);
   writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
   writeParam(out, "addChannelBiases.XY_ELTS_PER_THREAD", config.addChannelBiases.XY_ELTS_PER_THREAD);
   writeParam(out, "addChannelBiases.NC_ELTS_PER_THREAD", config.addChannelBiases.NC_ELTS_PER_THREAD);
@@ -221,6 +277,20 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   WRITE_CONV("conv3x3", config.conv3x3);
   WRITE_CONV("conv5x5", config.conv5x5);
 #undef WRITE_CONV
+  writeParam(out, "hgemmNCHW.MWARP", config.hgemmNCHW.MWARP);
+  writeParam(out, "hgemmNCHW.NWARP", config.hgemmNCHW.NWARP);
+  writeParam(out, "hgemmNCHW.KDIM", config.hgemmNCHW.KDIM);
+  writeParam(out, "hgemmNCHW.subgroupSize", config.hgemmNCHW.subgroupSize);
+  writeParam(out, "hgemmNCHW.MWG", config.hgemmNCHW.MWG);
+  writeParam(out, "hgemmNCHW.NWG", config.hgemmNCHW.NWG);
+  writeParam(out, "hgemmNCHW.KWG", config.hgemmNCHW.KWG);
+  writeParam(out, "hgemmNCHW.MWAVE", config.hgemmNCHW.MWAVE);
+  writeParam(out, "hgemmNCHW.NWAVE", config.hgemmNCHW.NWAVE);
+  writeParam(out, "hgemmNCHW.CType", config.hgemmNCHW.CType);
+  writeParam(out, "hgemmNCHW.ResultType", config.hgemmNCHW.ResultType);
+  writeParam(out, "hgemmNCHW.SB", config.hgemmNCHW.SB);
+  writeParam(out, "hgemmNCHW.VWM", config.hgemmNCHW.VWM);
+  writeParam(out, "hgemmNCHW.VWN", config.hgemmNCHW.VWN);
   writeParam(out, "xgemm.MDIMC", config.xgemm.MDIMC);
   writeParam(out, "xgemm.NDIMC", config.xgemm.NDIMC);
   writeParam(out, "xgemm.MWG", config.xgemm.MWG);
@@ -273,7 +343,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 57)
+  if(values.size() != 71 && values.size() != 72)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   VulkanTuneParams config;
@@ -284,6 +354,9 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   config.vulkan.shouldUseFP16Storage = getBoolParam(values, "vulkan.shouldUseFP16Storage", filename);
   config.vulkan.shouldUseFP16Compute = getBoolParam(values, "vulkan.shouldUseFP16Compute", filename);
   config.vulkan.shouldUseCooperativeMatrix = getBoolParam(values, "vulkan.shouldUseCooperativeMatrix", filename);
+  auto hgemmUseIter = values.find("vulkan.shouldUseHgemmNCHW");
+  if(hgemmUseIter != values.end())
+    config.vulkan.shouldUseHgemmNCHW = getBoolParam(values, "vulkan.shouldUseHgemmNCHW", filename);
   config.vulkan.shouldUseSubgroup = getBoolParam(values, "vulkan.shouldUseSubgroup", filename);
   config.addChannelBiases.XY_ELTS_PER_THREAD = getParam(values, "addChannelBiases.XY_ELTS_PER_THREAD", filename);
   config.addChannelBiases.NC_ELTS_PER_THREAD = getParam(values, "addChannelBiases.NC_ELTS_PER_THREAD", filename);
@@ -305,6 +378,20 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   READ_CONV("conv3x3", config.conv3x3);
   READ_CONV("conv5x5", config.conv5x5);
 #undef READ_CONV
+  config.hgemmNCHW.MWARP = getParam(values, "hgemmNCHW.MWARP", filename);
+  config.hgemmNCHW.NWARP = getParam(values, "hgemmNCHW.NWARP", filename);
+  config.hgemmNCHW.KDIM = getParam(values, "hgemmNCHW.KDIM", filename);
+  config.hgemmNCHW.subgroupSize = getParam(values, "hgemmNCHW.subgroupSize", filename);
+  config.hgemmNCHW.MWG = getParam(values, "hgemmNCHW.MWG", filename);
+  config.hgemmNCHW.NWG = getParam(values, "hgemmNCHW.NWG", filename);
+  config.hgemmNCHW.KWG = getParam(values, "hgemmNCHW.KWG", filename);
+  config.hgemmNCHW.MWAVE = getParam(values, "hgemmNCHW.MWAVE", filename);
+  config.hgemmNCHW.NWAVE = getParam(values, "hgemmNCHW.NWAVE", filename);
+  config.hgemmNCHW.CType = getParam(values, "hgemmNCHW.CType", filename);
+  config.hgemmNCHW.ResultType = getParam(values, "hgemmNCHW.ResultType", filename);
+  config.hgemmNCHW.SB = getParam(values, "hgemmNCHW.SB", filename);
+  config.hgemmNCHW.VWM = getParam(values, "hgemmNCHW.VWM", filename);
+  config.hgemmNCHW.VWN = getParam(values, "hgemmNCHW.VWN", filename);
   config.xgemm.MDIMC = getParam(values, "xgemm.MDIMC", filename);
   config.xgemm.NDIMC = getParam(values, "xgemm.NDIMC", filename);
   config.xgemm.MWG = getParam(values, "xgemm.MWG", filename);
@@ -403,6 +490,64 @@ VulkanTuner::defaultFileName(const string& gpuName, int nnXLen, int nnYLen, cons
 }
 
 namespace {
+  bool selectHgemmCooperativeMatrixProperties(
+    const VulkanDevice* device,
+    HGemmNCHWTuneParams& params
+  ) {
+    if(device == nullptr || device->info.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE)
+      return false;
+
+    auto getProperties = device->info.cooperativeMatrixPropertiesFn;
+    if(getProperties == nullptr)
+      return false;
+
+    uint32_t propertyCount = 0;
+    VkResult result = getProperties(device->info.physicalDevice, &propertyCount, nullptr);
+    if(result != VK_SUCCESS || propertyCount == 0)
+      return false;
+
+    vector<VkCooperativeMatrixPropertiesKHR> properties(propertyCount);
+    for(VkCooperativeMatrixPropertiesKHR& property: properties) {
+      property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+      property.pNext = nullptr;
+    }
+    result = getProperties(device->info.physicalDevice, &propertyCount, properties.data());
+    if(result != VK_SUCCESS && result != VK_INCOMPLETE)
+      return false;
+
+    for(uint32_t i = 0; i < propertyCount; i++) {
+      const VkCooperativeMatrixPropertiesKHR& property = properties[i];
+      if(property.scope != VK_SCOPE_SUBGROUP_KHR ||
+         property.AType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
+         property.BType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
+         (property.CType != VK_COMPONENT_TYPE_FLOAT16_KHR &&
+          property.CType != VK_COMPONENT_TYPE_FLOAT32_KHR) ||
+         property.CType != property.ResultType)
+        continue;
+      params.MWARP = static_cast<int>(property.MSize);
+      params.NWARP = static_cast<int>(property.NSize);
+      params.KDIM = static_cast<int>(property.KSize);
+      params.CType = property.CType == VK_COMPONENT_TYPE_FLOAT16_KHR
+        ? spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16
+        : spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT32;
+      params.ResultType = property.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR
+        ? spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT16
+        : spec::HGemmNCHWSpec::COMPONENT_TYPE_FLOAT32;
+      params.subgroupSize = device->info.subgroupProperties.subgroupSize;
+      if(!params.isValid()) {
+        params.MWG = params.MWARP * 2;
+        params.NWG = params.NWARP * 2;
+        params.KWG = params.KDIM * 2;
+        params.MWAVE = params.MWARP;
+        params.NWAVE = params.NWARP;
+        params.SB = 0;
+      }
+      if(params.isValid())
+        return true;
+    }
+    return false;
+  }
+
   struct TuningContext {
     const VulkanDevice* device;
     int batchSize;
@@ -506,7 +651,24 @@ namespace {
       const size_t maxTilesY = (static_cast<size_t>(std::max(1, context.nnYLen)) + 1) / 2;
       const size_t paddedTiles = vk_helper::roundUpToMultiple(batchSize * maxTilesX * maxTilesY, static_cast<size_t>(config.xgemm.MWG));
       const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(config.xgemm.KWG, config.xgemm.NWG)));
-      const size_t scratchElements = std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
+      const size_t hgemmHWSize = vk_helper::roundUpToMultiple(
+        xySize, static_cast<size_t>(std::max(16, config.hgemmNCHW.MWARP))
+      );
+      const size_t hgemmChannelAlignment = static_cast<size_t>(std::max({
+        32, config.hgemmNCHW.KWG, config.hgemmNCHW.KDIM, config.hgemmNCHW.NWG
+      }));
+      const size_t hgemmCSize = vk_helper::roundUpToMultiple(
+        maxChannels, hgemmChannelAlignment
+      );
+      const size_t hgemmOCSize = vk_helper::roundUpToMultiple(
+        maxChannels, hgemmChannelAlignment
+      );
+      const size_t scratchElements = std::max({
+        batchSize * maxChannels * xySize,
+        paddedTiles * paddedChannels * 36,
+        batchSize * hgemmCSize * hgemmHWSize,
+        batchSize * hgemmOCSize * hgemmHWSize
+      });
       const size_t scratchBytes = std::max(static_cast<size_t>(4 * 1024 * 1024), scratchElements * sizeof(float));
       VulkanBuffer* scratch = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
       if(result != VK_SUCCESS || scratch == nullptr) {
@@ -620,7 +782,19 @@ namespace {
           commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
         );
 
-        if(pipeline->name.find("xgemm_batched") == 0) {
+        if(pipeline->name.find("hgemm_nchw") == 0) {
+          const int cSize = static_cast<int>(hgemmCSize);
+          const int hwSize = static_cast<int>(hgemmHWSize);
+          const int ocSize = static_cast<int>(hgemmOCSize);
+          vk_shader::push::HGemmNCHWParams params = {cSize, hwSize, ocSize};
+          push(params);
+          dispatch(
+            static_cast<uint32_t>((hwSize + config.hgemmNCHW.MWG - 1) / config.hgemmNCHW.MWG),
+            static_cast<uint32_t>((ocSize + config.hgemmNCHW.NWG - 1) / config.hgemmNCHW.NWG),
+            static_cast<uint32_t>(batchSize)
+          );
+        }
+        else if(pipeline->name.find("xgemm_batched") == 0) {
           const uint32_t m = config.xgemm.MWG * 2;
           const uint32_t n = config.xgemm.NWG * 2;
           const uint32_t k = config.xgemm.KWG;
@@ -830,7 +1004,7 @@ namespace {
   };
 
   template<typename Tuner>
-  void runTuner(const TuningContext& context, VulkanTuneParams& currentConfig) {
+  double runTuner(const TuningContext& context, VulkanTuneParams& currentConfig) {
     vector<VulkanTuneParams> configs = Tuner::candidates(currentConfig, context.full);
     VulkanTuneParams defaults;
     configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
@@ -841,7 +1015,7 @@ namespace {
     if(!timer.isUsable()) {
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
-      return;
+      return numeric_limits<double>::infinity();
     }
 
     bool found = false;
@@ -877,6 +1051,7 @@ namespace {
         "Vulkan tuner " + Tuner::name() + (found ? " selected a measured candidate" : " retained the previous candidate")
       );
     }
+    return found ? bestSeconds : numeric_limits<double>::infinity();
   }
 
   struct XgemmDirectTuner {
@@ -905,6 +1080,47 @@ namespace {
         targets.push_back(&pipelines.xgemmDirectBatchedTT);
         targets.push_back(&pipelines.xgemmStridedBatchedFp32);
       }
+      return result;
+    }
+  };
+
+  struct HgemmNCHWTunerImpl {
+    static string name() { return "hgemmNCHW"; }
+    static bool isValid(const VulkanTuneParams& config) {
+      return config.vulkan.canUseCooperativMatrix && config.hgemmNCHW.isValid();
+    }
+    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
+      VulkanTuneParams result = current;
+      result.hgemmNCHW.MWG = defaults.hgemmNCHW.MWG;
+      result.hgemmNCHW.NWG = defaults.hgemmNCHW.NWG;
+      result.hgemmNCHW.KWG = defaults.hgemmNCHW.KWG;
+      result.hgemmNCHW.MWAVE = defaults.hgemmNCHW.MWAVE;
+      result.hgemmNCHW.NWAVE = defaults.hgemmNCHW.NWAVE;
+      result.hgemmNCHW.SB = defaults.hgemmNCHW.SB;
+      result.hgemmNCHW.VWM = defaults.hgemmNCHW.VWM;
+      result.hgemmNCHW.VWN = defaults.hgemmNCHW.VWN;
+      return result;
+    }
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+      vector<VulkanTuneParams> configs = {current};
+      addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.MWG = v; });
+      addCandidates(configs, full ? vector<int>{16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.NWG = v; });
+      addCandidates(configs, full ? vector<int>{16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.KWG = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.MWAVE = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.NWAVE = v; });
+      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmNCHW.SB = v; });
+      if(!full) {
+        configs.erase(
+          remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.hgemmNCHW.isSimple(); }),
+          configs.end()
+        );
+      }
+      return configs;
+    }
+    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+      VkResult result = pipelines.createHgemmNCHW(pipelines.hgemmNCHW, config.hgemmNCHW);
+      if(result == VK_SUCCESS)
+        targets.push_back(&pipelines.hgemmNCHW);
       return result;
     }
   };
@@ -1134,8 +1350,27 @@ namespace {
   };
 
   void runOperationTuners(const TuningContext& context, VulkanTuneParams& config) {
-    runTuner<XgemmDirectTuner>(context, config);
+    config.vulkan.shouldUseHgemmNCHW = false;
+    const double xgemmDirectBaselineSeconds = runTuner<XgemmDirectTuner>(context, config);
     runTuner<XgemmTuner>(context, config);
+    if(config.vulkan.canUseCooperativMatrix &&
+       config.vulkan.canUseFP16Storage &&
+       config.vulkan.canUseFP16Compute &&
+       config.vulkan.shouldUseFP16Storage) {
+      const double hgemmSeconds = runTuner<HgemmNCHWTunerImpl>(context, config);
+      const bool hgemmIsFastEnough =
+        isfinite(xgemmDirectBaselineSeconds) && isfinite(hgemmSeconds) &&
+        xgemmDirectBaselineSeconds / hgemmSeconds >= 0.90;
+      config.vulkan.shouldUseHgemmNCHW = hgemmIsFastEnough;
+      if(context.logger != nullptr) {
+        context.logger->write(
+          "Vulkan hgemmNCHW baseline comparison: xgemmDirect=" +
+          Global::strprintf("%.6g", xgemmDirectBaselineSeconds) +
+          "s, hgemmNCHW=" + Global::strprintf("%.6g", hgemmSeconds) +
+          "s, selected=" + (hgemmIsFastEnough ? "true" : "false")
+        );
+      }
+    }
     runTuner<Conv3x3Tuner>(context, config);
     runTuner<Conv5x5Tuner>(context, config);
     runTuner<GPoolTuner>(context, config);
@@ -1272,6 +1507,13 @@ namespace {
   }
 }
 
+bool VulkanTuner::HgemmNCHWTuner::selectCooperativeMatrixProperties(
+  const VulkanDevice* device,
+  HGemmNCHWTuneParams& params
+) {
+  return selectHgemmCooperativeMatrixProperties(device, params);
+}
+
 void VulkanTuner::tune(
   const VulkanDevice* device,
   int batchSize,
@@ -1287,12 +1529,18 @@ void VulkanTuner::tune(
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger};
+  if(tunedConfig.vulkan.canUseCooperativMatrix &&
+     !HgemmNCHWTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmNCHW)) {
+    tunedConfig.vulkan.canUseCooperativMatrix = false;
+  }
   tunedConfig.vulkan.shouldUseFP16Storage = false;
   tunedConfig.vulkan.shouldUseFP16Compute = false;
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
   runOperationTuners(context, tunedConfig);
-  if(runFP16ProfileTuner(context, tunedConfig))
+  if(runFP16ProfileTuner(context, tunedConfig)) {
+    tunedConfig.vulkan.shouldUseCooperativeMatrix = tunedConfig.vulkan.canUseCooperativMatrix;
     runOperationTuners(context, tunedConfig);
+  }
 }
 
 VulkanTuneParams VulkanTuner::loadOrCreate(
