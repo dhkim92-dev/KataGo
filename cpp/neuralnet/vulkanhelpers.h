@@ -114,6 +114,9 @@ namespace vk_helper {
 
   std::string vkErrorToString(VkResult res);
 
+  // Returns the total Vulkan device-memory block size currently reserved by VMA.
+  VkDeviceSize getTotalAllocatedGpuMemory(const VulkanDevice* device);
+
   std::string vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type);
 
   VkInstance createVulkanInstance();

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -740,60 +741,58 @@ namespace {
     return {tunerName, 20, 2, 0.005, 0.025, batchSizes};
   }
 
-  // The tuning harness initializes all operands to zero. These CPU references
-  // therefore produce the exact expected result for each operation while
-  // keeping the readback path independent from the device implementation.
-  vector<float> cpuXgemmBatched(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuXgemmDirect(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuHGemmCooperativeMatrix(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuHGemmCooperativeMatrixNCHW(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuWinograd(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuGPool(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuPointwise(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuAddChannelBiases(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuTransformerAttention(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuTransformerRMSNorm(size_t elements) { return vector<float>(elements, 0.0f); }
-  vector<float> cpuSpatialRMSNorm(size_t elements) { return vector<float>(elements, 0.0f); }
-
-  vector<float> cpuReference(const string& tunerName, size_t elements) {
-    if(tunerName == "xgemm") return cpuXgemmBatched(elements);
-    if(tunerName == "xgemmDirect") return cpuXgemmDirect(elements);
-    if(tunerName == "hgemmCooperativeMatrix") return cpuHGemmCooperativeMatrix(elements);
-    if(tunerName == "hgemmCooperativeMatrixNCHW") return cpuHGemmCooperativeMatrixNCHW(elements);
-    if(tunerName == "conv3x3" || tunerName == "conv5x5") return cpuWinograd(elements);
-    if(tunerName == "gPool") return cpuGPool(elements);
-    if(tunerName == "pointwise") return cpuPointwise(elements);
-    if(tunerName == "addChannelBiases") return cpuAddChannelBiases(elements);
-    if(tunerName == "transformerAttention") return cpuTransformerAttention(elements);
-    if(tunerName == "transformerRMSNorm") return cpuTransformerRMSNorm(elements);
-    return cpuSpatialRMSNorm(elements);
-  }
-
-  bool validateCpuReadback(
-    const string& tunerName,
-    const vector<float>& values,
+  bool validateReadback(
+    const vector<uint32_t>& reference,
+    const vector<uint32_t>& values,
     const TuningMeasurementPlan& plan,
+    bool useFP16Storage,
+    double& errorProp,
     string& error
   ) {
-    const vector<float> reference = cpuReference(tunerName, values.size());
+    errorProp = numeric_limits<double>::quiet_NaN();
     if(reference.size() != values.size()) {
-      error = "candidate readback size differs from CPU reference";
+      error = "candidate readback size differs from reference";
       return false;
     }
+    if(useFP16Storage) {
+      size_t differingWords = 0;
+      for(size_t i = 0; i < values.size(); i++) {
+        if(reference[i] != values[i])
+          differingWords++;
+      }
+      errorProp = values.empty() ? 0.0 : static_cast<double>(differingWords) / values.size();
+      if(errorProp > plan.hardCutoff) {
+        error = "candidate readback exceeded the hard error cutoff";
+        return false;
+      }
+      if(errorProp > plan.errorTolerance) {
+        error = "candidate readback exceeded the error tolerance";
+        return false;
+      }
+      return true;
+    }
+
     double squaredError = 0.0;
     double squaredMagnitude = 0.0;
     double maxAbsError = 0.0;
     for(size_t i = 0; i < values.size(); i++) {
-      if(!isfinite(reference[i]) || !isfinite(values[i])) {
+      float referenceValue;
+      float value;
+      memcpy(&referenceValue, &reference[i], sizeof(referenceValue));
+      memcpy(&value, &values[i], sizeof(value));
+      if(!isfinite(referenceValue) || !isfinite(value)) {
+        errorProp = 1.0;
         error = "candidate readback contains a non-finite value";
         return false;
       }
-      const double absError = static_cast<double>(reference[i]) - static_cast<double>(values[i]);
+      squaredMagnitude += static_cast<double>(referenceValue) * static_cast<double>(referenceValue);
+      if(reference[i] == values[i])
+        continue;
+      const double absError = static_cast<double>(referenceValue) - static_cast<double>(value);
       squaredError += absError * absError;
-      squaredMagnitude += static_cast<double>(reference[i]) * static_cast<double>(reference[i]);
       maxAbsError = std::max(maxAbsError, fabs(absError));
     }
-    const double errorProp = sqrt(squaredError / (squaredMagnitude + 1e-30));
+    errorProp = sqrt(squaredError / (squaredMagnitude + 1e-30));
     if(errorProp > plan.hardCutoff || maxAbsError > plan.hardCutoff) {
       error = "candidate readback exceeded the hard error cutoff";
       return false;
@@ -840,7 +839,7 @@ namespace {
     bool first = true;
     const auto add = [&](const char* name, auto value) {
       if(!first)
-        out << ",";
+        out << " ";
       out << name << "=" << value;
       first = false;
     };
@@ -945,22 +944,16 @@ namespace {
       cerr << message << endl;
   }
 
-  void logTuningPipelines(
-    const TuningContext& context,
-    size_t candidateIndex,
-    size_t totalCandidates,
-    const vector<const Pipeline*>& pipelines,
-    const VulkanTuneParams& candidate,
-    const string& tunerName
-  ) {
-    const string params = describeTuningParams(tunerName, candidate);
+  string describeTuningPipelines(const vector<const Pipeline*>& pipelines, const string& tunerName) {
+    if(pipelines.empty())
+      return tunerName;
+    ostringstream out;
     for(const Pipeline* pipeline: pipelines) {
-      writeTuningLog(
-        context,
-        "(" + to_string(candidateIndex) + " / " + to_string(totalCandidates) + ") " +
-        pipeline->name + "... params={" + params + "}"
-      );
+      if(out.tellp() > 0)
+        out << ",";
+      out << pipeline->name;
     }
+    return out.str();
   }
 
   void logTuningResult(
@@ -971,26 +964,34 @@ namespace {
     const VulkanTuneParams& candidate,
     const string& tunerName,
     double callsPerSecond,
+    double errorProp,
+    bool isBest
+  ) {
+    const string pipelineNames = describeTuningPipelines(pipelines, tunerName);
+    const string params = describeTuningParams(tunerName, candidate);
+    ostringstream out;
+    out << "Tuning " << pipelineNames << " " << (isBest ? "* " : "  ")
+        << candidateIndex << "/" << totalCandidates
+        << (candidateIndex == 0 ? " (reference)" : "")
+        << " Calls/sec " << callsPerSecond
+        << " ErrorProp " << errorProp
+        << " " << params;
+    writeTuningLog(context, out.str());
+  }
+
+  void logTuningFailure(
+    const TuningContext& context,
+    size_t candidateIndex,
+    size_t totalCandidates,
+    const vector<const Pipeline*>& pipelines,
+    const string& tunerName,
     const string& error
   ) {
-    const string params = describeTuningParams(tunerName, candidate);
-    const string calls = isfinite(callsPerSecond) ? Global::strprintf("%.6g", callsPerSecond) : "nan";
-    const string errorText = error.empty() ? "none" : error;
-    if(pipelines.empty()) {
-      writeTuningLog(
-        context,
-        "(" + to_string(candidateIndex) + " / " + to_string(totalCandidates) + ") " +
-        tunerName + " params={" + params + "} calls/sec=" + calls + " error=" + errorText
-      );
-      return;
-    }
-    for(const Pipeline* pipeline: pipelines) {
-      writeTuningLog(
-        context,
-        "(" + to_string(candidateIndex) + " / " + to_string(totalCandidates) + ") " +
-        pipeline->name + " params={" + params + "} calls/sec=" + calls + " error=" + errorText
-      );
-    }
+    const string pipelineNames = describeTuningPipelines(pipelines, tunerName);
+    writeTuningLog(
+      context,
+      "Tuning " + pipelineNames + " " + to_string(candidateIndex) + "/" + to_string(totalCandidates) + " failed: " + error
+    );
   }
 
   class VulkanTimestampTimer {
@@ -1008,8 +1009,11 @@ namespace {
       const TuningContext& context,
       const TuningMeasurementPlan& plan,
       double& callsPerSecond,
+      vector<uint32_t>& readback,
+      double& errorProp,
       string& error
     ) const {
+      errorProp = numeric_limits<double>::quiet_NaN();
       if(!isUsable()) {
         error = "compute timestamps are not supported";
         return false;
@@ -1074,12 +1078,7 @@ namespace {
         cooperativeTiles * cooperativeChannels * 36
       });
       const size_t scratchBytes = std::max(static_cast<size_t>(4 * 1024 * 1024), scratchElements * sizeof(float));
-      VulkanBuffer* scratch = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-      if(result != VK_SUCCESS || scratch == nullptr) {
-        error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
-        return false;
-      }
-
+      vector<VulkanBuffer*> tuningBuffers;
       VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
       VkQueryPool queryPool = VK_NULL_HANDLE;
       VkFence fence = VK_NULL_HANDLE;
@@ -1101,12 +1100,39 @@ namespace {
           vkDestroyDescriptorPool(device->device, descriptorPool, nullptr);
           descriptorPool = VK_NULL_HANDLE;
         }
-        if(scratch != nullptr) {
-          vk_helper::releaseVulkanBuffer(device, scratch);
-          scratch = nullptr;
-        }
+        for(VulkanBuffer* buffer: tuningBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        tuningBuffers.clear();
       };
       const auto cleanupGuard = makeScopeGuard(cleanup);
+
+      // Use deterministic, non-zero data for both fp32 and fp16 storage.  A
+      // repeated 16-bit value keeps the input finite in either representation,
+      // while the small per-word variation prevents zero/constant-input cases
+      // from hiding indexing and arithmetic errors.
+      vector<uint32_t> initialData(scratchBytes / sizeof(uint32_t));
+      for(size_t i = 0; i < initialData.size(); i++) {
+        const uint32_t halfValue = 0x3c00u + static_cast<uint32_t>(i % 17);
+        initialData[i] = (halfValue << 16) | halfValue;
+      }
+      tuningBuffers.reserve(descriptorCount);
+      for(size_t i = 0; i < descriptorCount; i++) {
+        VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
+        if(result != VK_SUCCESS || buffer == nullptr) {
+          error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+        tuningBuffers.push_back(buffer);
+        vk_helper::copyHostToDeviceBuffer(
+          device, initialData.data(), buffer, scratchBytes, true, &result
+        );
+        if(result != VK_SUCCESS) {
+          error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+      }
 
       VkDescriptorPoolSize poolSize = {};
       poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1125,6 +1151,7 @@ namespace {
 
       vector<VkDescriptorSet> descriptorSets;
       descriptorSets.reserve(pipelines.size());
+      size_t bufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         VkDescriptorSetAllocateInfo descriptorSetInfo = {};
         descriptorSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1140,8 +1167,10 @@ namespace {
         }
         vector<WriteDescriptorSet> writes;
         writes.reserve(pipeline->bindingCount);
-        for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++)
-          writes.push_back(vk_helper::writeDescriptorSetBuffer(descriptorSet, binding, scratch));
+        for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
+          writes.push_back(vk_helper::writeDescriptorSetBuffer(descriptorSet, binding, tuningBuffers[bufferIndex]));
+          bufferIndex++;
+        }
         result = vk_helper::updateDescriptorSets(device, writes);
         if(result != VK_SUCCESS) {
           error = "could not update tuning descriptor set: " + vk_helper::vkErrorToString(result);
@@ -1182,18 +1211,6 @@ namespace {
         cleanup();
         return false;
       }
-
-      // The same scratch buffer is intentionally bound to every descriptor in
-      // this lightweight tuner harness.  Initialize it before the first
-      // dispatch so readback validation never observes undefined bytes.
-      vkCmdFillBuffer(commandBuffer, scratch->buffer, 0, VK_WHOLE_SIZE, 0);
-      vk_helper::barrierCommandBuffer(
-        commandBuffer,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
-      );
 
       const auto recordPipeline = [&](const Pipeline* pipeline, VkDescriptorSet descriptorSet, int runBatchSize) {
         const int batchSize = std::max(1, runBatchSize);
@@ -1452,22 +1469,23 @@ namespace {
       }
       callsPerSecond = static_cast<double>(plan.timedRuns() * pipelines.size()) / elapsedSeconds;
 
-      // Readback is outside the timestamp interval. Inputs and the CPU
-      // reference for this harness are zero-filled, so the built-in check is
-      // a deterministic numerical validation.
-      vector<float> readback(scratchBytes / sizeof(float));
-      result = VK_SUCCESS;
-      vk_helper::copyDeviceBufferToHost(
-        device, scratch, scratchBytes, readback.data(), true, &result
-      );
-      if(result != VK_SUCCESS) {
-        error = "could not read tuning output: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      if(!validateCpuReadback(plan.kernelName, readback, plan, error)) {
-        cleanup();
-        return false;
+      // Readback is outside the timestamp interval. The caller compares all
+      // binding buffers with the reference candidate run using the same input
+      // data. Keeping buffers separate also prevents input/output aliasing from
+      // making an invalid dispatch appear correct.
+      const size_t wordsPerBuffer = scratchBytes / sizeof(uint32_t);
+      readback.resize(tuningBuffers.size() * wordsPerBuffer);
+      for(size_t i = 0; i < tuningBuffers.size(); i++) {
+        result = VK_SUCCESS;
+        vk_helper::copyDeviceBufferToHost(
+          device, tuningBuffers[i], scratchBytes, readback.data() + i * wordsPerBuffer, true, &result
+        );
+        if(result != VK_SUCCESS) {
+          error = "could not read tuning output: " + vk_helper::vkErrorToString(result);
+          readback.clear();
+          cleanup();
+          return false;
+        }
       }
       cleanup();
       return true;
@@ -1480,10 +1498,12 @@ namespace {
       const VulkanTuneParams& config,
       const TuningContext& context,
       double& callsPerSecond,
+      vector<uint32_t>& readback,
+      double& errorProp,
       string& error
     ) const {
       return measure(
-        pipelines, config, context, makeMeasurementPlan("xgemm", context), callsPerSecond, error
+        pipelines, config, context, makeMeasurementPlan("xgemm", context), callsPerSecond, readback, errorProp, error
       );
     }
 
@@ -1510,43 +1530,76 @@ namespace {
 
     bool found = false;
     double bestCallsPerSecond = 0.0;
+    vector<uint32_t> referenceReadback;
     size_t candidateIndex = 0;
     for(const VulkanTuneParams& candidate: configs) {
       if(!Tuner::isValid(candidate))
         continue;
-      candidateIndex += 1;
+      const size_t currentCandidateIndex = candidateIndex++;
       try {
         vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
         vector<const Pipeline*> targets;
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
-          logTuningResult(
-            context, candidateIndex, validCandidateCount, targets, candidate, Tuner::name(), 0.0,
+          logTuningFailure(
+            context, currentCandidateIndex, validCandidateCount,
+            targets, Tuner::name(),
             "pipeline creation failed: " + vk_helper::vkErrorToString(result)
           );
           continue;
         }
-        logTuningPipelines(context, candidateIndex, validCandidateCount, targets, candidate, Tuner::name());
         double callsPerSecond = 0.0;
+        vector<uint32_t> readback;
+        double errorProp = numeric_limits<double>::quiet_NaN();
         string error;
-        const bool measured = timer.measure(targets, candidate, context, plan, callsPerSecond, error);
+        const bool measured = timer.measure(targets, candidate, context, plan, callsPerSecond, readback, errorProp, error);
         if(!measured) {
-          if(error.empty())
-            error = "measurement failed";
-          logTuningResult(
-            context, candidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, error
+          logTuningFailure(
+            context, currentCandidateIndex, validCandidateCount,
+            targets, Tuner::name(),
+            error.empty() ? "measurement failed" : error
           );
           continue;
         }
         if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0) {
-          logTuningResult(
-            context, candidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond,
+          logTuningFailure(
+            context, currentCandidateIndex, validCandidateCount,
+            targets, Tuner::name(),
             "measurement returned invalid calls/sec"
           );
           continue;
         }
+        if(referenceReadback.empty()) {
+          double referenceErrorProp = numeric_limits<double>::quiet_NaN();
+          string referenceError;
+          if(!validateReadback(
+               readback, readback, plan, candidate.vulkan.shouldUseFP16Storage, referenceErrorProp, referenceError
+             )) {
+            if(isfinite(referenceErrorProp))
+              logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, referenceErrorProp, false);
+            else
+              logTuningFailure(context, currentCandidateIndex, validCandidateCount, targets, Tuner::name(), referenceError);
+            continue;
+          }
+          referenceReadback = readback;
+          errorProp = 0.0;
+        }
+        else if(!validateReadback(
+                  referenceReadback, readback, plan, candidate.vulkan.shouldUseFP16Storage, errorProp, error
+                )) {
+          if(isfinite(errorProp))
+            logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp, false);
+          else
+            logTuningFailure(
+              context, currentCandidateIndex, validCandidateCount,
+              targets, Tuner::name(),
+              error.empty() ? "output validation failed" : error
+            );
+          continue;
+        }
         logTuningResult(
-          context, candidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, ""
+          context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
+          callsPerSecond > bestCallsPerSecond
         );
         if(callsPerSecond > bestCallsPerSecond) {
           bestCallsPerSecond = callsPerSecond;
@@ -1556,10 +1609,7 @@ namespace {
       }
       catch(const StringError& e) {
         // A failed pipeline specialization is an invalid candidate, not a fatal tuning failure.
-        logTuningResult(
-          context, candidateIndex, validCandidateCount, vector<const Pipeline*>(), candidate, Tuner::name(), 0.0,
-          e.what()
-        );
+        logTuningFailure(context, currentCandidateIndex, validCandidateCount, vector<const Pipeline*>(), Tuner::name(), e.what());
       }
     }
     if(context.logger != nullptr) {

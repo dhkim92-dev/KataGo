@@ -50,6 +50,15 @@ VulkanDevice::~VulkanDevice() {
   }
 }
 
+VkDeviceSize vk_helper::getTotalAllocatedGpuMemory(const VulkanDevice* device) {
+  if(device == nullptr || device->allocator == VK_NULL_HANDLE)
+    return 0;
+
+  VmaTotalStatistics statistics = {};
+  vmaCalculateStatistics(device->allocator, &statistics);
+  return statistics.total.statistics.blockBytes;
+}
+
 VulkanContext::VulkanContext(
   VkInstance instance,
   const std::vector<VulkanDevice *>& devicesToUse,

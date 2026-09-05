@@ -4829,6 +4829,17 @@ struct ComputeHandle {
       handle.get(),
       model->maxBatchSize
     );
+
+    const VkDeviceSize allocatedGpuMemory = vk_helper::getTotalAllocatedGpuMemory(handle->vulkanDevice);
+    const std::string memoryMessage =
+      "Vulkan GPU memory allocated after ComputeHandle initialization: " +
+      Global::uint64ToString(static_cast<uint64_t>(allocatedGpuMemory)) + " bytes (" +
+      Global::doubleToString(static_cast<double>(allocatedGpuMemory) / (1024.0 * 1024.0)) + " MiB)";
+    if(context->logger != nullptr)
+      context->logger->write(memoryMessage);
+    if(context->logger == nullptr || (!context->logger->isLoggingToStdout() && !context->logger->isLoggingToStderr()))
+      std::cerr << memoryMessage << std::endl;
+
     // // Buffers* ptr = new Buffers(handle.get(), *model);
     // // buffers = std::make_unique<Buffers>(handle.get(), *model);
     // buffers.reset(ptr);
