@@ -77,8 +77,12 @@ void main() {
   for(int kvStart = 0; kvStart < seqLen; kvStart += ATTN_BLOCK_KV) {
     // Cooperatively load K tile into local memory
     for(int t = localIdx; t < ATTN_BLOCK_KV * ATTN_HEAD_DIM; t += ATTN_BLOCK_Q) {
-      int tileKPos = t / ATTN_HEAD_DIM;
-      int tileD = t % ATTN_HEAD_DIM;
+      // The global buffers are laid out as [head, dim, sequence]. Map the
+      // linear load so neighboring invocations read neighboring sequence
+      // positions for the same dimension. The shared tile remains laid out
+      // as [sequence, dim] for the dot-product loop below.
+      int tileD = t / ATTN_BLOCK_KV;
+      int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
         kTile[tileKPos * ATTN_HEAD_DIM + tileD] = LOAD(K, (kvBase * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
@@ -89,8 +93,9 @@ void main() {
 
     // Cooperatively load V tile
     for(int t = localIdx; t < ATTN_BLOCK_KV * ATTN_V_HEAD_DIM; t += ATTN_BLOCK_Q) {
-      int tileKPos = t / ATTN_V_HEAD_DIM;
-      int tileD = t % ATTN_V_HEAD_DIM;
+      // Keep the same coalesced global-load mapping for V.
+      int tileD = t / ATTN_BLOCK_KV;
+      int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
         vTile[tileKPos * ATTN_V_HEAD_DIM + tileD] = LOAD(V, (kvBase * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
