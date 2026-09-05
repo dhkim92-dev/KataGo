@@ -32,7 +32,7 @@ int MainCmds::tuner(const vector<string>& args) {
   int nnXLen;
   int nnYLen;
   try {
-    KataGoCommandLine cmd("Write Vulkan default tuning parameters.");
+    KataGoCommandLine cmd("Tune Vulkan parameters.");
     cmd.addConfigFileArg(KataGoCommandLine::defaultGtpConfigFileName(),"gtp_example.cfg");
     cmd.addModelFileArg();
     TCLAP::ValueArg<string> outputFileArg("","output","Filename to output tuning configuration to",false,string(),"FILE");
@@ -91,16 +91,59 @@ int MainCmds::tuner(const vector<string>& args) {
     if(gpuIdx < 0 || static_cast<size_t>(gpuIdx) >= deviceInfos.size())
       throw StringError("Requested Vulkan GPU index is out of range: " + Global::intToString(gpuIdx));
     VulkanDeviceInfo deviceInfo = deviceInfos[gpuIdx];
+    VulkanDevice* vulkanDevice = nullptr;
     try {
       string outputFile = outputFileFromArg;
       if(outputFile.empty()) {
         outputFile = VulkanTuner::defaultDirectory(true,homeDataDirOverride) + "/" +
           VulkanTuner::defaultFileName(deviceInfo.deviceName,nnXLen,nnYLen,modelInfo);
       }
-      VulkanTuneParams::save(outputFile,VulkanTuneParams());
-      logger.write("Saved default Vulkan tuning parameters to: " + outputFile);
+
+      vector<const char*> requiredExtensions;
+      const bool canUseFP16Storage =
+        deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
+        deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
+      const bool canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
+      const bool canUseCooperativeMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+      const bool canUseSubgroup =
+        (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+        deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+
+      if(canUseFP16Compute)
+        requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+      if(
+        canUseFP16Storage &&
+        VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
+        VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
+      )
+        requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
+      if(canUseCooperativeMatrix)
+        requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+
+      vulkanDevice = vk_helper::createVulkanDevice(instance, deviceInfo, requiredExtensions, &logger);
+
+      VulkanTuneParams tunedParams;
+      tunedParams.vulkan.canUseFP16Storage = canUseFP16Storage;
+      tunedParams.vulkan.canUseFP16Compute = canUseFP16Compute;
+      tunedParams.vulkan.canUseCooperativeMatrix = canUseCooperativeMatrix;
+      tunedParams.vulkan.canUseSubgroup = canUseSubgroup;
+      VulkanTuner::tune(
+        vulkanDevice,
+        VulkanTuner::DEFAULT_BATCH_SIZE,
+        nnXLen,
+        nnYLen,
+        modelInfo,
+        true,
+        &logger,
+        tunedParams
+      );
+      VulkanTuneParams::save(outputFile,tunedParams);
+      logger.write("Completed full Vulkan tuning and saved results to: " + outputFile);
+      delete vulkanDevice;
+      vulkanDevice = nullptr;
     }
     catch(...) {
+      delete vulkanDevice;
       vkDestroyInstance(instance,nullptr);
       throw;
     }

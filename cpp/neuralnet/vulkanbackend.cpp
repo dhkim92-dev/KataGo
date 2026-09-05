@@ -323,6 +323,29 @@ struct ComputeContext {
               nnXLen,nnYLen,*modelInfo,vulkanDevice,logger
             );
           }
+
+          // Pipeline creation must use the same effective precision as the
+          // buffers created by ComputeHandleInternal.  The tuning file stores
+          // the Auto-mode decision, but useFP16=true/false overrides that
+          // decision for this process.
+          const bool useFP16Storage =
+            usingFP16Mode == enabled_t::True
+              ? supportsFP16Storage && supportsFP16Compute
+              : usingFP16Mode == enabled_t::Auto
+                ? tuneParams.vulkan.canUseFP16Storage &&
+                  tuneParams.vulkan.canUseFP16Compute &&
+                  tuneParams.vulkan.shouldUseFP16Storage
+                : false;
+          const bool useFP16Compute =
+            usingFP16Mode == enabled_t::True
+              ? supportsFP16Compute
+              : usingFP16Mode == enabled_t::Auto
+                ? tuneParams.vulkan.canUseFP16Compute &&
+                  tuneParams.vulkan.shouldUseFP16Compute
+                : false;
+          tuneParams.vulkan.shouldUseFP16Storage = useFP16Storage;
+          tuneParams.vulkan.shouldUseFP16Compute = useFP16Compute;
+
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
           VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
           if(result != VK_SUCCESS)
