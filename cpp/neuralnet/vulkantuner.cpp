@@ -881,50 +881,31 @@ namespace {
       const double tolerance = tunerName == "xgemmDirect" ? 0.01 :
                                (tunerName == "xgemm" || tunerName == "xgemm16") ? 0.005 : 0.002;
       return {
-        tunerName, totalRuns, std::min<size_t>(1, totalRuns - 1), tolerance, tolerance * 5.0,
+        tunerName, totalRuns, 0, tolerance, tolerance * 5.0,
         batchSizes, gemmCases, workloadWeights
       };
     }
     if(tunerName == "pointwise" || tunerName == "transformerRMSNorm" || tunerName == "spatialRMSNorm")
-      return {tunerName, 20, 1, 0.05, 0.25, batchSizes, {}, workloadWeights};
+      return {tunerName, 20, 0, 0.05, 0.25, batchSizes, {}, workloadWeights};
     if(tunerName == "transformerAttention")
-      return {tunerName, 12, 1, 0.005, 0.025, batchSizes, {}, workloadWeights};
-    return {tunerName, 20, 1, 0.005, 0.025, batchSizes, {}, workloadWeights};
+      return {tunerName, 12, 0, 0.005, 0.025, batchSizes, {}, workloadWeights};
+    return {tunerName, 20, 0, 0.005, 0.025, batchSizes, {}, workloadWeights};
   }
 
   bool usesCpuReference(const string& tunerName) {
     return tunerName != "conv3x3InputTransform" && tunerName != "conv3x3OutputTransform" &&
-           tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform" &&
-           tunerName != "winograd3x3Tile";
+           tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform";
   }
 
-  bool validateReadback(
+  void validateReadback(
     const vector<float>& reference,
     const vector<float>& values,
     const TuningMeasurementPlan& plan,
-    double& errorProp,
-    string& error
+    double& errorProp
   ) {
-    if(reference.size() != values.size()) {
-      errorProp = 1.0;
-      error = "candidate output size mismatch: expected " + to_string(reference.size()) +
-        ", got " + to_string(values.size());
-      return false;
-    }
-    for(size_t i = 0; i < reference.size(); i++) {
-      if(!isfinite(reference[i]) || !isfinite(values[i])) {
-        errorProp = 1.0;
-        error = "candidate output contains a non-finite value";
-        return false;
-      }
-    }
     errorProp = VulkanTuner::computeErrorProp(reference, values);
-    if(!isfinite(errorProp) || errorProp > std::min(0.5, 5.0 * plan.errorTolerance)) {
+    if(!isfinite(errorProp) || errorProp > std::min(0.5, 5.0 * plan.errorTolerance))
       errorProp = 1.0;
-      error = "candidate readback exceeded the hard error cutoff";
-      return false;
-    }
-    return true;
   }
 
   template<typename Setter>
@@ -1015,27 +996,17 @@ namespace {
       add("CType", config.hgemmCooperativeMatrixNCHW.CType);
       add("ResultType", config.hgemmCooperativeMatrixNCHW.ResultType);
       add("SB", config.hgemmCooperativeMatrixNCHW.SB);
-      add("VWM", config.hgemmCooperativeMatrixNCHW.VWM);
-      add("VWN", config.hgemmCooperativeMatrixNCHW.VWN);
     }
     else if(
       tunerName == "conv3x3InputTransform" || tunerName == "conv3x3OutputTransform" ||
-      tunerName == "conv5x5InputTransform" || tunerName == "conv5x5OutputTransform" ||
-      tunerName == "winograd3x3Tile"
+      tunerName == "conv5x5InputTransform" || tunerName == "conv5x5OutputTransform"
     ) {
       const ConvTuneParams& conv = tunerName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
       add("inTileYSize", conv.inTileYSize);
       add("inTileXSize", conv.inTileXSize);
       add("outTileYSize", conv.outTileYSize);
       add("outTileXSize", conv.outTileXSize);
-      if(tunerName == "winograd3x3Tile") {
-        add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
-        add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
-        add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
-        add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
-        add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
-      }
-      else if(tunerName.find("Input") != string::npos) {
+      if(tunerName.find("Input") != string::npos) {
         add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
         add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
       }
@@ -1163,6 +1134,32 @@ namespace {
         return false;
       }
 
+      // OpenCL profiles each kernel event separately. Keep that boundary in
+      // Vulkan too: a multi-kernel tuner must not hide one kernel's cost in
+      // another kernel's command buffer range.
+      if(pipelines.size() > 1 && plan.kernelName != "spatialRMSNorm") {
+        readback.clear();
+        double reciprocalRateSum = 0.0;
+        size_t timedPipelineCount = 0;
+        for(const Pipeline* pipeline: pipelines) {
+          vector<float> output;
+          double rate = 0.0;
+          if(!measure({pipeline}, config, context, plan, rate, output, errorProp, error, cpuReference))
+            return false;
+          readback.insert(readback.end(), output.begin(), output.end());
+          const string& name = pipeline->name;
+          const bool spatialReduction = plan.kernelName == "spatialRMSNorm" &&
+            (name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
+             name.find("transformer_spatial_rms_norm_reduce") == 0);
+          if(!spatialReduction) {
+            reciprocalRateSum += 1.0 / rate;
+            timedPipelineCount++;
+          }
+        }
+        callsPerSecond = static_cast<double>(timedPipelineCount) / reciprocalRateSum;
+        return true;
+      }
+
       // Measure the same logical GEMMs for every tile/precision choice. Keep
       // each case separate so its output is checked before the next case.
       if(plan.gemmCases.size() > 1) {
@@ -1172,8 +1169,8 @@ namespace {
         for(const GemmTuneCase& gemmCase: plan.gemmCases) {
           TuningMeasurementPlan casePlan = plan;
           casePlan.gemmCases = {gemmCase};
-          casePlan.totalRuns = 4;
-          casePlan.warmupRuns = 1;
+          casePlan.totalRuns = 3;
+          casePlan.warmupRuns = 0;
           casePlan.workloadWeights = {1.0};
           vector<float> output;
           double rate = 0.0;
@@ -1209,7 +1206,6 @@ namespace {
         context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim
       }));
       const bool isGemm = !plan.gemmCases.empty();
-      const bool isWinograd3x3Tile = plan.kernelName == "winograd3x3Tile";
       const bool directGemm = plan.kernelName == "xgemmDirect" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const bool cooperative = plan.kernelName == "hgemmCooperativeMatrix" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
@@ -1240,15 +1236,19 @@ namespace {
         static_cast<size_t>(gemmM) * gemmK, static_cast<size_t>(gemmN) * gemmK, static_cast<size_t>(gemmM) * gemmN
       });
       const size_t transformElements = std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
-      const size_t scratchElements = isGemm ? gemmElements :
-        isWinograd3x3Tile ? std::max(gemmElements, transformElements) : transformElements;
+      const size_t scratchElements = isGemm ? gemmElements : transformElements;
       const size_t scratchBytes = vk_helper::roundUpToMultiple(std::max<size_t>(scratchElements, 4), size_t(4)) * sizeof(float);
       vector<VulkanBuffer*> tuningBuffers;
       VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
       VkQueryPool queryPool = VK_NULL_HANDLE;
       VkFence fence = VK_NULL_HANDLE;
       VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+      VkCommandBuffer setupCommandBuffer = VK_NULL_HANDLE;
       const auto cleanup = [&]() noexcept {
+        if(setupCommandBuffer != VK_NULL_HANDLE) {
+          vkFreeCommandBuffers(device->device, device->commandPool, 1, &setupCommandBuffer);
+          setupCommandBuffer = VK_NULL_HANDLE;
+        }
         if(commandBuffer != VK_NULL_HANDLE) {
           vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
           commandBuffer = VK_NULL_HANDLE;
@@ -1452,7 +1452,7 @@ namespace {
           const vector<float>& value = buffer(1);
           const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * cpuXYSize;
           for(size_t i = 0; i < count; i++)
-            cpuReference->push_back(accum[i] + plan.totalRuns * value[i]);
+            cpuReference->push_back(accum[i] + value[i]);
           return true;
         }
         if(name.find("transformer_swiglu") == 0) {
@@ -1469,7 +1469,7 @@ namespace {
           const vector<float>& bias = buffer(1);
           const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * cpuXYSize;
           for(size_t i = 0; i < count; i++)
-            cpuReference->push_back(accum[i] + plan.totalRuns * bias[i / cpuXYSize]);
+            cpuReference->push_back(accum[i] + bias[i / cpuXYSize]);
           return true;
         }
         if(name.find("transformer_scale_dot_product") == 0) {
@@ -1650,30 +1650,26 @@ namespace {
         cleanup();
         return false;
       }
-      result = vk_helper::beginCommandBuffer(commandBuffer);
-      if(result != VK_SUCCESS) {
-        error = "could not begin tuning command buffer: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
 
       const auto recordPipeline = [&](
+        VkCommandBuffer targetCommandBuffer,
         const Pipeline* pipeline,
         VkDescriptorSet descriptorSet,
-        int runBatchSize
+        int runBatchSize,
+        int runChannels
       ) {
         const int batchSize = std::max(1, runBatchSize);
         const int xySize = std::max(1, context.nnXLen * context.nnYLen);
-        const int channels = std::max(1, context.modelInfo.trunkNumChannels);
+        const int channels = std::max(1, runChannels);
         const auto dispatch = [&](uint32_t x, uint32_t y = 1, uint32_t z = 1) {
-          vkCmdDispatch(commandBuffer, std::max(1u, x), std::max(1u, y), std::max(1u, z));
+          vkCmdDispatch(targetCommandBuffer, std::max(1u, x), std::max(1u, y), std::max(1u, z));
         };
         const auto push = [&](const auto& params) {
-          vkCmdPushConstants(commandBuffer, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+          vkCmdPushConstants(targetCommandBuffer, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
         };
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+        vkCmdBindPipeline(targetCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
         vkCmdBindDescriptorSets(
-          commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+          targetCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
         );
 
         if(pipeline->name.find("hgemm_cooperative_matrix_nchw") == 0) {
@@ -1842,32 +1838,116 @@ namespace {
         else {
           vector<uint32_t> params((pipeline->pushConstantSize + 3) / 4, 1);
           if(!params.empty())
-            vkCmdPushConstants(commandBuffer, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pipeline->pushConstantSize, params.data());
+            vkCmdPushConstants(targetCommandBuffer, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pipeline->pushConstantSize, params.data());
           dispatch(1, 1, 1);
         }
       };
 
-      const auto recordDispatches = [&](size_t repeat) {
+      const auto recordDispatches = [&](VkCommandBuffer targetCommandBuffer, size_t repeat, size_t firstPipeline, size_t pipelineCount) {
         const int runBatchSize = plan.batchSizes.empty() ? std::max(1, context.batchSize) :
           plan.batchSizes[repeat % plan.batchSizes.size()];
-        for(size_t i = 0; i < pipelines.size(); i++) {
+        const size_t workload = repeat % plan.workloadWeights.size();
+        const int maxConvChannels = std::max({
+          context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels,
+          context.modelInfo.regularNumChannels, context.modelInfo.gpoolNumChannels,
+          context.modelInfo.maxConvChannels3x3
+        });
+        const int runChannels =
+          plan.kernelName.find("conv") != string::npos
+          ? std::max(1, workload == 2 || workload == 5 || workload == 8 ? context.modelInfo.midNumChannels :
+                         workload == 3 || workload == 6 || workload == 9 ? maxConvChannels :
+                         context.modelInfo.trunkNumChannels)
+          : std::max(1, context.modelInfo.trunkNumChannels);
+        const size_t lastPipeline = std::min(pipelines.size(), firstPipeline + pipelineCount);
+        for(size_t i = firstPipeline; i < lastPipeline; i++) {
           const Pipeline* pipeline = pipelines[i];
-          recordPipeline(pipeline, descriptorSets[i], runBatchSize);
-          if(i + 1 < pipelines.size())
-            vk_helper::barrierCommandBuffer(commandBuffer);
+          recordPipeline(targetCommandBuffer, pipeline, descriptorSets[i], runBatchSize, runChannels);
+          if(i + 1 < lastPipeline)
+            vk_helper::barrierCommandBuffer(targetCommandBuffer);
         }
       };
 
-      // The warm-up dispatch is deliberately outside the timestamp interval.
-      for(size_t repeat = 0; repeat < plan.warmupRuns; repeat++)
-        recordDispatches(repeat);
+      const bool resetsInPlaceAccumulator =
+        pipelines.size() == 1 &&
+        (pipelines[0]->name.find("add_pointwise") == 0 ||
+         pipelines[0]->name.find("add_channel_bias_nchw") == 0);
+      const auto resetInPlaceAccumulator = [&]() {
+        if(!resetsInPlaceAccumulator)
+          return;
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, tuningBuffers[0],
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT
+        );
+        vkCmdFillBuffer(commandBuffer, tuningBuffers[0]->buffer, 0, scratchBytes, 0);
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, tuningBuffers[0],
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+        );
+      };
+
+      const bool spatialRMSNorm = plan.kernelName == "spatialRMSNorm";
+      if(spatialRMSNorm) {
+        setupCommandBuffer = vk_helper::allocateCommandBuffer(device, &result);
+        if(result != VK_SUCCESS) {
+          error = "could not allocate Spatial RMSNorm setup command buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+        result = vk_helper::beginCommandBuffer(setupCommandBuffer);
+        if(result != VK_SUCCESS) {
+          error = "could not begin Spatial RMSNorm setup command buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+        for(size_t repeat = 0; repeat < plan.totalRuns; repeat++) {
+          recordDispatches(setupCommandBuffer, repeat, 0, 2);
+          vk_helper::barrierCommandBuffer(setupCommandBuffer);
+        }
+        result = vk_helper::endCommandBuffer(setupCommandBuffer);
+        if(result != VK_SUCCESS) {
+          error = "could not end Spatial RMSNorm setup command buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+        result = vk_helper::submitCommandBuffers(device, {setupCommandBuffer}, fence);
+        if(result != VK_SUCCESS) {
+          error = "could not submit Spatial RMSNorm setup command buffer: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
+        }
+        result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
+        if(result != VK_SUCCESS || vkResetFences(device->device, 1, &fence) != VK_SUCCESS) {
+          error = "could not complete Spatial RMSNorm setup command buffer";
+          cleanup();
+          return false;
+        }
+      }
+
+      result = vk_helper::beginCommandBuffer(commandBuffer);
+      if(result != VK_SUCCESS) {
+        error = "could not begin tuning command buffer: " + vk_helper::vkErrorToString(result);
+        cleanup();
+        return false;
+      }
+      const size_t firstTimedPipeline = spatialRMSNorm ? 2 : 0;
+      const size_t timedPipelineCount = spatialRMSNorm ? 1 : pipelines.size();
+
+      // Zero-weight runs are timestamped too, matching OpenCL event handling.
+      for(size_t repeat = 0; repeat < plan.warmupRuns; repeat++) {
+        resetInPlaceAccumulator();
+        recordDispatches(commandBuffer, repeat, firstTimedPipeline, timedPipelineCount);
+      }
       const size_t timedRuns = plan.timedRuns();
       vkCmdResetQueryPool(commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns));
       for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
         const uint32_t queryStart = static_cast<uint32_t>(2 * timedRepeat);
+        resetInPlaceAccumulator();
         vk_helper::barrierCommandBuffer(commandBuffer);
         vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart);
-        recordDispatches(plan.warmupRuns + timedRepeat);
+        recordDispatches(commandBuffer, plan.warmupRuns + timedRepeat, firstTimedPipeline, timedPipelineCount);
         vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart + 1);
       }
       vk_helper::barrierCommandBuffer(
@@ -1922,7 +2002,7 @@ namespace {
         }
         const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
         const double weight = plan.weightForRun(plan.warmupRuns + timedRepeat);
-        weightCounted += weight * pipelines.size();
+        weightCounted += weight;
         weightedTimeTaken += elapsedSeconds * weight;
       }
       if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
@@ -1931,11 +2011,6 @@ namespace {
         return false;
       }
       callsPerSecond = weightCounted / weightedTimeTaken;
-
-      if(isWinograd3x3Tile) {
-        cleanup();
-        return true;
-      }
 
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
@@ -2081,33 +2156,11 @@ namespace {
         if(referenceReadback.empty() && !cpuReference.empty())
           referenceReadback = std::move(cpuReference);
         if(referenceReadback.empty()) {
-          double referenceErrorProp = numeric_limits<double>::quiet_NaN();
-          string referenceError;
-          if(!validateReadback(
-               readback, readback, plan, referenceErrorProp, referenceError
-             )) {
-            if(isfinite(referenceErrorProp))
-              logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, referenceErrorProp, false);
-            else
-              logTuningFailure(context, currentCandidateIndex, validCandidateCount, targets, Tuner::name(), referenceError);
-            continue;
-          }
           referenceReadback = readback;
-          errorProp = 0.0;
+          validateReadback(referenceReadback, readback, plan, errorProp);
         }
-        else if(!validateReadback(
-                  referenceReadback, readback, plan, errorProp, error
-                )) {
-          if(isfinite(errorProp))
-            logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp, false);
-          else
-            logTuningFailure(
-              context, currentCandidateIndex, validCandidateCount,
-              targets, Tuner::name(),
-              error.empty() ? "output validation failed" : error
-            );
-          continue;
-        }
+        else
+          validateReadback(referenceReadback, readback, plan, errorProp);
         const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         logTuningResult(
           context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
@@ -2161,8 +2214,6 @@ namespace {
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMAD = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMBD = v; });
       addCandidates(configs, full ? vector<int>{2,8,16} : vector<int>{2,8}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.KWID = v; });
-      addCandidates(configs, vector<int>{1}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.PADA = v; });
-      addCandidates(configs, vector<int>{1}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.PADB = v; });
       VulkanTuneParams slightlyTunedConfig = current;
       slightlyTunedConfig.xgemmDirect = VulkanTuneParams().xgemmDirect;
       slightlyTunedConfig.xgemmDirect.MDIMCD = 8;
@@ -2363,43 +2414,6 @@ namespace {
     }
   };
 
-  struct Winograd3x3TileTuner {
-    static string name() { return "winograd3x3Tile"; }
-    static bool isValid(const VulkanTuneParams& config) { return config.conv3x3.isValid(3); }
-    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams&) { return current; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext&) {
-      vector<VulkanTuneParams> configs;
-      for(int outTileSize: {2,4}) {
-        VulkanTuneParams candidate = current;
-        candidate.conv3x3.inTileXSize = outTileSize + 2;
-        candidate.conv3x3.inTileYSize = outTileSize + 2;
-        candidate.conv3x3.outTileXSize = outTileSize;
-        candidate.conv3x3.outTileYSize = outTileSize;
-        configs.push_back(candidate);
-      }
-      return configs;
-    }
-    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createWinogradInputTransform(
-        pipelines.winogradInputTransform3x3, config.conv3x3, 3, config.vulkan
-      );
-      if(result != VK_SUCCESS) return result;
-      result = pipelines.createXgemmBatched(
-        pipelines.xgemmBatchedFp32, config.xgemm, config.xgemm16, config.vulkan
-      );
-      if(result != VK_SUCCESS) return result;
-      result = pipelines.createWinogradOutputTransform(
-        pipelines.winogradOutputTransform3x3, config.conv3x3, 3, config.vulkan
-      );
-      if(result == VK_SUCCESS) {
-        targets.push_back(&pipelines.winogradInputTransform3x3);
-        targets.push_back(&pipelines.xgemmBatchedFp32);
-        targets.push_back(&pipelines.winogradOutputTransform3x3);
-      }
-      return result;
-    }
-  };
-
   template<int ConvSize, bool InputTransform>
   struct ConvTuner {
     static string name() {
@@ -2466,69 +2480,11 @@ namespace {
       addCandidates(configs, powersOfTwoUpTo(std::min(4, std::max(1, context.batchSize))), [](VulkanTuneParams& p, int v) { p.gPool.BATCHSTRIDE = v; });
       return configs;
     }
-    static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
       VkResult result = pipelines.createGlobalPoolingChannelsFp32(pipelines.globalPoolingChannelsFp32, config.gPool, config.vulkan);
       if(result != VK_SUCCESS)
         return result;
       targets.push_back(&pipelines.globalPoolingChannelsFp32);
-
-      const uint32_t localSizeY = static_cast<uint32_t>(std::min(
-        config.gPool.CHANNELSTRIDE,
-        static_cast<int>(vk_helper::powerOf2ify(std::max(1, context.modelInfo.gpoolNumChannels)))
-      ));
-      const uint32_t localSizeZ = static_cast<uint32_t>(std::min(
-        config.gPool.BATCHSTRIDE,
-        static_cast<int>(vk_helper::powerOf2ify(std::max(1, context.batchSize)))
-      ));
-      LocalDim valueHeadDim = {config.gPool.XYSTRIDE, static_cast<int>(localSizeY), static_cast<int>(localSizeZ)};
-      Pipeline valueHeadPipeline;
-      result = pipelines.createValueHeadPoolingChannels(valueHeadPipeline, config.gPool, localSizeY, localSizeZ, config.vulkan);
-      if(result != VK_SUCCESS)
-        return result;
-      decltype(pipelines.valueHeadPoolingChannels)::iterator valueHeadIterator;
-      bool valueHeadInserted = false;
-      try {
-        auto insertResult = pipelines.valueHeadPoolingChannels.emplace(valueHeadDim, std::move(valueHeadPipeline));
-        valueHeadIterator = insertResult.first;
-        valueHeadInserted = insertResult.second;
-      }
-      catch(...) {
-        pipelines.destroyPipeline(valueHeadPipeline);
-        throw;
-      }
-      if(!valueHeadInserted) {
-        pipelines.destroyPipeline(valueHeadPipeline);
-        return VK_ERROR_INITIALIZATION_FAILED;
-      }
-      valueHeadPipeline.pipeline = VK_NULL_HANDLE;
-      valueHeadPipeline.layout = VK_NULL_HANDLE;
-      valueHeadPipeline.descriptorSetLayout = VK_NULL_HANDLE;
-      targets.push_back(&valueHeadIterator->second);
-
-      LocalDim sumChannelsDim = {config.gPool.XYSTRIDE, 1, static_cast<int>(localSizeZ)};
-      Pipeline sumChannelsPipeline;
-      result = pipelines.createSumChannels(sumChannelsPipeline, config.gPool, localSizeZ, config.vulkan);
-      if(result != VK_SUCCESS)
-        return result;
-      decltype(pipelines.sumChannels)::iterator sumChannelsIterator;
-      bool sumChannelsInserted = false;
-      try {
-        auto insertResult = pipelines.sumChannels.emplace(sumChannelsDim, std::move(sumChannelsPipeline));
-        sumChannelsIterator = insertResult.first;
-        sumChannelsInserted = insertResult.second;
-      }
-      catch(...) {
-        pipelines.destroyPipeline(sumChannelsPipeline);
-        throw;
-      }
-      if(!sumChannelsInserted) {
-        pipelines.destroyPipeline(sumChannelsPipeline);
-        return VK_ERROR_INITIALIZATION_FAILED;
-      }
-      sumChannelsPipeline.pipeline = VK_NULL_HANDLE;
-      sumChannelsPipeline.layout = VK_NULL_HANDLE;
-      sumChannelsPipeline.descriptorSetLayout = VK_NULL_HANDLE;
-      targets.push_back(&sumChannelsIterator->second);
       return result;
     }
   };
@@ -2578,11 +2534,19 @@ namespace {
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.transformer = defaults.transformer; return result; }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
-      vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.transformer.USE_TILED_ATTN = v; });
+      VulkanTuneParams defaults;
+      VulkanTuneParams naive = current;
+      naive.transformer.USE_TILED_ATTN = 0;
+      naive.transformer.ATTN_BLOCK_Q = defaults.transformer.ATTN_BLOCK_Q;
+      naive.transformer.ATTN_BLOCK_KV = defaults.transformer.ATTN_BLOCK_KV;
+      naive.transformer.Q_PER_THREAD = defaults.transformer.Q_PER_THREAD;
+      VulkanTuneParams tiled = current;
+      tiled.transformer.USE_TILED_ATTN = 1;
+      vector<VulkanTuneParams> configs = {tiled};
       addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{16,32,64,128,256}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
+      configs.insert(configs.begin(), naive);
       return configs;
     }
     static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -2649,16 +2613,20 @@ namespace {
   void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
     runTuner<Conv3x3InputTuner>(context, config);
     runTuner<Conv3x3OutputTuner>(context, config);
-    runTuner<Conv5x5InputTuner>(context, config);
-    runTuner<Conv5x5OutputTuner>(context, config);
+    config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
+    config.conv5x5.inputTransformLocalYSize = config.conv3x3.inputTransformLocalYSize;
+    config.conv5x5.outputTransformLocalXSize = config.conv3x3.outputTransformLocalXSize;
+    config.conv5x5.outputTransformLocalYSize = config.conv3x3.outputTransformLocalYSize;
+    config.conv5x5.outputTransformLocalZSize = config.conv3x3.outputTransformLocalZSize;
     runTuner<GPoolTuner>(context, config);
-    runTuner<PointwiseTuner>(context, config);
-    runTuner<AddChannelBiasesTuner>(context, config);
     if(context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0) {
       runTuner<TransformerTuner>(context, config);
       runTuner<TransformerRMSNormTuner>(context, config);
-      runTuner<SpatialRMSNormTuner>(context, config);
     }
+    runTuner<PointwiseTuner>(context, config);
+    runTuner<AddChannelBiasesTuner>(context, config);
+    if(context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0)
+      runTuner<SpatialRMSNormTuner>(context, config);
   }
 
   bool tuneXgemm16(
@@ -2688,6 +2656,10 @@ namespace {
       return false;
     }
 
+    // Preserve the best FP16 specialization for explicit useFP16=true even
+    // when Auto mode declines to enable FP16 globally.
+    config.xgemm16 = tunedConfig.xgemm16;
+
     const bool computeIsFastEnough = VulkanTuner::isFastEnough(
       fp16CallsPerSecond, fp32CallsPerSecond, VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO
     );
@@ -2703,7 +2675,6 @@ namespace {
         context.logger->write("Vulkan xgemm16 did not reach the FP32 baseline threshold, not enabling FP16 compute");
       return false;
     }
-    config.xgemm16 = tunedConfig.xgemm16;
     config.vulkan.shouldUseFP16Storage = true;
     config.vulkan.shouldUseFP16Compute = true;
     if(context.logger != nullptr)
@@ -2716,7 +2687,7 @@ namespace {
     VulkanTuneParams& config,
     double fp32CallsPerSecond
   ) {
-    if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute ||
+    if(!config.vulkan.canUseFP16Storage ||
        !isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0)
       return false;
 
@@ -2777,7 +2748,7 @@ namespace {
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = false;
     const double hgemmNCHWCallsPerSecond = runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, cooperativeConfig);
-    const bool useHgemmNCHW = VulkanTuner::isFastEnough(
+    const bool useHgemmNCHW = config.vulkan.shouldUseCooperativeMatrix && VulkanTuner::isFastEnough(
       hgemmNCHWCallsPerSecond, xgemmDirectBaselineCallsPerSecond,
       VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
     );
@@ -2854,18 +2825,17 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
   tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
-  runTuner<Winograd3x3TileTuner>(context, tunedConfig);
   double xgemmDirectBaselineCallsPerSecond = 0.0;
   double xgemmBaselineCallsPerSecond = 0.0;
   xgemmDirectBaselineCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
   xgemmBaselineCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
   tunedConfig.xgemm16 = tunedConfig.xgemm;
-  tuneXgemm16(context, tunedConfig, xgemmBaselineCallsPerSecond);
-  if(!tunedConfig.vulkan.shouldUseFP16Compute)
-    tuneXgemmStorage(context, tunedConfig, xgemmBaselineCallsPerSecond);
   tuneCooperativeMatrices(
     context, tunedConfig, xgemmDirectBaselineCallsPerSecond, xgemmBaselineCallsPerSecond
   );
+  tuneXgemm16(context, tunedConfig, xgemmBaselineCallsPerSecond);
+  if(!tunedConfig.vulkan.shouldUseFP16Compute)
+    tuneXgemmStorage(context, tunedConfig, xgemmBaselineCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
 }
 

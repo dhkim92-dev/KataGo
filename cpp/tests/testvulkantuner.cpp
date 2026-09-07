@@ -85,6 +85,10 @@ void Tests::runVulkanTunerPersistenceTests() {
     testAssert(VulkanTuner::isFastEnough(100.0 * threshold, 100.0, threshold));
     testAssert(!VulkanTuner::isFastEnough(100.0 * threshold - 0.001, 100.0, threshold));
   }
+  testAssert(VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO == 1.20);
+  testAssert(VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO == 1.20);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO == 0.90);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO == 1.20);
 
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
   testAssert(
