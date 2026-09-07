@@ -59,6 +59,11 @@ bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSec
          callsPerSecond >= baselineCallsPerSecond * requiredRatio;
 }
 
+bool VulkanTuner::shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, double fp16ErrorProp) {
+  return isfinite(fp32Seconds) && isfinite(fp16Seconds) && isfinite(fp16ErrorProp) &&
+    fp32Seconds > 0.0 && fp16Seconds > 0.0 && fp16ErrorProp < 1.0 && fp16Seconds < fp32Seconds;
+}
+
 namespace {
   const string VERSION_LINE = Global::strprintf("VERSION=%d", VulkanTuner::TUNER_VERSION);
 
@@ -2878,8 +2883,11 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   int nnYLen,
   const ModelInfoForTuning& modelInfo,
   const VulkanDevice* device,
-  Logger* logger
+  Logger* logger,
+  bool* didAutoTune
 ) {
+  if(didAutoTune != nullptr)
+    *didAutoTune = false;
   string filename = tunerFile;
   if(filename.empty())
     filename = defaultDirectory(true, homeDataDirOverride) + "/" + defaultFileName(gpuName, nnXLen, nnYLen, modelInfo);
@@ -2907,6 +2915,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   params.vulkan = makeVulkanParams(device->info);
   tune(device, DEFAULT_BATCH_SIZE, nnXLen, nnYLen, modelInfo, false, logger, params);
   VulkanTuneParams::save(filename, params);
+  if(didAutoTune != nullptr)
+    *didAutoTune = true;
   if(logger != nullptr)
     logger->write("Completed Vulkan tuning and saved results to: " + filename);
   return params;

@@ -58,6 +58,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(halfError > 0.0 && halfError < 0.001);
 
   testAssert(VulkanTuner::computeTuningScore(100.0, 0.0, 0.005) == 100.0);
+  testAssert(VulkanTuner::shouldUseFP16ForModel(1.0, 0.5, 0.01));
+  testAssert(!VulkanTuner::shouldUseFP16ForModel(1.0, 1.0, 0.01));
+  testAssert(!VulkanTuner::shouldUseFP16ForModel(1.0, 0.5, 1.0));
   testAssert(fabs(VulkanTuner::computeTuningScore(100.0, 0.005, 0.005) - 90.0 * (1.0 - sqrt(0.5))) < 1e-12);
   // The tolerance controls the penalty; only the larger hard cutoff rejects.
   testAssert(VulkanTuner::computeTuningScore(100.0, 0.006, 0.005) > 0.0);

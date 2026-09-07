@@ -11,7 +11,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 6;
+  constexpr int TUNER_VERSION = 7;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -23,6 +23,7 @@ namespace VulkanTuner {
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);
   bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
+  bool shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, double fp16ErrorProp);
 
   struct ModelInfoForTuning {
     int maxConvChannels1x1 = 0;
@@ -88,7 +89,8 @@ namespace VulkanTuner {
     int nnYLen,
     const ModelInfoForTuning& modelInfo,
     const VulkanDevice* device,
-    Logger* logger);
+    Logger* logger,
+    bool* didAutoTune = nullptr);
 }  // namespace VulkanTuner
 
 #endif
