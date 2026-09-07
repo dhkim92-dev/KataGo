@@ -23,6 +23,37 @@ using namespace std;
 using namespace vk_shader;
 using namespace vk_shader::tune;
 
+double VulkanTuner::computeErrorProp(const vector<float>& reference, const vector<float>& values) {
+  if(reference.size() != values.size())
+    return 1.0;
+  double squaredError = 0.0;
+  double squaredMagnitude = 0.0;
+  for(size_t i = 0; i < values.size(); i++) {
+    if(!isfinite(reference[i]) || !isfinite(values[i]))
+      return 1.0;
+    const double diff = static_cast<double>(reference[i]) - values[i];
+    squaredError += diff * diff;
+    squaredMagnitude += static_cast<double>(reference[i]) * reference[i];
+  }
+  return sqrt(squaredError / (squaredMagnitude + 1e-30));
+}
+
+double VulkanTuner::computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale) {
+  if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0 || !isfinite(errorProp) ||
+     errorProp > std::min(0.5, 5.0 * errorToleranceScale))
+    return 0.0;
+  double penalty = 1.0 - sqrt(errorProp / (errorProp + errorToleranceScale));
+  if(errorProp > 1e-5)
+    penalty *= 0.90;
+  return callsPerSecond * penalty;
+}
+
+bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio) {
+  return isfinite(callsPerSecond) && isfinite(baselineCallsPerSecond) &&
+         callsPerSecond > 0.0 && baselineCallsPerSecond > 0.0 &&
+         callsPerSecond >= baselineCallsPerSecond * requiredRatio;
+}
+
 namespace {
   const string VERSION_LINE = Global::strprintf("VERSION=%d", VulkanTuner::TUNER_VERSION);
 
@@ -828,14 +859,15 @@ namespace {
                         tunerName == "hgemmCooperativeMatrix" ||
                         tunerName == "hgemmCooperativeMatrixNCHW";
     const vector<int> batchSizes = getTuningBatchSizes(context);
-    const vector<GemmTuneCase> gemmCases = tunerName == "xgemm" || tunerName == "xgemm16" ?
-      getGemmTuneCases(context, false, true) : vector<GemmTuneCase>();
+    const bool direct = tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW";
+    const vector<GemmTuneCase> gemmCases = isGemm ?
+      getGemmTuneCases(context, direct, !direct) : vector<GemmTuneCase>();
     const vector<double> workloadWeights = getWorkloadWeights(tunerName, context);
     const size_t workloadCaseCount = workloadWeights.size();
     if(isGemm) {
       const size_t totalRuns = 3 * workloadCaseCount * batchSizes.size();
       const double tolerance = tunerName == "xgemmDirect" ? 0.01 :
-                               tunerName == "xgemm" ? 0.005 : 0.002;
+                               (tunerName == "xgemm" || tunerName == "xgemm16") ? 0.005 : 0.002;
       return {
         tunerName, totalRuns, std::min<size_t>(1, totalRuns - 1), tolerance, tolerance * 5.0,
         batchSizes, gemmCases, workloadWeights
@@ -849,63 +881,16 @@ namespace {
   }
 
   bool validateReadback(
-    const vector<uint32_t>& reference,
-    const vector<uint32_t>& values,
+    const vector<float>& reference,
+    const vector<float>& values,
     const TuningMeasurementPlan& plan,
-    bool useFP16Storage,
     double& errorProp,
     string& error
   ) {
-    errorProp = numeric_limits<double>::quiet_NaN();
-    if(reference.size() != values.size()) {
-      error = "candidate readback size differs from reference";
-      return false;
-    }
-    if(useFP16Storage) {
-      size_t differingWords = 0;
-      for(size_t i = 0; i < values.size(); i++) {
-        if(reference[i] != values[i])
-          differingWords++;
-      }
-      errorProp = values.empty() ? 0.0 : static_cast<double>(differingWords) / values.size();
-      if(errorProp > plan.hardCutoff) {
-        error = "candidate readback exceeded the hard error cutoff";
-        return false;
-      }
-      if(errorProp > plan.errorTolerance) {
-        error = "candidate readback exceeded the error tolerance";
-        return false;
-      }
-      return true;
-    }
-
-    double squaredError = 0.0;
-    double squaredMagnitude = 0.0;
-    double maxAbsError = 0.0;
-    for(size_t i = 0; i < values.size(); i++) {
-      float referenceValue;
-      float value;
-      memcpy(&referenceValue, &reference[i], sizeof(referenceValue));
-      memcpy(&value, &values[i], sizeof(value));
-      if(!isfinite(referenceValue) || !isfinite(value)) {
-        errorProp = 1.0;
-        error = "candidate readback contains a non-finite value";
-        return false;
-      }
-      squaredMagnitude += static_cast<double>(referenceValue) * static_cast<double>(referenceValue);
-      if(reference[i] == values[i])
-        continue;
-      const double absError = static_cast<double>(referenceValue) - static_cast<double>(value);
-      squaredError += absError * absError;
-      maxAbsError = std::max(maxAbsError, fabs(absError));
-    }
-    errorProp = sqrt(squaredError / (squaredMagnitude + 1e-30));
-    if(errorProp > plan.hardCutoff || maxAbsError > plan.hardCutoff) {
+    errorProp = VulkanTuner::computeErrorProp(reference, values);
+    if(!isfinite(errorProp) || errorProp > std::min(0.5, 5.0 * plan.errorTolerance)) {
+      errorProp = 1.0;
       error = "candidate readback exceeded the hard error cutoff";
-      return false;
-    }
-    if(errorProp > plan.errorTolerance || maxAbsError > plan.errorTolerance) {
-      error = "candidate readback exceeded the error tolerance";
       return false;
     }
     return true;
@@ -1117,9 +1102,10 @@ namespace {
       const TuningContext& context,
       const TuningMeasurementPlan& plan,
       double& callsPerSecond,
-      vector<uint32_t>& readback,
+      vector<float>& readback,
       double& errorProp,
-      string& error
+      string& error,
+      vector<float>* cpuReference = nullptr
     ) const {
       errorProp = numeric_limits<double>::quiet_NaN();
       if(!isUsable()) {
@@ -1129,6 +1115,30 @@ namespace {
       if(pipelines.empty()) {
         error = "no pipeline was created";
         return false;
+      }
+
+      // Measure the same logical GEMMs for every tile/precision choice. Keep
+      // each case separate so its output is checked before the next case.
+      if(plan.gemmCases.size() > 1) {
+        readback.clear();
+        double weightedSeconds = 0.0;
+        double totalWeight = 0.0;
+        for(const GemmTuneCase& gemmCase: plan.gemmCases) {
+          TuningMeasurementPlan casePlan = plan;
+          casePlan.gemmCases = {gemmCase};
+          casePlan.totalRuns = 4;
+          casePlan.warmupRuns = 1;
+          casePlan.workloadWeights = {1.0};
+          vector<float> output;
+          double rate = 0.0;
+          if(!measure(pipelines, config, context, casePlan, rate, output, errorProp, error, cpuReference))
+            return false;
+          readback.insert(readback.end(), output.begin(), output.end());
+          weightedSeconds += gemmCase.weight / rate;
+          totalWeight += gemmCase.weight;
+        }
+        callsPerSecond = totalWeight / weightedSeconds;
+        return true;
       }
 
       uint32_t descriptorCount = 0;
@@ -1145,49 +1155,44 @@ namespace {
       const XgemmTuneParams& xgemmParams =
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
       const size_t maxChannels = static_cast<size_t>(std::max({
-        1,
-        context.modelInfo.trunkNumChannels,
-        context.modelInfo.maxConvChannels1x1,
-        context.modelInfo.maxConvChannels3x3,
-        context.modelInfo.gpoolNumChannels,
+        1, context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels,
+        context.modelInfo.regularNumChannels, context.modelInfo.maxConvChannels1x1,
+        context.modelInfo.maxConvChannels3x3, context.modelInfo.gpoolNumChannels,
         context.modelInfo.transformerFFNChannels,
         context.modelInfo.transformerNumHeads * context.modelInfo.transformerHeadDim,
         context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim
       }));
-      const size_t maxTilesX = (static_cast<size_t>(std::max(1, context.nnXLen)) + 1) / 2;
-      const size_t maxTilesY = (static_cast<size_t>(std::max(1, context.nnYLen)) + 1) / 2;
-      const size_t paddedTiles = vk_helper::roundUpToMultiple(batchSize * maxTilesX * maxTilesY, static_cast<size_t>(xgemmParams.MWG));
+      const bool isGemm = !plan.gemmCases.empty();
+      const bool directGemm = plan.kernelName == "xgemmDirect" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
+      const bool cooperative = plan.kernelName == "hgemmCooperativeMatrix" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
+      const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
+      const int tilesY = (context.nnYLen + config.conv3x3.outTileYSize - 1) / config.conv3x3.outTileYSize;
+      const int logicalM = directGemm ? static_cast<int>(xySize) : static_cast<int>(batchSize) * tilesX * tilesY;
+      const int logicalN = isGemm ? std::max(1, plan.gemmCases[0].outChannels) : static_cast<int>(maxChannels);
+      const int logicalK = isGemm ? std::max(1, plan.gemmCases[0].inChannels) : static_cast<int>(maxChannels);
+      const int gemmBatch = directGemm ? static_cast<int>(batchSize) :
+        config.conv3x3.inTileXSize * config.conv3x3.inTileYSize;
+      int gemmM = logicalM;
+      int gemmN = logicalN;
+      int gemmK = logicalK;
+      if(cooperative && directGemm) {
+        gemmM = vk_helper::roundUpToMultipleInt(logicalM, std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP));
+        const int align = config.hgemmCooperativeMatrixNCHW.getRequiredCDivisor();
+        gemmN = vk_helper::roundUpToMultipleInt(logicalN, align);
+        gemmK = vk_helper::roundUpToMultipleInt(logicalK, align);
+      }
+      else if(!directGemm) {
+        gemmM = vk_helper::roundUpToMultipleInt(logicalM, cooperative ? config.hgemmCooperativeMatrix.MWG : xgemmParams.MWG);
+        gemmN = vk_helper::roundUpToMultipleInt(logicalN, cooperative ? config.hgemmCooperativeMatrix.NWG : xgemmParams.NWG);
+        gemmK = vk_helper::roundUpToMultipleInt(logicalK, cooperative ? config.hgemmCooperativeMatrix.KWG : xgemmParams.KWG);
+      }
+      const size_t maxTiles = batchSize * ((context.nnXLen + 1) / 2) * ((context.nnYLen + 1) / 2);
+      const size_t paddedTiles = vk_helper::roundUpToMultiple(maxTiles, static_cast<size_t>(xgemmParams.MWG));
       const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(xgemmParams.KWG, xgemmParams.NWG)));
-      const size_t hgemmHWSize = vk_helper::roundUpToMultiple(
-        xySize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP))
-      );
-      const size_t hgemmChannelAlignment = static_cast<size_t>(std::max({
-        32, config.hgemmCooperativeMatrixNCHW.KWG, config.hgemmCooperativeMatrixNCHW.KDIM, config.hgemmCooperativeMatrixNCHW.NWG
-      }));
-      const size_t hgemmCSize = vk_helper::roundUpToMultiple(
-        maxChannels, hgemmChannelAlignment
-      );
-      const size_t hgemmOCSize = vk_helper::roundUpToMultiple(
-        maxChannels, hgemmChannelAlignment
-      );
-      const size_t cooperativeTiles = vk_helper::roundUpToMultiple(
-        batchSize * maxTilesX * maxTilesY,
-        static_cast<size_t>(std::max(1, config.hgemmCooperativeMatrix.MWG))
-      );
-      const size_t cooperativeChannels = vk_helper::roundUpToMultiple(
-        maxChannels,
-        static_cast<size_t>(std::max({
-          1, config.hgemmCooperativeMatrix.KWG, config.hgemmCooperativeMatrix.NWG
-        }))
-      );
-      const size_t scratchElements = std::max({
-        batchSize * maxChannels * xySize,
-        paddedTiles * paddedChannels * 36,
-        batchSize * hgemmCSize * hgemmHWSize,
-        batchSize * hgemmOCSize * hgemmHWSize,
-        cooperativeTiles * cooperativeChannels * 36
-      });
-      const size_t scratchBytes = std::max(static_cast<size_t>(4 * 1024 * 1024), scratchElements * sizeof(float));
+      const size_t scratchElements = isGemm ? static_cast<size_t>(gemmBatch) * std::max({
+        static_cast<size_t>(gemmM) * gemmK, static_cast<size_t>(gemmN) * gemmK, static_cast<size_t>(gemmM) * gemmN
+      }) : std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
+      const size_t scratchBytes = vk_helper::roundUpToMultiple(std::max<size_t>(scratchElements, 4), size_t(4)) * sizeof(float);
       vector<VulkanBuffer*> tuningBuffers;
       VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
       VkQueryPool queryPool = VK_NULL_HANDLE;
@@ -1216,32 +1221,110 @@ namespace {
       };
       const auto cleanupGuard = makeScopeGuard(cleanup);
 
-      // Use deterministic, non-zero data for both fp32 and fp16 storage.  A
-      // repeated 16-bit value keeps the input finite in either representation,
-      // while the small per-word variation prevents zero/constant-input cases
-      // from hiding indexing and arithmetic errors.
-      vector<uint32_t> initialData(scratchBytes / sizeof(uint32_t));
-      for(size_t i = 0; i < initialData.size(); i++) {
-        const uint32_t halfValue = 0x3c00u + static_cast<uint32_t>(i % 17);
-        initialData[i] = (halfValue << 16) | halfValue;
-      }
+      const auto outputBinding = [](const Pipeline* pipeline) -> uint32_t {
+        const string& name = pipeline->name;
+        if(name.find("gemm") != string::npos || name.find("transformer_swiglu") == 0 ||
+           name.find("transformer_spatial_rms_norm_sum_sq") == 0)
+          return 2;
+        if(name.find("transformer_scale_dot_product") == 0)
+          return 3;
+        if(name.find("add_pointwise") == 0 || name.find("add_channel_bias_nchw") == 0)
+          return 0;
+        return 1;
+      };
+      const auto halfBinding = [&](const Pipeline* pipeline, uint32_t binding) {
+        const string& name = pipeline->name;
+        if(name.find("hgemm_cooperative_matrix") == 0)
+          return true;
+        if(name.find("fp32") != string::npos)
+          return false;
+        if(name.find("global_pooling_channels") == 0)
+          return binding == 0 || binding == 2;
+        if(name.find("value_head_pool_channels") == 0 || name.find("sum_channels") == 0)
+          return binding == 0;
+        if(name.find("add_channel_bias_nchw") == 0)
+          return binding == 0;
+        if(name.find("transformer_rms_norm") == 0 || name.find("transformer_spatial_rms_norm_apply") == 0)
+          return binding == 0 || binding == 1 || binding == 4;
+        if(name.find("transformer_spatial_rms_norm_sum_sq") == 0)
+          return binding < 2;
+        if(name.find("transformer_spatial_rms_norm_reduce") == 0)
+          return false;
+        return config.vulkan.shouldUseFP16Storage;
+      };
+      vector<float> gemmInput, gemmFilter;
       tuningBuffers.reserve(descriptorCount);
-      for(size_t i = 0; i < descriptorCount; i++) {
-        VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-        if(result != VK_SUCCESS || buffer == nullptr) {
-          error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
-          cleanup();
-          return false;
+      for(const Pipeline* pipeline: pipelines) {
+        for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
+          vector<float> data(scratchBytes / sizeof(float), 0.0f);
+          Rand rand("VulkanTunerInput:" + to_string(binding));
+          if(binding != outputBinding(pipeline)) {
+            if(isGemm && binding < 2) {
+              const int width = binding == 0 ? gemmM : gemmN;
+              const int logicalWidth = binding == 0 ? logicalM : logicalN;
+              const int batches = directGemm && binding == 1 ? 1 : gemmBatch;
+              for(int n = 0; n < batches; n++)
+                for(int k = 0; k < logicalK; k++)
+                  for(int x = 0; x < logicalWidth; x++)
+                    data[(static_cast<size_t>(n) * gemmK + k) * width + x] =
+                      static_cast<float>(rand.nextDouble() - 0.5) / sqrtf(static_cast<float>(logicalK));
+              if(cpuReference != nullptr) {
+                if(binding == 0) gemmInput = data;
+                else gemmFilter = data;
+              }
+            }
+            else {
+              for(float& value: data)
+                value = static_cast<float>(rand.nextDouble());
+              // Masks and their sums describe a fully valid board.
+              const string& name = pipeline->name;
+              const bool mask =
+                (name.find("global_pooling_channels") == 0 && binding == 2) ||
+                (name.find("transformer_scale_dot_product") == 0 && binding == 4) ||
+                ((name.find("transformer_rms_norm") == 0 || name.find("transformer_spatial_rms_norm_apply") == 0) && binding == 4) ||
+                (name.find("transformer_spatial_rms_norm_sum_sq") == 0 && binding == 1);
+              const bool maskSum =
+                (name.find("global_pooling_channels") == 0 && binding == 3) ||
+                (name.find("value_head_pool_channels") == 0 && binding == 2) ||
+                (name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 5);
+              if(mask || maskSum)
+                std::fill(data.begin(), data.end(), mask ? 1.0f : static_cast<float>(xySize));
+            }
+          }
+          vector<half_t> halfData;
+          const void* initialData = data.data();
+          size_t initialBytes = scratchBytes;
+          if(halfBinding(pipeline, binding)) {
+            halfData.resize(data.size());
+            for(size_t j = 0; j < data.size(); j++)
+              halfData[j] = half_float::half_cast<half_t>(data[j]);
+            initialData = halfData.data();
+            initialBytes = halfData.size() * sizeof(half_t);
+          }
+          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
+          if(result != VK_SUCCESS || buffer == nullptr) {
+            error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
+            return false;
+          }
+          tuningBuffers.push_back(buffer);
+          vk_helper::copyHostToDeviceBuffer(device, initialData, buffer, initialBytes, true, &result);
+          if(result != VK_SUCCESS) {
+            error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
+            return false;
+          }
         }
-        tuningBuffers.push_back(buffer);
-        vk_helper::copyHostToDeviceBuffer(
-          device, initialData.data(), buffer, scratchBytes, true, &result
-        );
-        if(result != VK_SUCCESS) {
-          error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
-          cleanup();
-          return false;
-        }
+      }
+      if(isGemm && cpuReference != nullptr) {
+        // The reference uses logical float inputs, before half quantization.
+        for(int n = 0; n < gemmBatch; n++)
+          for(int y = 0; y < logicalN; y++)
+            for(int x = 0; x < logicalM; x++) {
+              double sum = 0.0;
+              for(int k = 0; k < logicalK; k++)
+                sum += static_cast<double>(gemmInput[(static_cast<size_t>(n) * gemmK + k) * gemmM + x]) *
+                  gemmFilter[(static_cast<size_t>(directGemm ? 0 : n) * gemmK + k) * gemmN + y];
+              cpuReference->push_back(static_cast<float>(sum));
+            }
       }
 
       VkDescriptorPoolSize poolSize = {};
@@ -1278,7 +1361,14 @@ namespace {
         vector<WriteDescriptorSet> writes;
         writes.reserve(pipeline->bindingCount);
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
-          writes.push_back(vk_helper::writeDescriptorSetBuffer(descriptorSet, binding, tuningBuffers[bufferIndex]));
+          VulkanBuffer* buffer = tuningBuffers[bufferIndex];
+          if(plan.kernelName == "spatialRMSNorm") {
+            if(pipeline->name.find("transformer_spatial_rms_norm_reduce") == 0 && binding == 0)
+              buffer = tuningBuffers[2];
+            if(pipeline->name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 6)
+              buffer = tuningBuffers[4];
+          }
+          writes.push_back(vk_helper::writeDescriptorSetBuffer(descriptorSet, binding, buffer));
           bufferIndex++;
         }
         result = vk_helper::updateDescriptorSets(device, writes);
@@ -1325,8 +1415,7 @@ namespace {
       const auto recordPipeline = [&](
         const Pipeline* pipeline,
         VkDescriptorSet descriptorSet,
-        int runBatchSize,
-        const GemmTuneCase* gemmCase
+        int runBatchSize
       ) {
         const int batchSize = std::max(1, runBatchSize);
         const int xySize = std::max(1, context.nnXLen * context.nnYLen);
@@ -1343,62 +1432,41 @@ namespace {
         );
 
         if(pipeline->name.find("hgemm_cooperative_matrix_nchw") == 0) {
-          const int cSize = static_cast<int>(hgemmCSize);
-          const int hwSize = static_cast<int>(hgemmHWSize);
-          const int ocSize = static_cast<int>(hgemmOCSize);
-          vk_shader::push::HGemmCooperativeMatrixNCHWParams params = {cSize, hwSize, ocSize};
+          vk_shader::push::HGemmCooperativeMatrixNCHWParams params = {gemmK, gemmM, gemmN};
           push(params);
           dispatch(
-            static_cast<uint32_t>((hwSize + config.hgemmCooperativeMatrixNCHW.MWG - 1) / config.hgemmCooperativeMatrixNCHW.MWG),
-            static_cast<uint32_t>((ocSize + config.hgemmCooperativeMatrixNCHW.NWG - 1) / config.hgemmCooperativeMatrixNCHW.NWG),
-            static_cast<uint32_t>(batchSize)
+            (gemmM + config.hgemmCooperativeMatrixNCHW.MWG - 1) / config.hgemmCooperativeMatrixNCHW.MWG,
+            (gemmN + config.hgemmCooperativeMatrixNCHW.NWG - 1) / config.hgemmCooperativeMatrixNCHW.NWG,
+            gemmBatch
           );
         }
         else if(pipeline->name.find("hgemm_cooperative_matrix_") == 0) {
-          const int m = static_cast<int>(cooperativeTiles);
-          const int n = static_cast<int>(cooperativeChannels);
-          const int k = static_cast<int>(cooperativeChannels);
-          const int tileBatch = 36;
-          vk_shader::push::HGemmCooperativeMatrixParams params = {m, n, k};
+          vk_shader::push::HGemmCooperativeMatrixParams params = {gemmM, gemmN, gemmK};
           push(params);
-          dispatch(
-            static_cast<uint32_t>(m / config.hgemmCooperativeMatrix.MWG),
-            static_cast<uint32_t>(n / config.hgemmCooperativeMatrix.NWG),
-            static_cast<uint32_t>(tileBatch)
-          );
+          dispatch(gemmM / config.hgemmCooperativeMatrix.MWG, gemmN / config.hgemmCooperativeMatrix.NWG, gemmBatch);
         }
         else if(pipeline->name.find("xgemm_batched") == 0) {
-          const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
-          const int tilesY = (context.nnYLen + config.conv3x3.outTileYSize - 1) / config.conv3x3.outTileYSize;
-          const int numTilesTotal = batchSize * tilesX * tilesY;
-          const uint32_t m = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(numTilesTotal, xgemmParams.MWG));
-          const uint32_t n = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(
-            gemmCase == nullptr ? xgemmParams.NWG * 2 : gemmCase->outChannels, xgemmParams.NWG
-          ));
-          const uint32_t k = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(
-            gemmCase == nullptr ? xgemmParams.KWG : gemmCase->inChannels, xgemmParams.KWG
-          ));
-          vk_shader::push::XGEMMBatchedParams params = {m,n,k,m,k,n,k,m,n};
-          push(params);
-          dispatch(
-            static_cast<uint32_t>(m / xgemmParams.MWG),
-            static_cast<uint32_t>(n / xgemmParams.NWG),
-            static_cast<uint32_t>(batchSize)
-          );
-        }
-        else if(pipeline->name.find("xgemm_direct_batched_tt") == 0) {
-          const uint32_t size = config.xgemmDirect.WGD * 2;
-          vk_shader::push::XgemmDirectBatchedTTParams params = {size,size,config.xgemmDirect.WGD,config.xgemmDirect.WGD,config.xgemmDirect.WGD,size,0,0,1};
-          push(params);
-          dispatch(2, 2, static_cast<uint32_t>(batchSize));
-        }
-        else if(pipeline->name.find("xgemm_strided_batched") == 0) {
-          const uint32_t size = config.xgemmDirect.WGD * 2;
-          vk_shader::push::XgemmStridedBatchedFp32Params params = {
-            size,size,config.xgemmDirect.WGD,size,size * config.xgemmDirect.WGD,size,0,size,size * size,0
+          vk_shader::push::XGEMMBatchedParams params = {
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmN), static_cast<uint32_t>(gemmK),
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmK),
+            static_cast<uint32_t>(gemmN), static_cast<uint32_t>(gemmK),
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmN)
           };
           push(params);
-          dispatch(2, 2, static_cast<uint32_t>(batchSize));
+          dispatch(gemmM / xgemmParams.MWG, gemmN / xgemmParams.NWG, gemmBatch);
+        }
+        else if(pipeline->name.find("xgemm_strided_batched") == 0) {
+          vk_shader::push::XgemmStridedBatchedFp32Params params = {
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmN), static_cast<uint32_t>(gemmK),
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmM * gemmK),
+            static_cast<uint32_t>(gemmN), 0,
+            static_cast<uint32_t>(gemmM), static_cast<uint32_t>(gemmM * gemmN), 0
+          };
+          push(params);
+          dispatch(
+            (gemmM + config.xgemmDirect.WGD - 1) / config.xgemmDirect.WGD,
+            (gemmN + config.xgemmDirect.WGD - 1) / config.xgemmDirect.WGD, gemmBatch
+          );
         }
         else if(pipeline->name.find("winograd_input_transform") == 0) {
           const vk_shader::tune::ConvTuneParams& convParams =
@@ -1537,11 +1605,9 @@ namespace {
       const auto recordDispatches = [&](size_t repeat) {
         const int runBatchSize = plan.batchSizes.empty() ? std::max(1, context.batchSize) :
           plan.batchSizes[repeat % plan.batchSizes.size()];
-        const GemmTuneCase* gemmCase = plan.gemmCases.empty() ? nullptr :
-          &plan.gemmCases[repeat % plan.gemmCases.size()];
         for(size_t i = 0; i < pipelines.size(); i++) {
           const Pipeline* pipeline = pipelines[i];
-          recordPipeline(pipeline, descriptorSets[i], runBatchSize, gemmCase);
+          recordPipeline(pipeline, descriptorSets[i], runBatchSize);
           if(i + 1 < pipelines.size())
             vk_helper::barrierCommandBuffer(commandBuffer);
         }
@@ -1554,6 +1620,7 @@ namespace {
       vkCmdResetQueryPool(commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns));
       for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
         const uint32_t queryStart = static_cast<uint32_t>(2 * timedRepeat);
+        vk_helper::barrierCommandBuffer(commandBuffer);
         vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart);
         recordDispatches(plan.warmupRuns + timedRepeat);
         vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart + 1);
@@ -1620,43 +1687,72 @@ namespace {
       }
       callsPerSecond = weightCounted / weightedTimeTaken;
 
-      // Readback is outside the timestamp interval. The caller compares all
-      // binding buffers with the reference candidate run using the same input
-      // data. Keeping buffers separate also prevents input/output aliasing from
-      // making an invalid dispatch appear correct.
-      const size_t wordsPerBuffer = scratchBytes / sizeof(uint32_t);
-      readback.resize(tuningBuffers.size() * wordsPerBuffer);
-      for(size_t i = 0; i < tuningBuffers.size(); i++) {
-        result = VK_SUCCESS;
-        vk_helper::copyDeviceBufferToHost(
-          device, tuningBuffers[i], scratchBytes, readback.data() + i * wordsPerBuffer, true, &result
-        );
+      // Compare only produced values. Input buffers and unused allocation
+      // tails must not dilute the relative error; each output has its own type.
+      readback.clear();
+      size_t firstBuffer = 0;
+      for(const Pipeline* pipeline: pipelines) {
+        const string& name = pipeline->name;
+        size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
+        if(isGemm)
+          count = static_cast<size_t>(gemmBatch) * gemmM * gemmN;
+        else if(name.find("winograd_input_transform") == 0) {
+          const ConvTuneParams& conv = name.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+          const size_t tiles = batchSize * ((context.nnXLen + conv.outTileXSize - 1) / conv.outTileXSize) *
+            ((context.nnYLen + conv.outTileYSize - 1) / conv.outTileYSize);
+          count = vk_helper::roundUpToMultiple(tiles, static_cast<size_t>(xgemmParams.MWG)) *
+            vk_helper::roundUpToMultiple(static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels)),
+                                         static_cast<size_t>(xgemmParams.KWG)) * conv.inTileXSize * conv.inTileYSize;
+        }
+        else if(name.find("global_pooling_channels") == 0 || name.find("value_head_pool_channels") == 0)
+          count = batchSize * std::max(1, context.modelInfo.gpoolNumChannels) * 3;
+        else if(name.find("sum_channels") == 0)
+          count = batchSize;
+        else if(name.find("transformer_scale_dot_product") == 0)
+          count = batchSize * std::max(1, context.modelInfo.transformerNumHeads) *
+            std::max(1, context.modelInfo.transformerVHeadDim) * xySize;
+        else if(name.find("transformer_swiglu") == 0)
+          count = batchSize * std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels) * xySize;
+        else if(name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
+                name.find("transformer_spatial_rms_norm_reduce") == 0) {
+          // Intermediate reduction sizes vary by tile. Validate the connected
+          // pipeline's final normalized output instead.
+          firstBuffer += pipeline->bindingCount;
+          continue;
+        }
+        const uint32_t binding = outputBinding(pipeline);
+        vector<float> output(count);
+        if(halfBinding(pipeline, binding)) {
+          vector<half_t> halves(count);
+          vk_helper::copyDeviceBufferToHost(
+            device, tuningBuffers[firstBuffer + binding], count * sizeof(half_t), halves.data(), true, &result
+          );
+          for(size_t j = 0; j < count; j++)
+            output[j] = half_float::half_cast<float>(halves[j]);
+        }
+        else {
+          vk_helper::copyDeviceBufferToHost(
+            device, tuningBuffers[firstBuffer + binding], count * sizeof(float), output.data(), true, &result
+          );
+        }
         if(result != VK_SUCCESS) {
           error = "could not read tuning output: " + vk_helper::vkErrorToString(result);
-          readback.clear();
-          cleanup();
           return false;
         }
+        if(isGemm) {
+          for(int n = 0; n < gemmBatch; n++)
+            for(int y = 0; y < logicalN; y++)
+              for(int x = 0; x < logicalM; x++)
+                readback.push_back(output[(static_cast<size_t>(n) * gemmN + y) * gemmM + x]);
+        }
+        else
+          readback.insert(readback.end(), output.begin(), output.end());
+        firstBuffer += pipeline->bindingCount;
       }
       cleanup();
       return true;
     }
 
-    // Keep the existing FP16 profile caller source-compatible.  Its profile
-    // is a GEMM-shaped workload, so it uses the GEMM policy as well.
-    bool measure(
-      const vector<const Pipeline*>& pipelines,
-      const VulkanTuneParams& config,
-      const TuningContext& context,
-      double& callsPerSecond,
-      vector<uint32_t>& readback,
-      double& errorProp,
-      string& error
-    ) const {
-      return measure(
-        pipelines, config, context, makeMeasurementPlan("xgemm", context), callsPerSecond, readback, errorProp, error
-      );
-    }
 
    private:
     const VulkanDevice* device;
@@ -1687,8 +1783,9 @@ namespace {
     }
 
     bool found = false;
+    double bestScore = 0.0;
     double bestCallsPerSecond = 0.0;
-    vector<uint32_t> referenceReadback;
+    vector<float> referenceReadback;
     size_t candidateIndex = 0;
     for(const VulkanTuneParams& candidate: configs) {
       if(!Tuner::isValid(candidate))
@@ -1707,10 +1804,14 @@ namespace {
           continue;
         }
         double callsPerSecond = 0.0;
-        vector<uint32_t> readback;
+        vector<float> readback;
+        vector<float> cpuReference;
         double errorProp = numeric_limits<double>::quiet_NaN();
         string error;
-        const bool measured = timer.measure(targets, candidate, context, plan, callsPerSecond, readback, errorProp, error);
+        const bool measured = timer.measure(
+          targets, candidate, context, plan, callsPerSecond, readback, errorProp, error,
+          referenceReadback.empty() ? &cpuReference : nullptr
+        );
         if(!measured) {
           logTuningFailure(
             context, currentCandidateIndex, validCandidateCount,
@@ -1727,11 +1828,13 @@ namespace {
           );
           continue;
         }
+        if(referenceReadback.empty() && !cpuReference.empty())
+          referenceReadback = std::move(cpuReference);
         if(referenceReadback.empty()) {
           double referenceErrorProp = numeric_limits<double>::quiet_NaN();
           string referenceError;
           if(!validateReadback(
-               readback, readback, plan, candidate.vulkan.shouldUseFP16Storage, referenceErrorProp, referenceError
+               readback, readback, plan, referenceErrorProp, referenceError
              )) {
             if(isfinite(referenceErrorProp))
               logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, referenceErrorProp, false);
@@ -1743,7 +1846,7 @@ namespace {
           errorProp = 0.0;
         }
         else if(!validateReadback(
-                  referenceReadback, readback, plan, candidate.vulkan.shouldUseFP16Storage, errorProp, error
+                  referenceReadback, readback, plan, errorProp, error
                 )) {
           if(isfinite(errorProp))
             logTuningResult(context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp, false);
@@ -1755,11 +1858,13 @@ namespace {
             );
           continue;
         }
+        const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         logTuningResult(
           context, currentCandidateIndex, validCandidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
-          callsPerSecond > bestCallsPerSecond
+          score > bestScore
         );
-        if(callsPerSecond > bestCallsPerSecond) {
+        if(score > bestScore) {
+          bestScore = score;
           bestCallsPerSecond = callsPerSecond;
           currentConfig = candidate;
           found = true;
@@ -1802,11 +1907,8 @@ namespace {
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createXgemmDirectBatchedTT(pipelines.xgemmDirectBatchedTT, config.xgemmDirect, config.vulkan);
-      if(result != VK_SUCCESS) return result;
-      result = pipelines.createXgemmStridedBatched(pipelines.xgemmStridedBatchedFp32, config.xgemmDirect, config.vulkan);
+      VkResult result = pipelines.createXgemmStridedBatched(pipelines.xgemmStridedBatchedFp32, config.xgemmDirect, config.vulkan);
       if(result == VK_SUCCESS) {
-        targets.push_back(&pipelines.xgemmDirectBatchedTT);
         targets.push_back(&pipelines.xgemmStridedBatchedFp32);
       }
       return result;

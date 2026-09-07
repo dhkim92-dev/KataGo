@@ -2,10 +2,13 @@
 
 #include "../tests/tests.h"
 
+#include <cmath>
 #include <fstream>
+#include <limits>
 
 #include "../core/fileutils.h"
 #include "../core/makedir.h"
+#include "../external/half-2.2.0/include/half.hpp"
 #include "../neuralnet/vulkantuner.h"
 
 using namespace std;
@@ -30,6 +33,52 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
+  const float nan = numeric_limits<float>::quiet_NaN();
+  const float inf = numeric_limits<float>::infinity();
+  testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
+  testAssert(VulkanTuner::computeErrorProp({0.0f, 0.0f}, {0.0f, 0.0f}) == 0.0);
+  testAssert(VulkanTuner::computeErrorProp({3.0f, 4.0f}, {3.0f, 4.0f}) == 0.0);
+  testAssert(fabs(VulkanTuner::computeErrorProp({3.0f, 4.0f}, {3.0f, 5.0f}) - 0.2) < 1e-12);
+  testAssert(fabs(VulkanTuner::computeErrorProp({30.0f, 40.0f}, {30.0f, 50.0f}) - 0.2) < 1e-12);
+  testAssert(VulkanTuner::computeErrorProp({1.0f}, {}) == 1.0);
+  testAssert(VulkanTuner::computeErrorProp({}, {1.0f}) == 1.0);
+  testAssert(VulkanTuner::computeErrorProp({nan}, {1.0f}) == 1.0);
+  testAssert(VulkanTuner::computeErrorProp({1.0f}, {nan}) == 1.0);
+  testAssert(VulkanTuner::computeErrorProp({inf}, {inf}) == 1.0);
+  testAssert(VulkanTuner::computeErrorProp({1.0f}, {-inf}) == 1.0);
+
+  // Every rounded value differs, but FP16 rounding is a small numerical error.
+  const vector<float> reference = {1.0003f, -2.0007f, 0.10003f};
+  vector<float> rounded;
+  for(float value: reference)
+    rounded.push_back(static_cast<float>(half_float::half_cast<half_float::half>(value)));
+  for(size_t i = 0; i < reference.size(); i++)
+    testAssert(reference[i] != rounded[i]);
+  const double halfError = VulkanTuner::computeErrorProp(reference, rounded);
+  testAssert(halfError > 0.0 && halfError < 0.001);
+
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.0, 0.005) == 100.0);
+  testAssert(fabs(VulkanTuner::computeTuningScore(100.0, 0.005, 0.005) - 90.0 * (1.0 - sqrt(0.5))) < 1e-12);
+  // The tolerance controls the penalty; only the larger hard cutoff rejects.
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.006, 0.005) > 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.025, 0.005) > 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.025001, 0.005) == 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.5, 0.2) > 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, 0.500001, 0.2) == 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, halfError, 0.005) > 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, nan, 0.005) == 0.0);
+  testAssert(VulkanTuner::computeTuningScore(100.0, inf, 0.005) == 0.0);
+  for(double badRate: {0.0, -1.0, static_cast<double>(nan), static_cast<double>(inf)}) {
+    testAssert(VulkanTuner::computeTuningScore(badRate, 0.0, 0.005) == 0.0);
+    testAssert(!VulkanTuner::isFastEnough(badRate, 100.0, 1.0));
+    testAssert(!VulkanTuner::isFastEnough(100.0, badRate, 1.0));
+  }
+  // Equal throughput prefers FP16; cooperative matrix accepts 90% of baseline.
+  testAssert(VulkanTuner::isFastEnough(100.0, 100.0, 1.0));
+  testAssert(!VulkanTuner::isFastEnough(99.999, 100.0, 1.0));
+  testAssert(VulkanTuner::isFastEnough(90.0, 100.0, 0.9));
+  testAssert(!VulkanTuner::isFastEnough(89.999, 100.0, 0.9));
+
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
   testAssert(
     VulkanTuner::defaultFileName("Apple M2", 19, 19, 96, 8) ==

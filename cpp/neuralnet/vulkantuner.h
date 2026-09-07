@@ -14,6 +14,10 @@ namespace VulkanTuner {
   constexpr int TUNER_VERSION = 3;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
+  double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
+  double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);
+  bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
+
   struct ModelInfoForTuning {
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;
