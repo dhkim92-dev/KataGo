@@ -73,11 +73,18 @@ void Tests::runVulkanTunerPersistenceTests() {
     testAssert(!VulkanTuner::isFastEnough(badRate, 100.0, 1.0));
     testAssert(!VulkanTuner::isFastEnough(100.0, badRate, 1.0));
   }
-  // Equal throughput prefers FP16; cooperative matrix accepts 90% of baseline.
+  // Optional paths use the adjustable VulkanTuner throughput thresholds.
   testAssert(VulkanTuner::isFastEnough(100.0, 100.0, 1.0));
   testAssert(!VulkanTuner::isFastEnough(99.999, 100.0, 1.0));
-  testAssert(VulkanTuner::isFastEnough(90.0, 100.0, 0.9));
-  testAssert(!VulkanTuner::isFastEnough(89.999, 100.0, 0.9));
+  for(double threshold: {
+    VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO,
+    VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO,
+    VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO,
+    VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
+  }) {
+    testAssert(VulkanTuner::isFastEnough(100.0 * threshold, 100.0, threshold));
+    testAssert(!VulkanTuner::isFastEnough(100.0 * threshold - 0.001, 100.0, threshold));
+  }
 
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
   testAssert(

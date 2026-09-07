@@ -209,7 +209,7 @@ void convInputToWinogradDomainBnActMask(
   uint32_t convSize,
   VkResult *result
 ) {
-  throw StringError("winogradTransformBnAct is inactivated");
+  // throw StringError("winogradTransformBnAct is inactivated");
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, convWorkspace),

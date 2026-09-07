@@ -367,11 +367,13 @@ namespace vk_shader {
       {&winogradInputTransform3x3_bnact_identity, ACTIVATION_IDENTITY},
       {&winogradInputTransform3x3_bnact_relu, ACTIVATION_RELU},
       {&winogradInputTransform3x3_bnact_mish, ACTIVATION_MISH},
+      {&winogradInputTransform3x3_bnact_silu, ACTIVATION_SILU},
       {&winogradInputTransform3x3_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
       {&winogradInputTransform5x5_bnact_identity, ACTIVATION_IDENTITY},
       {&winogradInputTransform5x5_bnact_relu, ACTIVATION_RELU},
       {&winogradInputTransform5x5_bnact_mish, ACTIVATION_MISH},
       {&winogradInputTransform5x5_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
+      {&winogradInputTransform5x5_bnact_silu, ACTIVATION_SILU},
     };
     for(int i = 0; i < 8; i++) {
       const int convSize = i < 4 ? 3 : 5;

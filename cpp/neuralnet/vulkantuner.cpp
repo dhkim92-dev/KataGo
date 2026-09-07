@@ -24,18 +24,23 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 double VulkanTuner::computeErrorProp(const vector<float>& reference, const vector<float>& values) {
-  if(reference.size() != values.size())
-    return 1.0;
   double squaredError = 0.0;
   double squaredMagnitude = 0.0;
-  for(size_t i = 0; i < values.size(); i++) {
-    if(!isfinite(reference[i]) || !isfinite(values[i]))
-      return 1.0;
-    const double diff = static_cast<double>(reference[i]) - values[i];
-    squaredError += diff * diff;
-    squaredMagnitude += static_cast<double>(reference[i]) * reference[i];
+  if(reference.size() != values.size())
+    squaredError = numeric_limits<double>::infinity();
+  else {
+    for(size_t i = 0; i < values.size(); i++) {
+      if(!isfinite(reference[i]) || !isfinite(values[i])) {
+        squaredError = numeric_limits<double>::infinity();
+        break;
+      }
+      const double diff = static_cast<double>(reference[i]) - values[i];
+      squaredError += diff * diff;
+      squaredMagnitude += static_cast<double>(reference[i]) * reference[i];
+    }
   }
-  return sqrt(squaredError / (squaredMagnitude + 1e-30));
+  const double errorProp = sqrt(squaredError / (squaredMagnitude + 1e-30));
+  return isfinite(errorProp) ? errorProp : 1.0;
 }
 
 double VulkanTuner::computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale) {
@@ -774,7 +779,9 @@ namespace {
       {context.modelInfo.trunkNumChannels, context.modelInfo.gpoolNumChannels, 0.2},
       {maxConvChannels, maxConvChannels, 1}
     };
-    if(includeTransformerCases && context.modelInfo.transformerNumHeads > 0) {
+    if(includeTransformerCases &&
+       context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
+       context.modelInfo.transformerNumHeads > 0 && context.modelInfo.transformerNumKVHeads > 0) {
       const int transformerQKC = context.modelInfo.transformerNumHeads * context.modelInfo.transformerHeadDim;
       const int transformerVC = context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim;
       const int transformerFFNC = context.modelInfo.transformerFFNChannels;
@@ -842,7 +849,8 @@ namespace {
 
   size_t getWorkloadCaseCount(const string& tunerName, const TuningContext& context) {
     if(tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW")
-      return context.modelInfo.transformerNumHeads > 0 ? 10 : 6;
+      return context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
+             context.modelInfo.transformerNumHeads > 0 && context.modelInfo.transformerNumKVHeads > 0 ? 10 : 6;
     if(tunerName == "xgemm" || tunerName == "xgemm16" || tunerName == "hgemmCooperativeMatrix")
       return 6;
     if(tunerName == "transformerAttention")
@@ -880,6 +888,11 @@ namespace {
     return {tunerName, 20, 1, 0.005, 0.025, batchSizes, {}, workloadWeights};
   }
 
+  bool usesCpuReference(const string& tunerName) {
+    return tunerName != "conv3x3InputTransform" && tunerName != "conv3x3OutputTransform" &&
+           tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform";
+  }
+
   bool validateReadback(
     const vector<float>& reference,
     const vector<float>& values,
@@ -887,6 +900,19 @@ namespace {
     double& errorProp,
     string& error
   ) {
+    if(reference.size() != values.size()) {
+      errorProp = 1.0;
+      error = "candidate output size mismatch: expected " + to_string(reference.size()) +
+        ", got " + to_string(values.size());
+      return false;
+    }
+    for(size_t i = 0; i < reference.size(); i++) {
+      if(!isfinite(reference[i]) || !isfinite(values[i])) {
+        errorProp = 1.0;
+        error = "candidate output contains a non-finite value";
+        return false;
+      }
+    }
     errorProp = VulkanTuner::computeErrorProp(reference, values);
     if(!isfinite(errorProp) || errorProp > std::min(0.5, 5.0 * plan.errorTolerance)) {
       errorProp = 1.0;
@@ -987,17 +1013,24 @@ namespace {
       add("VWM", config.hgemmCooperativeMatrixNCHW.VWM);
       add("VWN", config.hgemmCooperativeMatrixNCHW.VWN);
     }
-    else if(tunerName == "conv3x3" || tunerName == "conv5x5") {
-      const ConvTuneParams& conv = tunerName == "conv3x3" ? config.conv3x3 : config.conv5x5;
+    else if(
+      tunerName == "conv3x3InputTransform" || tunerName == "conv3x3OutputTransform" ||
+      tunerName == "conv5x5InputTransform" || tunerName == "conv5x5OutputTransform"
+    ) {
+      const ConvTuneParams& conv = tunerName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
       add("inTileYSize", conv.inTileYSize);
       add("inTileXSize", conv.inTileXSize);
       add("outTileYSize", conv.outTileYSize);
       add("outTileXSize", conv.outTileXSize);
-      add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
-      add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
-      add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
-      add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
-      add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
+      if(tunerName.find("Input") != string::npos) {
+        add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
+        add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
+      }
+      else {
+        add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
+        add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
+        add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
+      }
     }
     else if(tunerName == "gPool") {
       add("XYSTRIDE", config.gPool.XYSTRIDE);
@@ -1253,7 +1286,9 @@ namespace {
         return config.vulkan.shouldUseFP16Storage;
       };
       vector<float> gemmInput, gemmFilter;
+      vector<vector<float>> hostFloatBuffers;
       tuningBuffers.reserve(descriptorCount);
+      hostFloatBuffers.reserve(descriptorCount);
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
           vector<float> data(scratchBytes / sizeof(float), 0.0f);
@@ -1291,6 +1326,7 @@ namespace {
                 std::fill(data.begin(), data.end(), mask ? 1.0f : static_cast<float>(xySize));
             }
           }
+          hostFloatBuffers.push_back(data);
           vector<half_t> halfData;
           const void* initialData = data.data();
           size_t initialBytes = scratchBytes;
@@ -1325,6 +1361,198 @@ namespace {
                   gemmFilter[(static_cast<size_t>(directGemm ? 0 : n) * gemmK + k) * gemmN + y];
               cpuReference->push_back(static_cast<float>(sum));
             }
+      }
+
+      const auto appendCpuReference = [&](const Pipeline* pipeline, size_t firstBuffer) -> bool {
+        const string& name = pipeline->name;
+        const auto& buffer = [&](size_t binding) -> const vector<float>& { return hostFloatBuffers[firstBuffer + binding]; };
+        const int cpuBatchSize = std::max(1, context.batchSize);
+        const int cpuXYSize = std::max(1, context.nnXLen * context.nnYLen);
+        const int cpuChannels = std::max(1, context.modelInfo.trunkNumChannels);
+
+        if(name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
+           name.find("transformer_spatial_rms_norm_reduce") == 0)
+          return true;
+
+        if(name.find("global_pooling_channels") == 0) {
+          const vector<float>& input = buffer(0);
+          const vector<float>& mask = buffer(2);
+          const vector<float>& maskSum = buffer(3);
+          const int channels = std::max(1, context.modelInfo.gpoolNumChannels);
+          for(int n = 0; n < cpuBatchSize; n++) {
+            const float divisor = maskSum[n];
+            vector<float> means(channels);
+            vector<float> maxima(channels);
+            for(int c = 0; c < channels; c++) {
+              float sum = 0.0f;
+              float maximum = -1.0f;
+              for(int xy = 0; xy < cpuXYSize; xy++) {
+                const float value = input[(n * channels + c) * cpuXYSize + xy];
+                sum += value;
+                maximum = std::max(maximum, value + mask[n * cpuXYSize + xy] - 1.0f);
+              }
+              means[c] = sum / divisor;
+              maxima[c] = maximum;
+            }
+            for(int c = 0; c < channels; c++) cpuReference->push_back(means[c]);
+            for(int c = 0; c < channels; c++) cpuReference->push_back(means[c] * (sqrtf(divisor) - 14.0f) * 0.1f);
+            for(int c = 0; c < channels; c++) cpuReference->push_back(maxima[c]);
+          }
+          return true;
+        }
+        if(name.find("value_head_pool_channels") == 0) {
+          const vector<float>& input = buffer(0);
+          const vector<float>& maskSum = buffer(2);
+          const int channels = std::max(1, context.modelInfo.gpoolNumChannels);
+          for(int n = 0; n < cpuBatchSize; n++) {
+            const float divisor = maskSum[n];
+            vector<float> means(channels);
+            for(int c = 0; c < channels; c++) {
+              float sum = 0.0f;
+              for(int xy = 0; xy < cpuXYSize; xy++)
+                sum += input[(n * channels + c) * cpuXYSize + xy];
+              means[c] = sum / divisor;
+            }
+            const float scale = (sqrtf(divisor) - 14.0f) * 0.1f;
+            for(int c = 0; c < channels; c++) cpuReference->push_back(means[c]);
+            for(int c = 0; c < channels; c++) cpuReference->push_back(means[c] * scale);
+            for(int c = 0; c < channels; c++) cpuReference->push_back(means[c] * (scale * scale - 0.1f));
+          }
+          return true;
+        }
+        if(name.find("sum_channels") == 0) {
+          const vector<float>& input = buffer(0);
+          for(int n = 0; n < cpuBatchSize; n++) {
+            float sum = 0.0f;
+            for(int xy = 0; xy < cpuXYSize; xy++)
+              sum += input[n * cpuXYSize + xy];
+            cpuReference->push_back(sum);
+          }
+          return true;
+        }
+        if(name.find("add_pointwise") == 0) {
+          const vector<float>& accum = buffer(0);
+          const vector<float>& value = buffer(1);
+          const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * cpuXYSize;
+          for(size_t i = 0; i < count; i++)
+            cpuReference->push_back(accum[i] + plan.totalRuns * value[i]);
+          return true;
+        }
+        if(name.find("transformer_swiglu") == 0) {
+          const vector<float>& input = buffer(0);
+          const vector<float>& gate = buffer(1);
+          const size_t count = static_cast<size_t>(cpuBatchSize) *
+            std::max(cpuChannels, context.modelInfo.transformerFFNChannels) * cpuXYSize;
+          for(size_t i = 0; i < count; i++)
+            cpuReference->push_back(input[i] / (1.0f + expf(-input[i])) * gate[i]);
+          return true;
+        }
+        if(name.find("add_channel_bias_nchw") == 0) {
+          const vector<float>& accum = buffer(0);
+          const vector<float>& bias = buffer(1);
+          const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * cpuXYSize;
+          for(size_t i = 0; i < count; i++)
+            cpuReference->push_back(accum[i] + plan.totalRuns * bias[i / cpuXYSize]);
+          return true;
+        }
+        if(name.find("transformer_scale_dot_product") == 0) {
+          const vector<float>& query = buffer(0);
+          const vector<float>& key = buffer(1);
+          const vector<float>& value = buffer(2);
+          const vector<float>& mask = buffer(4);
+          const int heads = std::max(1, context.modelInfo.transformerNumHeads);
+          const int kvHeads = std::max(1, context.modelInfo.transformerNumKVHeads);
+          const int headDim = std::max(1, context.modelInfo.transformerHeadDim);
+          const int vHeadDim = std::max(1, context.modelInfo.transformerVHeadDim);
+          const float scale = 1.0f / sqrtf(static_cast<float>(headDim));
+          for(int bh = 0; bh < cpuBatchSize * heads; bh++) {
+            const int n = bh / heads;
+            const int kvBase = n * kvHeads + (bh % heads) / (heads / kvHeads);
+            vector<float> output(vHeadDim * cpuXYSize, 0.0f);
+            for(int qPos = 0; qPos < cpuXYSize; qPos++) {
+              if(mask[n * cpuXYSize + qPos] == 0.0f) {
+                continue;
+              }
+              float runningMax = -1e30f;
+              float runningSum = 0.0f;
+              vector<float> accum(vHeadDim, 0.0f);
+              for(int kPos = 0; kPos < cpuXYSize; kPos++) {
+                if(mask[n * cpuXYSize + kPos] == 0.0f)
+                  continue;
+                float dot = 0.0f;
+                for(int d = 0; d < headDim; d++)
+                  dot += query[(bh * headDim + d) * cpuXYSize + qPos] *
+                    key[(kvBase * headDim + d) * cpuXYSize + kPos];
+                dot *= scale;
+                const float nextMax = std::max(runningMax, dot);
+                const float oldWeight = expf(runningMax - nextMax);
+                const float weight = expf(dot - nextMax);
+                for(int d = 0; d < vHeadDim; d++)
+                  accum[d] = accum[d] * oldWeight + weight * value[(kvBase * vHeadDim + d) * cpuXYSize + kPos];
+                runningSum = runningSum * oldWeight + weight;
+                runningMax = nextMax;
+              }
+              for(int d = 0; d < vHeadDim; d++)
+                output[d * cpuXYSize + qPos] = runningSum > 0.0f ? accum[d] / runningSum : 0.0f;
+            }
+            cpuReference->insert(cpuReference->end(), output.begin(), output.end());
+          }
+          return true;
+        }
+        if(name.find("transformer_rms_norm") == 0) {
+          const vector<float>& input = buffer(0);
+          const vector<float>& gamma = buffer(2);
+          const vector<float>& beta = buffer(3);
+          const vector<float>& mask = buffer(4);
+          for(int n = 0; n < cpuBatchSize; n++) {
+            vector<float> rms(cpuXYSize);
+            for(int xy = 0; xy < cpuXYSize; xy++) {
+              const float maskValue = mask[n * cpuXYSize + xy];
+              float sumSq = 0.0f;
+              for(int c = 0; c < cpuChannels; c++) {
+                const float value = input[(n * cpuChannels + c) * cpuXYSize + xy] * maskValue;
+                sumSq += value * value;
+              }
+              rms[xy] = 1.0f / sqrtf(sumSq / cpuChannels + 1e-6f);
+            }
+            for(int c = 0; c < cpuChannels; c++)
+              for(int xy = 0; xy < cpuXYSize; xy++)
+                cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms[xy] * gamma[c] + beta[c]) *
+                  mask[n * cpuXYSize + xy]);
+          }
+          return true;
+        }
+        if(name.find("transformer_spatial_rms_norm_apply") == 0) {
+          const vector<float>& input = buffer(0);
+          const vector<float>& gamma = buffer(2);
+          const vector<float>& beta = buffer(3);
+          const vector<float>& mask = buffer(4);
+          const vector<float>& maskSum = buffer(5);
+          for(int n = 0; n < cpuBatchSize; n++) {
+            float sumSq = 0.0f;
+            for(int c = 0; c < cpuChannels; c++)
+              for(int xy = 0; xy < cpuXYSize; xy++) {
+                const float value = input[(n * cpuChannels + c) * cpuXYSize + xy] * mask[n * cpuXYSize + xy];
+                sumSq += value * value;
+              }
+            const float rms = 1.0f / sqrtf(sumSq / (maskSum[n] * cpuChannels) + 1e-6f);
+            for(int c = 0; c < cpuChannels; c++)
+              for(int xy = 0; xy < cpuXYSize; xy++)
+                cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms * gamma[c] + beta[c]) *
+                  mask[n * cpuXYSize + xy]);
+          }
+          return true;
+        }
+        error = "no CPU reference implementation for " + name;
+        return false;
+      };
+      if(!isGemm && cpuReference != nullptr) {
+        size_t firstBuffer = 0;
+        for(const Pipeline* pipeline: pipelines) {
+          if(!appendCpuReference(pipeline, firstBuffer))
+            return false;
+          firstBuffer += pipeline->bindingCount;
+        }
       }
 
       VkDescriptorPoolSize poolSize = {};
@@ -1761,7 +1989,7 @@ namespace {
 
   template<typename Tuner>
   double testAllConfigs(const TuningContext& context, VulkanTuneParams& currentConfig) {
-    vector<VulkanTuneParams> configs = Tuner::candidates(currentConfig, context.full);
+    vector<VulkanTuneParams> configs = Tuner::candidates(currentConfig, context.full, context);
     VulkanTuneParams defaults;
     configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
     dedupCandidates(configs);
@@ -1810,7 +2038,7 @@ namespace {
         string error;
         const bool measured = timer.measure(
           targets, candidate, context, plan, callsPerSecond, readback, errorProp, error,
-          referenceReadback.empty() ? &cpuReference : nullptr
+          referenceReadback.empty() && usesCpuReference(Tuner::name()) ? &cpuReference : nullptr
         );
         if(!measured) {
           logTuningFailure(
@@ -1888,6 +2116,13 @@ namespace {
     return testAllConfigs<Tuner>(context, currentConfig);
   }
 
+  vector<int> powersOfTwoUpTo(int maximum) {
+    vector<int> values;
+    for(int value = 1; value <= maximum; value *= 2)
+      values.push_back(value);
+    return values;
+  }
+
   struct XgemmDirectTuner {
     static string name() { return "xgemmDirect"; }
     static bool isValid(const VulkanTuneParams& config) { return config.xgemmDirect.isValid(); }
@@ -1896,14 +2131,26 @@ namespace {
       result.xgemmDirect = defaults.xgemmDirect;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.WGD = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{8,16}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMCD = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{8,16}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMCD = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{8,16}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMAD = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{8,16}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMBD = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.KWID = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.WGD = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMCD = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMCD = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMAD = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMBD = v; });
+      addCandidates(configs, full ? vector<int>{2,8,16} : vector<int>{2,8}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.KWID = v; });
+      addCandidates(configs, vector<int>{1}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.PADA = v; });
+      addCandidates(configs, vector<int>{1}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.PADB = v; });
+      VulkanTuneParams slightlyTunedConfig = current;
+      slightlyTunedConfig.xgemmDirect = VulkanTuneParams().xgemmDirect;
+      slightlyTunedConfig.xgemmDirect.MDIMCD = 8;
+      slightlyTunedConfig.xgemmDirect.NDIMCD = 8;
+      slightlyTunedConfig.xgemmDirect.MDIMAD = 8;
+      slightlyTunedConfig.xgemmDirect.NDIMBD = 8;
+      VulkanTuneParams slightlyTunedConfig2 = slightlyTunedConfig;
+      slightlyTunedConfig2.xgemmDirect.WGD = 16;
+      configs.insert(configs.begin(), slightlyTunedConfig2);
+      configs.insert(configs.begin(), slightlyTunedConfig);
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -1936,13 +2183,13 @@ namespace {
       result.hgemmCooperativeMatrix.SB = defaults.hgemmCooperativeMatrix.SB;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWG = v; });
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWG = v; });
-      addCandidates(configs, full ? vector<int>{16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWAVE = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWAVE = v; });
+      addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; });
+      addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWAVE = v; });
+      addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWAVE = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SA = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SB = v; });
       if(!full) {
@@ -1978,13 +2225,13 @@ namespace {
       result.hgemmCooperativeMatrixNCHW.VWN = defaults.hgemmCooperativeMatrixNCHW.VWN;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWG = v; });
       addCandidates(configs, full ? vector<int>{16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWG = v; });
-      addCandidates(configs, full ? vector<int>{16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWAVE = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWAVE = v; });
+      addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; });
+      addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWAVE = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWAVE = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.SB = v; });
       if(!full) {
         configs.erase(
@@ -2010,15 +2257,33 @@ namespace {
       result.xgemm = defaults.xgemm;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.MWG = v; });
-      addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.NWG = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.KWG = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{4,8}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMC = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{4,8}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMC = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{4,8}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMA = v; });
-      addCandidates(configs, full ? vector<int>{4,8,16,32} : vector<int>{4,8}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMB = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.MWG = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.NWG = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.KWG = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMC = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMC = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMA = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMB = v; });
+      VulkanTuneParams slightlyTunedConfig = current;
+      slightlyTunedConfig.xgemm = VulkanTuneParams().xgemm;
+      slightlyTunedConfig.xgemm.MDIMC = 8;
+      slightlyTunedConfig.xgemm.NDIMC = 8;
+      slightlyTunedConfig.xgemm.MDIMA = 8;
+      slightlyTunedConfig.xgemm.NDIMB = 8;
+      VulkanTuneParams slightlyTunedConfig2 = slightlyTunedConfig;
+      slightlyTunedConfig2.xgemm.MWG = 16;
+      slightlyTunedConfig2.xgemm.NWG = 16;
+      slightlyTunedConfig2.xgemm.KWG = 16;
+      configs.insert(configs.begin(), slightlyTunedConfig2);
+      configs.insert(configs.begin(), slightlyTunedConfig);
+      if(!full) {
+        configs.erase(
+          remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.xgemm.isSimple(); }),
+          configs.end()
+        );
+      }
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -2037,7 +2302,7 @@ namespace {
       result.xgemm16 = defaults.xgemm16;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.MWG = v; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.NWG = v; });
@@ -2048,6 +2313,7 @@ namespace {
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMB = v; });
 
       VulkanTuneParams slightlyTunedConfig = current;
+      slightlyTunedConfig.xgemm16 = VulkanTuneParams().xgemm16;
       slightlyTunedConfig.xgemm16.MDIMC = 8;
       slightlyTunedConfig.xgemm16.NDIMC = 8;
       slightlyTunedConfig.xgemm16.MDIMA = 8;
@@ -2075,54 +2341,70 @@ namespace {
     }
   };
 
-  template<int ConvSize, uint32_t OutTileSize>
+  template<int ConvSize, uint32_t OutTileSize, bool InputTransform>
   struct ConvTuner {
-    static string name() { return ConvSize == 3 ? "conv3x3" : "conv5x5"; }
+    static string name() {
+      return string(ConvSize == 3 ? "conv3x3" : "conv5x5") +
+        (InputTransform ? "InputTransform" : "OutputTransform");
+    }
     static ConvTuneParams& params(VulkanTuneParams& config) { return ConvSize == 3 ? config.conv3x3 : config.conv5x5; }
     static const ConvTuneParams& params(const VulkanTuneParams& config) { return ConvSize == 3 ? config.conv3x3 : config.conv5x5; }
     static bool isValid(const VulkanTuneParams& config) { return params(config).isValid(OutTileSize); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
-      params(result) = params(defaults);
+      if(InputTransform) {
+        params(result).inputTransformLocalXSize = params(defaults).inputTransformLocalXSize;
+        params(result).inputTransformLocalYSize = params(defaults).inputTransformLocalYSize;
+      }
+      else {
+        params(result).outputTransformLocalXSize = params(defaults).outputTransformLocalXSize;
+        params(result).outputTransformLocalYSize = params(defaults).outputTransformLocalYSize;
+        params(result).outputTransformLocalZSize = params(defaults).outputTransformLocalZSize;
+      }
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{2,4,8}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalXSize = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalYSize = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{4,8}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalXSize = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalYSize = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalZSize = v; });
+      if(InputTransform) {
+        addCandidates(configs, vector<int>{1,2,4,8,16,32,64,128}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalXSize = v; });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,8,16,32}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalYSize = v; });
+      }
+      else {
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,8,16,32}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalXSize = v; });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,16,32}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalYSize = v; });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalZSize = v; });
+      }
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      Pipeline& input = ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5;
-      Pipeline& output = ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5;
-      VkResult result = pipelines.createWinogradInputTransform(input, params(config), ConvSize, config.vulkan);
-      if(result != VK_SUCCESS) return result;
-      input.name += ConvSize == 3 ? "_3x3" : "_5x5";
-      result = pipelines.createWinogradOutputTransform(output, params(config), ConvSize, config.vulkan);
+      Pipeline& pipeline = InputTransform
+        ? (ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5)
+        : (ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5);
+      VkResult result = InputTransform
+        ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan)
+        : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan);
       if(result == VK_SUCCESS) {
-        output.name += ConvSize == 3 ? "_3x3" : "_5x5";
-        targets.push_back(&input);
-        targets.push_back(&output);
+        pipeline.name += ConvSize == 3 ? "_3x3" : "_5x5";
+        targets.push_back(&pipeline);
       }
       return result;
     }
   };
 
-  struct Conv3x3Tuner : ConvTuner<3,4> {};
-  struct Conv5x5Tuner : ConvTuner<5,2> {};
+  struct Conv3x3InputTuner : ConvTuner<3,4,true> {};
+  struct Conv3x3OutputTuner : ConvTuner<3,4,false> {};
+  struct Conv5x5InputTuner : ConvTuner<5,2,true> {};
+  struct Conv5x5OutputTuner : ConvTuner<5,2,false> {};
 
   struct GPoolTuner {
     static string name() { return "gPool"; }
     static bool isValid(const VulkanTuneParams& config) { return config.gPool.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.gPool = defaults.gPool; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.gPool.XYSTRIDE = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.gPool.CHANNELSTRIDE = v; });
-      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.gPool.BATCHSTRIDE = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,8,16,32}, [](VulkanTuneParams& p, int v) { p.gPool.XYSTRIDE = v; });
+      addCandidates(configs, powersOfTwoUpTo(std::min(full ? 64 : 32, std::max(1, context.modelInfo.gpoolNumChannels))), [](VulkanTuneParams& p, int v) { p.gPool.CHANNELSTRIDE = v; });
+      addCandidates(configs, powersOfTwoUpTo(std::min(4, std::max(1, context.batchSize))), [](VulkanTuneParams& p, int v) { p.gPool.BATCHSTRIDE = v; });
       return configs;
     }
     static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -2196,9 +2478,9 @@ namespace {
     static string name() { return "pointwise"; }
     static bool isValid(const VulkanTuneParams& config) { return config.pointwise.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.pointwise = defaults.pointwise; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8}, [](VulkanTuneParams& p, int v) { p.pointwise.ELTS_PER_THREAD = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { p.pointwise.ELTS_PER_THREAD = v; });
       addCandidates(configs, full ? vector<int>{32,64,128,256,512} : vector<int>{32,64,128,256}, [](VulkanTuneParams& p, int v) { p.pointwise.LOCAL_SIZE = v; });
       return configs;
     }
@@ -2206,7 +2488,8 @@ namespace {
       VkResult result = pipelines.createAddPointWise(pipelines.addPointWise, config.pointwise, config.vulkan);
       if(result != VK_SUCCESS) return result;
       targets.push_back(&pipelines.addPointWise);
-      if(context.modelInfo.transformerFFNChannels > 0) {
+      if(context.modelInfo.transformerFFNChannels > 0 &&
+         context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0) {
         result = pipelines.createTransformerSwiGLU(pipelines.transformerSwiGLU, config.pointwise, config.vulkan);
         if(result == VK_SUCCESS) targets.push_back(&pipelines.transformerSwiGLU);
       }
@@ -2218,7 +2501,7 @@ namespace {
     static string name() { return "addChannelBiases"; }
     static bool isValid(const VulkanTuneParams& config) { return config.addChannelBiases.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.addChannelBiases = defaults.addChannelBiases; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.addChannelBiases.XY_ELTS_PER_THREAD = v; });
       addCandidates(configs, vector<int>{1,2,4,8}, [](VulkanTuneParams& p, int v) { p.addChannelBiases.NC_ELTS_PER_THREAD = v; });
@@ -2235,14 +2518,12 @@ namespace {
     static string name() { return "transformerAttention"; }
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.transformer = defaults.transformer; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
-      VulkanTuneParams naive = current;
-      naive.transformer.USE_TILED_ATTN = 0;
-      addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; p.transformer.USE_TILED_ATTN = 1; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
-      configs.push_back(naive);
+      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.transformer.USE_TILED_ATTN = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{16,32,64,128,256}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
       return configs;
     }
     static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -2265,10 +2546,10 @@ namespace {
     static string name() { return "transformerRMSNorm"; }
     static bool isValid(const VulkanTuneParams& config) { return config.rmsNorm.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.rmsNorm = defaults.rmsNorm; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, full ? vector<int>{32,64,128,256,512} : vector<int>{32,64,128,256}, [](VulkanTuneParams& p, int v) { p.rmsNorm.WG_C_SIZE = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8}, [](VulkanTuneParams& p, int v) { p.rmsNorm.WG_XY_SIZE = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { p.rmsNorm.WG_XY_SIZE = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8,16} : vector<int>{1,2,4,8}, [](VulkanTuneParams& p, int v) { p.rmsNorm.C_PER_THREAD = v; });
       return configs;
     }
@@ -2285,7 +2566,7 @@ namespace {
     static string name() { return "spatialRMSNorm"; }
     static bool isValid(const VulkanTuneParams& config) { return config.spatialRMSNorm.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.spatialRMSNorm = defaults.spatialRMSNorm; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       addCandidates(configs, full ? vector<int>{32,64,128,256,512,1024} : vector<int>{32,64,128,256,512}, [](VulkanTuneParams& p, int v) { p.spatialRMSNorm.TILE_SIZE = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { p.spatialRMSNorm.APPLY_ELTS_PER_THREAD = v; });
@@ -2306,68 +2587,19 @@ namespace {
     }
   };
 
-  void runOperationTuners(
-    const TuningContext& context,
-    VulkanTuneParams& config,
-    bool tuneGemm,
-    double& xgemmDirectBaselineCallsPerSecond,
-    double& xgemmBaselineCallsPerSecond
-  ) {
-    config.vulkan.shouldUseCooperativeMatrix = false;
-    config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
-    if(tuneGemm) {
-      xgemmDirectBaselineCallsPerSecond = runTuner<XgemmDirectTuner>(context, config);
-      xgemmBaselineCallsPerSecond = runTuner<XgemmTuner>(context, config);
-    }
-    if(config.vulkan.canUseCooperativeMatrix &&
-       config.vulkan.canUseFP16Storage &&
-       config.vulkan.canUseFP16Compute &&
-       config.vulkan.shouldUseFP16Storage) {
-      const double hgemmCallsPerSecond = runTuner<HgemmCooperativeMatrixTunerImpl>(context, config);
-      const bool hgemmIsFastEnough =
-        isfinite(xgemmBaselineCallsPerSecond) && isfinite(hgemmCallsPerSecond) &&
-        xgemmBaselineCallsPerSecond > 0.0 && hgemmCallsPerSecond > 0.0 &&
-        hgemmCallsPerSecond / xgemmBaselineCallsPerSecond >= 0.90;
-      config.vulkan.shouldUseCooperativeMatrix = hgemmIsFastEnough;
-      if(context.logger != nullptr) {
-        context.logger->write(
-          "Vulkan hgemmCooperativeMatrix baseline comparison: xgemm=" +
-          Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
-          " calls/s, hgemmCooperativeMatrix=" + Global::strprintf("%.6g", hgemmCallsPerSecond) +
-          " calls/s, required_ratio=0.90, selected=" + (hgemmIsFastEnough ? "true" : "false")
-        );
-      }
-    }
-    if(config.vulkan.shouldUseCooperativeMatrix &&
-       config.vulkan.canUseCooperativeMatrix &&
-       config.vulkan.canUseFP16Storage &&
-       config.vulkan.canUseFP16Compute &&
-       config.vulkan.shouldUseFP16Storage) {
-      const double hgemmCallsPerSecond = runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, config);
-      const bool hgemmIsFastEnough =
-        isfinite(xgemmDirectBaselineCallsPerSecond) && isfinite(hgemmCallsPerSecond) &&
-        xgemmDirectBaselineCallsPerSecond > 0.0 && hgemmCallsPerSecond > 0.0 &&
-        hgemmCallsPerSecond / xgemmDirectBaselineCallsPerSecond >= 1.20;
-      config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = hgemmIsFastEnough;
-      if(context.logger != nullptr) {
-        context.logger->write(
-          "Vulkan hgemmCooperativeMatrixNCHW baseline comparison: xgemmDirect=" +
-          Global::strprintf("%.6g", xgemmDirectBaselineCallsPerSecond) +
-          " calls/s, hgemmCooperativeMatrixNCHW=" + Global::strprintf("%.6g", hgemmCallsPerSecond) +
-          " calls/s, required_ratio=1.20, selected=" + (hgemmIsFastEnough ? "true" : "false")
-        );
-      }
-    }
-    runTuner<Conv3x3Tuner>(context, config);
-    runTuner<Conv5x5Tuner>(context, config);
+  void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
+    runTuner<Conv3x3InputTuner>(context, config);
+    runTuner<Conv3x3OutputTuner>(context, config);
+    runTuner<Conv5x5InputTuner>(context, config);
+    runTuner<Conv5x5OutputTuner>(context, config);
     runTuner<GPoolTuner>(context, config);
     runTuner<PointwiseTuner>(context, config);
     runTuner<AddChannelBiasesTuner>(context, config);
-    if(context.modelInfo.transformerHeadDim > 0) {
+    if(context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0) {
       runTuner<TransformerTuner>(context, config);
       runTuner<TransformerRMSNormTuner>(context, config);
+      runTuner<SpatialRMSNormTuner>(context, config);
     }
-    runTuner<SpatialRMSNormTuner>(context, config);
   }
 
   bool tuneXgemm16(
@@ -2397,26 +2629,115 @@ namespace {
       return false;
     }
 
-    config.xgemm16 = tunedConfig.xgemm16;
-    config.vulkan.canUseFP16Compute = true;
-    const bool computeIsFastEnough = fp16CallsPerSecond >= fp32CallsPerSecond * 1.20;
+    const bool computeIsFastEnough = VulkanTuner::isFastEnough(
+      fp16CallsPerSecond, fp32CallsPerSecond, VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO
+    );
     if(context.logger != nullptr) {
       context.logger->write(
         "Vulkan xgemm16 comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
         " calls/s, p16s16=" + Global::strprintf("%.6g", fp16CallsPerSecond) +
-        " calls/s, required_ratio=1.20"
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO)
       );
     }
     if(!computeIsFastEnough) {
       if(context.logger != nullptr)
-        context.logger->write("Vulkan xgemm16 was not significantly faster, not enabling FP16 compute");
-      return true;
+        context.logger->write("Vulkan xgemm16 did not reach the FP32 baseline threshold, not enabling FP16 compute");
+      return false;
     }
+    config.xgemm16 = tunedConfig.xgemm16;
     config.vulkan.shouldUseFP16Storage = true;
     config.vulkan.shouldUseFP16Compute = true;
     if(context.logger != nullptr)
       context.logger->write("Enabling Vulkan FP16 compute due to better xgemm16 performance");
     return true;
+  }
+
+  bool tuneXgemmStorage(
+    const TuningContext& context,
+    VulkanTuneParams& config,
+    double fp32CallsPerSecond
+  ) {
+    if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute ||
+       !isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0)
+      return false;
+
+    VulkanTuneParams tunedConfig = config;
+    tunedConfig.vulkan.shouldUseFP16Storage = true;
+    tunedConfig.vulkan.shouldUseFP16Compute = false;
+    const double fp16StorageCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
+    const bool storageIsFastEnough = VulkanTuner::isFastEnough(
+      fp16StorageCallsPerSecond, fp32CallsPerSecond, VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO
+    );
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan xgemm storage comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
+        " calls/s, p16s32=" + Global::strprintf("%.6g", fp16StorageCallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (storageIsFastEnough ? "true" : "false")
+      );
+    }
+    if(!storageIsFastEnough)
+      return false;
+    config.xgemm = tunedConfig.xgemm;
+    config.vulkan.shouldUseFP16Storage = true;
+    return true;
+  }
+
+  void tuneCooperativeMatrices(
+    const TuningContext& context,
+    VulkanTuneParams& config,
+    double xgemmDirectBaselineCallsPerSecond,
+    double xgemmBaselineCallsPerSecond
+  ) {
+    if(!config.vulkan.canUseCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
+       !config.vulkan.canUseFP16Compute)
+      return;
+
+    VulkanTuneParams cooperativeConfig = config;
+    cooperativeConfig.vulkan.shouldUseFP16Storage = true;
+    cooperativeConfig.vulkan.shouldUseFP16Compute = false;
+    const double hgemmCallsPerSecond = runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig);
+    const bool useHgemm = VulkanTuner::isFastEnough(
+      hgemmCallsPerSecond, xgemmBaselineCallsPerSecond, VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
+    );
+    if(useHgemm) {
+      config.hgemmCooperativeMatrix = cooperativeConfig.hgemmCooperativeMatrix;
+      config.vulkan.shouldUseCooperativeMatrix = true;
+    }
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan hgemmCooperativeMatrix baseline comparison: xgemm=" +
+        Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
+        " calls/s, hgemmCooperativeMatrix=" + Global::strprintf("%.6g", hgemmCallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (useHgemm ? "true" : "false")
+      );
+    }
+
+    cooperativeConfig = config;
+    cooperativeConfig.vulkan.shouldUseFP16Storage = true;
+    cooperativeConfig.vulkan.shouldUseFP16Compute = false;
+    const double hgemmNCHWCallsPerSecond = runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, cooperativeConfig);
+    const bool useHgemmNCHW = VulkanTuner::isFastEnough(
+      hgemmNCHWCallsPerSecond, xgemmDirectBaselineCallsPerSecond,
+      VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
+    );
+    if(useHgemmNCHW) {
+      config.hgemmCooperativeMatrixNCHW = cooperativeConfig.hgemmCooperativeMatrixNCHW;
+      config.vulkan.shouldUseCooperativeMatrix = true;
+      config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
+    }
+    if(config.vulkan.shouldUseCooperativeMatrix)
+      config.vulkan.shouldUseFP16Storage = true;
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan hgemmCooperativeMatrixNCHW baseline comparison: xgemmDirect=" +
+        Global::strprintf("%.6g", xgemmDirectBaselineCallsPerSecond) +
+        " calls/s, hgemmCooperativeMatrixNCHW=" + Global::strprintf("%.6g", hgemmNCHWCallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (useHgemmNCHW ? "true" : "false")
+      );
+    }
   }
 }
 
@@ -2449,6 +2770,14 @@ void VulkanTuner::tune(
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger};
+  if(logger != nullptr) {
+    logger->write(
+      "Vulkan tuning capabilities: fp16Storage=" + string(tunedConfig.vulkan.canUseFP16Storage ? "true" : "false") +
+      ", fp16Compute=" + string(tunedConfig.vulkan.canUseFP16Compute ? "true" : "false") +
+      ", subgroup=" + string(tunedConfig.vulkan.canUseSubgroup ? "true" : "false") +
+      ", cooperativeMatrix=" + string(tunedConfig.vulkan.canUseCooperativeMatrix ? "true" : "false")
+    );
+  }
   if(tunedConfig.vulkan.canUseCooperativeMatrix &&
      !HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix)) {
     tunedConfig.vulkan.canUseCooperativeMatrix = false;
@@ -2464,14 +2793,20 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.shouldUseFP16Storage = false;
   tunedConfig.vulkan.shouldUseFP16Compute = false;
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
+  tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
+  tunedConfig.vulkan.shouldUseSubgroup = false;
   double xgemmDirectBaselineCallsPerSecond = 0.0;
   double xgemmBaselineCallsPerSecond = 0.0;
-  runOperationTuners(
-    context, tunedConfig, true,
-    xgemmDirectBaselineCallsPerSecond, xgemmBaselineCallsPerSecond
-  );
+  xgemmDirectBaselineCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
+  xgemmBaselineCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
   tunedConfig.xgemm16 = tunedConfig.xgemm;
   tuneXgemm16(context, tunedConfig, xgemmBaselineCallsPerSecond);
+  if(!tunedConfig.vulkan.shouldUseFP16Compute)
+    tuneXgemmStorage(context, tunedConfig, xgemmBaselineCallsPerSecond);
+  tuneCooperativeMatrices(
+    context, tunedConfig, xgemmDirectBaselineCallsPerSecond, xgemmBaselineCallsPerSecond
+  );
+  runNonGemmTuners(context, tunedConfig);
 }
 
 VulkanTuneParams VulkanTuner::loadOrCreate(

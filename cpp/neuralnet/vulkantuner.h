@@ -11,8 +11,14 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 3;
+  constexpr int TUNER_VERSION = 4;
   constexpr int DEFAULT_BATCH_SIZE = 4;
+
+  // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
+  constexpr double FP16_COMPUTE_MIN_THROUGHPUT_RATIO = 0.95;
+  constexpr double FP16_STORAGE_MIN_THROUGHPUT_RATIO = 0.95;
+  constexpr double COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO = 0.90;
+  constexpr double COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO = 0.90;
 
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);

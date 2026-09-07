@@ -565,7 +565,7 @@ struct MatmulLayer {
     assert(cb != VK_NULL_HANDLE);
     doBatchedXGEMMDirectFP32_MK_NK_MN(cb, batchSize, input, output);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
   }
 
 private:
@@ -599,8 +599,8 @@ private:
       1, &res
     );
     SHADER_PROFILE_END("BATCHED_XGEMM_DIRECT_FP32", cb);
-    // vk_helper::barrierCommandBufferForBuffer(cb, output);
-    vk_helper::barrierCommandBuffer(cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    // vk_helper::barrierCommandBuffer(cb);
   }
 };
 
@@ -1002,72 +1002,6 @@ struct ConvLayer {
     return M % params.MWG == 0 && N % params.NWG == 0 && K % params.KWG == 0;
   }
 
-  // void doConv2DTiledFp32(
-  //   VkCommandBuffer& cb,
-  //   int batchSize,
-  //   VulkanBuffer* input,
-  //   VulkanBuffer* output
-  // ) {
-  //   // Implement convolution logic here if needed
-  //   VkResult res;
-  //   uint32_t gpuId = handle->vulkanDevice->info.deviceId;
-  //   vk_shader::ComputePipelines* pipelines = this->handle->context->pipelinesPerDev.at(gpuId);
-
-  //   if ( descriptorSet == VK_NULL_HANDLE ) {
-  //     descriptorSet = vk_helper::allocateDescriptorSet(
-  //       handle->vulkanDevice,
-  //       pipelines->conv2dFp32.descriptorSetLayout,
-  //       &res
-  //     );
-  //     CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
-  //   }
-  //   // update descriptor set
-  //   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, filterBuf),
-  //     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
-  //   };
-  //   vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-
-  //   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->conv2dFp32.pipeline);
-  //   vkCmdBindDescriptorSets(
-  //     cb,
-  //     VK_PIPELINE_BIND_POINT_COMPUTE,
-  //     pipelines->conv2dFp32.layout,
-  //     0,
-  //     1,
-  //     &descriptorSet,
-  //     0,
-  //     nullptr
-  //   );
-  //   auto pushConstants = Conv2DPushConstantParams();
-  //   pushConstants.batchSize = static_cast<uint32_t>(batchSize);
-  //   pushConstants.inChannels = static_cast<uint32_t>(inChannels);
-  //   pushConstants.outChannels = static_cast<uint32_t>(outChannels);
-  //   pushConstants.filterH = static_cast<uint32_t>(convYSize);
-  //   pushConstants.filterW = static_cast<uint32_t>(convXSize);
-  //   pushConstants.nnXLen = static_cast<uint32_t>(nnXLen);
-  //   pushConstants.nnYLen = static_cast<uint32_t>(nnYLen);
-  //   vkCmdPushConstants(
-  //     cb,
-  //     pipelines->conv2dFp32.layout,
-  //     VK_SHADER_STAGE_COMPUTE_BIT,
-  //     0,
-  //     sizeof(Conv2DPushConstantParams),
-  //     &pushConstants
-  //   );
-
-  //   uint32_t wgCountX = (pushConstants.nnXLen + pipelines->conv2dFp32.localSizeX - 1u) / pipelines->conv2dFp32.localSizeX;
-  //   uint32_t wgCountY = (pushConstants.nnYLen + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
-  //   uint32_t ocGroupsPerBatch = (pushConstants.outChannels + pipelines->conv2dFp32.localSizeY - 1u) / pipelines->conv2dFp32.localSizeY;
-  //   uint32_t wgCountZ = pushConstants.batchSize * ocGroupsPerBatch;
-  //   SHADER_PROFILE_START("CONV2D_TILED_FP32", cb);
-  //   vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-  //   SHADER_PROFILE_END("CONV2D_TILED_FP32", cb);
-  //   vk_helper::barrierCommandBufferForBuffer(cb, output);
-  //   vk_helper::barrierCommandBuffer(cb);
-  // }
-
   void doConv1x1AsMatmulFp32(
     VkCommandBuffer& cb,
     int batchSize,
@@ -1127,7 +1061,7 @@ struct ConvLayer {
       static_cast<uint32_t>(batchSize), &res
     );
     vk_helper::barrierCommandBufferForBuffer(cb, output);
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
   }
 
   void doWinogradConvolutionBnActMask(
@@ -1178,6 +1112,11 @@ struct ConvLayer {
                         : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5_bnact_mish_scale8
                         : throw StringError("Unsupported conv size for fused Winograd convolution in layer " + name);
         break;
+      case ACTIVATION_SILU:
+        winogradInputTransformBnActMaskPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradInputTransform3x3_bnact_silu
+                        : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5_bnact_silu
+                        : throw StringError("Unsupported conv size for fused Winograd convolution in layer " + name);
+
         //TODO: winogradInputTransformBNAct with SILU activation required.
       default:
         throw StringError("Unsupported activation for fused Winograd convolution in layer " + name);
@@ -1233,7 +1172,7 @@ struct ConvLayer {
       SHADER_PROFILE_END("WINOGRAD_INPUT_TRANSFORM_BN_ACT_MASK", cb);
     }
 
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace1);
     // Then xgemm and winograd output transform same as before
     {
@@ -1263,7 +1202,7 @@ struct ConvLayer {
     }
 
     // Barrier before output transform
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
     // Output transform is the same as before, since the fused bn+act is only on input transform side and doesn't change the data layout for xgemm
     {
@@ -1359,7 +1298,7 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("WINOGRAD_INPUT_TRANSFORM", cb);
     }
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace1);
 
     uint32_t numTilesTotal = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, handle->getXGemmMPaddingMult());
@@ -1385,7 +1324,7 @@ struct ConvLayer {
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
     }
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
-    vk_helper::barrierCommandBuffer(cb);
+    // vk_helper::barrierCommandBuffer(cb);
 
     {
       SHADER_PROFILE_START("WINOGRAD_OUTPUT_TRANSFORM", cb);
@@ -1988,8 +1927,8 @@ void performAddPointWise(
   SHADER_PROFILE_START("ADD_POINTWISE_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("ADD_POINTWISE_FP32", commandBuffer);
-  vk_helper::barrierCommandBuffer(commandBuffer);
-    vk_helper::barrierCommandBufferForBuffer(commandBuffer, acc);
+  // vk_helper::barrierCommandBuffer(commandBuffer);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, acc);
   if ( begin ) {
     vk_helper::endCommandBuffer(commandBuffer);
   }
@@ -2076,7 +2015,7 @@ void performGpoolMask(
   SHADER_PROFILE_START("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("GLOBAL_POOLING_CHANNELS_FP32", commandBuffer);
-  vk_helper::barrierCommandBuffer(commandBuffer);
+  // vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, mask);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat); 
@@ -2168,7 +2107,7 @@ void performValueHeadPool(
   SHADER_PROFILE_START("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
   SHADER_PROFILE_END("VALUE_HEAD_POOLING_CHANNELS_FP32", commandBuffer);
-  vk_helper::barrierCommandBuffer(commandBuffer);
+  // vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
@@ -4386,7 +4325,7 @@ void computeMaskSums(
   vkCmdPushConstants(commandBuffer, targetPipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SumChannelsParams), &pushConstants);
 
   vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
-  vk_helper::barrierCommandBuffer(commandBuffer);
+  // vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
 
   if ( begin ) {

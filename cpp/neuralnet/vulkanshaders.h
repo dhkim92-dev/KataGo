@@ -1483,10 +1483,12 @@ struct LocalDimHash {
     Pipeline winogradInputTransform3x3_bnact_relu;
     Pipeline winogradInputTransform3x3_bnact_mish;
     Pipeline winogradInputTransform3x3_bnact_mish_scale8;
+    Pipeline winogradInputTransform3x3_bnact_silu;
     Pipeline winogradInputTransform5x5_bnact_identity;
     Pipeline winogradInputTransform5x5_bnact_relu;
     Pipeline winogradInputTransform5x5_bnact_mish;
     Pipeline winogradInputTransform5x5_bnact_mish_scale8;
+    Pipeline winogradInputTransform5x5_bnact_silu;
 
     Pipeline winogradOutputTransform3x3;
     Pipeline winogradOutputTransform5x5;
