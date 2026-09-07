@@ -1274,7 +1274,7 @@ struct LocalDimHash {
       uint32_t outputTransformLocalYSize;
       uint32_t outputTransformLocalZSize;
 
-      bool isValid(uint32_t expectedOutTileSize) const;
+      bool isValid(uint32_t convSize) const;
     };
 
     struct XgemmTuneParams {

@@ -367,16 +367,16 @@ namespace vk_shader {
       {&winogradInputTransform3x3_bnact_identity, ACTIVATION_IDENTITY},
       {&winogradInputTransform3x3_bnact_relu, ACTIVATION_RELU},
       {&winogradInputTransform3x3_bnact_mish, ACTIVATION_MISH},
-      {&winogradInputTransform3x3_bnact_silu, ACTIVATION_SILU},
       {&winogradInputTransform3x3_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
+      {&winogradInputTransform3x3_bnact_silu, ACTIVATION_SILU},
       {&winogradInputTransform5x5_bnact_identity, ACTIVATION_IDENTITY},
       {&winogradInputTransform5x5_bnact_relu, ACTIVATION_RELU},
       {&winogradInputTransform5x5_bnact_mish, ACTIVATION_MISH},
       {&winogradInputTransform5x5_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
       {&winogradInputTransform5x5_bnact_silu, ACTIVATION_SILU},
     };
-    for(int i = 0; i < 8; i++) {
-      const int convSize = i < 4 ? 3 : 5;
+    for(int i = 0; i < 10; i++) {
+      const int convSize = i < 5 ? 3 : 5;
       const ConvTuneParams& convParams = convSize == 3 ? tuneParams.conv3x3 : tuneParams.conv5x5;
       if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }
@@ -438,10 +438,12 @@ namespace vk_shader {
     destroyPipeline(winogradInputTransform3x3_bnact_relu);
     destroyPipeline(winogradInputTransform3x3_bnact_mish);
     destroyPipeline(winogradInputTransform3x3_bnact_mish_scale8);
+    destroyPipeline(winogradInputTransform3x3_bnact_silu);
     destroyPipeline(winogradInputTransform5x5_bnact_identity);
     destroyPipeline(winogradInputTransform5x5_bnact_relu);
     destroyPipeline(winogradInputTransform5x5_bnact_mish);
     destroyPipeline(winogradInputTransform5x5_bnact_mish_scale8);
+    destroyPipeline(winogradInputTransform5x5_bnact_silu);
     destroyPipeline(winogradOutputTransform3x3);
     destroyPipeline(winogradOutputTransform5x5);
     destroyPipeline(xgemmDirectBatchedTT);

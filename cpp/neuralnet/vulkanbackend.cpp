@@ -1116,8 +1116,7 @@ struct ConvLayer {
         winogradInputTransformBnActMaskPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradInputTransform3x3_bnact_silu
                         : (convXSize == 5 && convYSize == 5) ? pipelines->winogradInputTransform5x5_bnact_silu
                         : throw StringError("Unsupported conv size for fused Winograd convolution in layer " + name);
-
-        //TODO: winogradInputTransformBNAct with SILU activation required.
+        break;
       default:
         throw StringError("Unsupported activation for fused Winograd convolution in layer " + name);
     }
@@ -1669,16 +1668,14 @@ struct NormActConv {
     VulkanBuffer* convWorkspace = nullptr,
     VulkanBuffer* convWorkspace2 = nullptr
   ) {
-    // NOTE: fused kernel disabled, performance issue. maybe porting something wrong.
-    // if ( conv.isBNActFusedPossible() ) {
-      // conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
-      // vk_helper::barrierCommandBufferForBuffer(cb, output);
-    // } else {
+    if ( conv.isBNActFusedPossible() ) {
+      conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
+    } else {
       bn.forward(cb, batchSize, input, mask, inputScratchOrInput);
       vk_helper::barrierCommandBufferForBuffer(cb, inputScratchOrInput);
       conv.forward(cb, batchSize, inputScratchOrInput, output, convWorkspace, convWorkspace2);
-    // }
-      vk_helper::barrierCommandBufferForBuffer(cb, output);
+    }
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 
 

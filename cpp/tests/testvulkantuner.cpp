@@ -145,6 +145,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
 
   VulkanTuneParams params;
+  params.conv3x3.inTileXSize = 4;
+  params.conv3x3.inTileYSize = 4;
+  params.conv3x3.outTileXSize = 2;
+  params.conv3x3.outTileYSize = 2;
   params.conv3x3.inputTransformLocalXSize = 64;
   params.conv3x3.inputTransformLocalYSize = 4;
   params.conv5x5.outputTransformLocalXSize = 16;
@@ -185,6 +189,9 @@ void Tests::runVulkanTunerPersistenceTests() {
 
   VulkanTuneParams invalid = params;
   invalid.xgemm.MDIMC = 0;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.conv3x3.inTileXSize = 5;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.MDIMAD = 16;

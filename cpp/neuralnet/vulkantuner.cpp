@@ -139,8 +139,12 @@ bool GPoolTuneParams::isValid() const {
   return static_cast<uint64_t>(XYSTRIDE) * CHANNELSTRIDE * BATCHSTRIDE <= 1024;
 }
 
-bool ConvTuneParams::isValid(uint32_t expectedOutTileSize) const {
-  if(inTileXSize != 6 || inTileYSize != 6 || outTileXSize != expectedOutTileSize || outTileYSize != expectedOutTileSize)
+bool ConvTuneParams::isValid(uint32_t convSize) const {
+  const bool supportedTileSize = convSize == 3
+    ? ((inTileXSize == 4 && inTileYSize == 4 && outTileXSize == 2 && outTileYSize == 2) ||
+       (inTileXSize == 6 && inTileYSize == 6 && outTileXSize == 4 && outTileYSize == 4))
+    : (convSize == 5 && inTileXSize == 6 && inTileYSize == 6 && outTileXSize == 2 && outTileYSize == 2);
+  if(!supportedTileSize)
     return false;
   if(inputTransformLocalXSize == 0 || inputTransformLocalYSize == 0 ||
      outputTransformLocalXSize == 0 || outputTransformLocalYSize == 0 || outputTransformLocalZSize == 0)
@@ -263,7 +267,7 @@ bool TransformerSpatialRmsNormTuneParams::isValid() const {
 
 bool VulkanTuneParams::isValid() const {
   return addChannelBiases.isValid() && pointwise.isValid() && gPool.isValid() &&
-         conv3x3.isValid(4) && conv5x5.isValid(2) && hgemmCooperativeMatrix.isValid() &&
+         conv3x3.isValid(3) && conv5x5.isValid(5) && hgemmCooperativeMatrix.isValid() &&
          hgemmCooperativeMatrixNCHW.isValid() &&
          xgemm.isValid() && xgemm16.isValid() && xgemmDirect.isValid() &&
          transformer.isValid() && rmsNorm.isValid() && spatialRMSNorm.isValid();
@@ -890,7 +894,8 @@ namespace {
 
   bool usesCpuReference(const string& tunerName) {
     return tunerName != "conv3x3InputTransform" && tunerName != "conv3x3OutputTransform" &&
-           tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform";
+           tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform" &&
+           tunerName != "winograd3x3Tile";
   }
 
   bool validateReadback(
@@ -1015,14 +1020,22 @@ namespace {
     }
     else if(
       tunerName == "conv3x3InputTransform" || tunerName == "conv3x3OutputTransform" ||
-      tunerName == "conv5x5InputTransform" || tunerName == "conv5x5OutputTransform"
+      tunerName == "conv5x5InputTransform" || tunerName == "conv5x5OutputTransform" ||
+      tunerName == "winograd3x3Tile"
     ) {
       const ConvTuneParams& conv = tunerName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
       add("inTileYSize", conv.inTileYSize);
       add("inTileXSize", conv.inTileXSize);
       add("outTileYSize", conv.outTileYSize);
       add("outTileXSize", conv.outTileXSize);
-      if(tunerName.find("Input") != string::npos) {
+      if(tunerName == "winograd3x3Tile") {
+        add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
+        add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
+        add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
+        add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
+        add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
+      }
+      else if(tunerName.find("Input") != string::npos) {
         add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
         add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
       }
@@ -1196,6 +1209,7 @@ namespace {
         context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim
       }));
       const bool isGemm = !plan.gemmCases.empty();
+      const bool isWinograd3x3Tile = plan.kernelName == "winograd3x3Tile";
       const bool directGemm = plan.kernelName == "xgemmDirect" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const bool cooperative = plan.kernelName == "hgemmCooperativeMatrix" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
@@ -1222,9 +1236,12 @@ namespace {
       const size_t maxTiles = batchSize * ((context.nnXLen + 1) / 2) * ((context.nnYLen + 1) / 2);
       const size_t paddedTiles = vk_helper::roundUpToMultiple(maxTiles, static_cast<size_t>(xgemmParams.MWG));
       const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(xgemmParams.KWG, xgemmParams.NWG)));
-      const size_t scratchElements = isGemm ? static_cast<size_t>(gemmBatch) * std::max({
+      const size_t gemmElements = static_cast<size_t>(gemmBatch) * std::max({
         static_cast<size_t>(gemmM) * gemmK, static_cast<size_t>(gemmN) * gemmK, static_cast<size_t>(gemmM) * gemmN
-      }) : std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
+      });
+      const size_t transformElements = std::max(batchSize * maxChannels * xySize, paddedTiles * paddedChannels * 36);
+      const size_t scratchElements = isGemm ? gemmElements :
+        isWinograd3x3Tile ? std::max(gemmElements, transformElements) : transformElements;
       const size_t scratchBytes = vk_helper::roundUpToMultiple(std::max<size_t>(scratchElements, 4), size_t(4)) * sizeof(float);
       vector<VulkanBuffer*> tuningBuffers;
       VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -1915,6 +1932,11 @@ namespace {
       }
       callsPerSecond = weightCounted / weightedTimeTaken;
 
+      if(isWinograd3x3Tile) {
+        cleanup();
+        return true;
+      }
+
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
       readback.clear();
@@ -2341,7 +2363,44 @@ namespace {
     }
   };
 
-  template<int ConvSize, uint32_t OutTileSize, bool InputTransform>
+  struct Winograd3x3TileTuner {
+    static string name() { return "winograd3x3Tile"; }
+    static bool isValid(const VulkanTuneParams& config) { return config.conv3x3.isValid(3); }
+    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams&) { return current; }
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext&) {
+      vector<VulkanTuneParams> configs;
+      for(int outTileSize: {2,4}) {
+        VulkanTuneParams candidate = current;
+        candidate.conv3x3.inTileXSize = outTileSize + 2;
+        candidate.conv3x3.inTileYSize = outTileSize + 2;
+        candidate.conv3x3.outTileXSize = outTileSize;
+        candidate.conv3x3.outTileYSize = outTileSize;
+        configs.push_back(candidate);
+      }
+      return configs;
+    }
+    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+      VkResult result = pipelines.createWinogradInputTransform(
+        pipelines.winogradInputTransform3x3, config.conv3x3, 3, config.vulkan
+      );
+      if(result != VK_SUCCESS) return result;
+      result = pipelines.createXgemmBatched(
+        pipelines.xgemmBatchedFp32, config.xgemm, config.xgemm16, config.vulkan
+      );
+      if(result != VK_SUCCESS) return result;
+      result = pipelines.createWinogradOutputTransform(
+        pipelines.winogradOutputTransform3x3, config.conv3x3, 3, config.vulkan
+      );
+      if(result == VK_SUCCESS) {
+        targets.push_back(&pipelines.winogradInputTransform3x3);
+        targets.push_back(&pipelines.xgemmBatchedFp32);
+        targets.push_back(&pipelines.winogradOutputTransform3x3);
+      }
+      return result;
+    }
+  };
+
+  template<int ConvSize, bool InputTransform>
   struct ConvTuner {
     static string name() {
       return string(ConvSize == 3 ? "conv3x3" : "conv5x5") +
@@ -2349,7 +2408,7 @@ namespace {
     }
     static ConvTuneParams& params(VulkanTuneParams& config) { return ConvSize == 3 ? config.conv3x3 : config.conv5x5; }
     static const ConvTuneParams& params(const VulkanTuneParams& config) { return ConvSize == 3 ? config.conv3x3 : config.conv5x5; }
-    static bool isValid(const VulkanTuneParams& config) { return params(config).isValid(OutTileSize); }
+    static bool isValid(const VulkanTuneParams& config) { return params(config).isValid(ConvSize); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
       if(InputTransform) {
@@ -2391,10 +2450,10 @@ namespace {
     }
   };
 
-  struct Conv3x3InputTuner : ConvTuner<3,4,true> {};
-  struct Conv3x3OutputTuner : ConvTuner<3,4,false> {};
-  struct Conv5x5InputTuner : ConvTuner<5,2,true> {};
-  struct Conv5x5OutputTuner : ConvTuner<5,2,false> {};
+  struct Conv3x3InputTuner : ConvTuner<3,true> {};
+  struct Conv3x3OutputTuner : ConvTuner<3,false> {};
+  struct Conv5x5InputTuner : ConvTuner<5,true> {};
+  struct Conv5x5OutputTuner : ConvTuner<5,false> {};
 
   struct GPoolTuner {
     static string name() { return "gPool"; }
@@ -2795,6 +2854,7 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
   tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
+  runTuner<Winograd3x3TileTuner>(context, tunedConfig);
   double xgemmDirectBaselineCallsPerSecond = 0.0;
   double xgemmBaselineCallsPerSecond = 0.0;
   xgemmDirectBaselineCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
