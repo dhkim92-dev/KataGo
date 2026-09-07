@@ -16,6 +16,7 @@
 
 #include "../core/fileutils.h"
 #include "../core/makedir.h"
+#include "../core/rand.h"
 #include "../dataio/homedata.h"
 
 using namespace std;
@@ -127,6 +128,10 @@ bool XgemmTuneParams::isValid() const {
          isMultipleOf(KWG, workgroupSize / NDIMB);
 }
 
+bool XgemmTuneParams::isSimple() const {
+  return MDIMC == MDIMA && NDIMC == NDIMB && MWG == NWG;
+}
+
 bool XgemmDirectTuneParams::isValid() const {
   if(WGD == 0 || MDIMCD == 0 || NDIMCD == 0 || MDIMAD == 0 || NDIMBD == 0 || KWID == 0)
     return false;
@@ -224,7 +229,7 @@ bool VulkanTuneParams::isValid() const {
   return addChannelBiases.isValid() && pointwise.isValid() && gPool.isValid() &&
          conv3x3.isValid(4) && conv5x5.isValid(2) && hgemmCooperativeMatrix.isValid() &&
          hgemmCooperativeMatrixNCHW.isValid() &&
-         xgemm.isValid() && xgemmDirect.isValid() &&
+         xgemm.isValid() && xgemm16.isValid() && xgemmDirect.isValid() &&
          transformer.isValid() && rmsNorm.isValid() && spatialRMSNorm.isValid();
 }
 
@@ -286,7 +291,11 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          hgemmCooperativeMatrixNCHW.VWN == other.hgemmCooperativeMatrixNCHW.VWN &&
          xgemm.MDIMC == other.xgemm.MDIMC && xgemm.NDIMC == other.xgemm.NDIMC && xgemm.MWG == other.xgemm.MWG &&
          xgemm.NWG == other.xgemm.NWG && xgemm.KWG == other.xgemm.KWG && xgemm.MDIMA == other.xgemm.MDIMA &&
-         xgemm.NDIMB == other.xgemm.NDIMB && xgemmDirect.WGD == other.xgemmDirect.WGD &&
+         xgemm.NDIMB == other.xgemm.NDIMB &&
+         xgemm16.MDIMC == other.xgemm16.MDIMC && xgemm16.NDIMC == other.xgemm16.NDIMC &&
+         xgemm16.MWG == other.xgemm16.MWG && xgemm16.NWG == other.xgemm16.NWG &&
+         xgemm16.KWG == other.xgemm16.KWG && xgemm16.MDIMA == other.xgemm16.MDIMA &&
+         xgemm16.NDIMB == other.xgemm16.NDIMB && xgemmDirect.WGD == other.xgemmDirect.WGD &&
          xgemmDirect.MDIMCD == other.xgemmDirect.MDIMCD && xgemmDirect.NDIMCD == other.xgemmDirect.NDIMCD &&
          xgemmDirect.MDIMAD == other.xgemmDirect.MDIMAD && xgemmDirect.NDIMBD == other.xgemmDirect.NDIMBD &&
          xgemmDirect.KWID == other.xgemmDirect.KWID && xgemmDirect.PADA == other.xgemmDirect.PADA &&
@@ -317,58 +326,7 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
   writeParam(out, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
   writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
-  writeParam(out, "addChannelBiases.XY_ELTS_PER_THREAD", config.addChannelBiases.XY_ELTS_PER_THREAD);
-  writeParam(out, "addChannelBiases.NC_ELTS_PER_THREAD", config.addChannelBiases.NC_ELTS_PER_THREAD);
-  writeParam(out, "pointwise.LOCAL_SIZE", config.pointwise.LOCAL_SIZE);
-  writeParam(out, "pointwise.ELTS_PER_THREAD", config.pointwise.ELTS_PER_THREAD);
-  writeParam(out, "gPool.XYSTRIDE", config.gPool.XYSTRIDE);
-  writeParam(out, "gPool.CHANNELSTRIDE", config.gPool.CHANNELSTRIDE);
-  writeParam(out, "gPool.BATCHSTRIDE", config.gPool.BATCHSTRIDE);
-#define WRITE_CONV(prefix, p) \
-  writeParam(out, prefix ".inTileYSize", p.inTileYSize); \
-  writeParam(out, prefix ".inTileXSize", p.inTileXSize); \
-  writeParam(out, prefix ".outTileYSize", p.outTileYSize); \
-  writeParam(out, prefix ".outTileXSize", p.outTileXSize); \
-  writeParam(out, prefix ".inputTransformLocalXSize", p.inputTransformLocalXSize); \
-  writeParam(out, prefix ".inputTransformLocalYSize", p.inputTransformLocalYSize); \
-  writeParam(out, prefix ".outputTransformLocalXSize", p.outputTransformLocalXSize); \
-  writeParam(out, prefix ".outputTransformLocalYSize", p.outputTransformLocalYSize); \
-  writeParam(out, prefix ".outputTransformLocalZSize", p.outputTransformLocalZSize)
-  WRITE_CONV("conv3x3", config.conv3x3);
-  WRITE_CONV("conv5x5", config.conv5x5);
-#undef WRITE_CONV
-  writeParam(out, "hgemmCooperativeMatrix.MWARP", config.hgemmCooperativeMatrix.MWARP);
-  writeParam(out, "hgemmCooperativeMatrix.NWARP", config.hgemmCooperativeMatrix.NWARP);
-  writeParam(out, "hgemmCooperativeMatrix.KDIM", config.hgemmCooperativeMatrix.KDIM);
-  writeParam(out, "hgemmCooperativeMatrix.subgroupSize", config.hgemmCooperativeMatrix.subgroupSize);
-  writeParam(out, "hgemmCooperativeMatrix.MWG", config.hgemmCooperativeMatrix.MWG);
-  writeParam(out, "hgemmCooperativeMatrix.NWG", config.hgemmCooperativeMatrix.NWG);
-  writeParam(out, "hgemmCooperativeMatrix.KWG", config.hgemmCooperativeMatrix.KWG);
-  writeParam(out, "hgemmCooperativeMatrix.MWAVE", config.hgemmCooperativeMatrix.MWAVE);
-  writeParam(out, "hgemmCooperativeMatrix.NWAVE", config.hgemmCooperativeMatrix.NWAVE);
-  writeParam(out, "hgemmCooperativeMatrix.SA", config.hgemmCooperativeMatrix.SA);
-  writeParam(out, "hgemmCooperativeMatrix.SB", config.hgemmCooperativeMatrix.SB);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.MWARP", config.hgemmCooperativeMatrixNCHW.MWARP);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.NWARP", config.hgemmCooperativeMatrixNCHW.NWARP);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.KDIM", config.hgemmCooperativeMatrixNCHW.KDIM);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.subgroupSize", config.hgemmCooperativeMatrixNCHW.subgroupSize);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.MWG", config.hgemmCooperativeMatrixNCHW.MWG);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.NWG", config.hgemmCooperativeMatrixNCHW.NWG);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.KWG", config.hgemmCooperativeMatrixNCHW.KWG);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.MWAVE", config.hgemmCooperativeMatrixNCHW.MWAVE);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.NWAVE", config.hgemmCooperativeMatrixNCHW.NWAVE);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.CType", config.hgemmCooperativeMatrixNCHW.CType);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.ResultType", config.hgemmCooperativeMatrixNCHW.ResultType);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.SB", config.hgemmCooperativeMatrixNCHW.SB);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.VWM", config.hgemmCooperativeMatrixNCHW.VWM);
-  writeParam(out, "hgemmCooperativeMatrixNCHW.VWN", config.hgemmCooperativeMatrixNCHW.VWN);
-  writeParam(out, "xgemm.MDIMC", config.xgemm.MDIMC);
-  writeParam(out, "xgemm.NDIMC", config.xgemm.NDIMC);
-  writeParam(out, "xgemm.MWG", config.xgemm.MWG);
-  writeParam(out, "xgemm.NWG", config.xgemm.NWG);
-  writeParam(out, "xgemm.KWG", config.xgemm.KWG);
-  writeParam(out, "xgemm.MDIMA", config.xgemm.MDIMA);
-  writeParam(out, "xgemm.NDIMB", config.xgemm.NDIMB);
+
   writeParam(out, "xgemmDirect.WGD", config.xgemmDirect.WGD);
   writeParam(out, "xgemmDirect.MDIMCD", config.xgemmDirect.MDIMCD);
   writeParam(out, "xgemmDirect.NDIMCD", config.xgemmDirect.NDIMCD);
@@ -377,6 +335,67 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "xgemmDirect.KWID", config.xgemmDirect.KWID);
   writeParam(out, "xgemmDirect.PADA", config.xgemmDirect.PADA);
   writeParam(out, "xgemmDirect.PADB", config.xgemmDirect.PADB);
+
+  writeParam(out, "xgemm.MWG", config.xgemm.MWG);
+  writeParam(out, "xgemm.NWG", config.xgemm.NWG);
+  writeParam(out, "xgemm.KWG", config.xgemm.KWG);
+  writeParam(out, "xgemm.MDIMC", config.xgemm.MDIMC);
+  writeParam(out, "xgemm.NDIMC", config.xgemm.NDIMC);
+  writeParam(out, "xgemm.MDIMA", config.xgemm.MDIMA);
+  writeParam(out, "xgemm.NDIMB", config.xgemm.NDIMB);
+
+  writeParam(out, "xgemm16.MWG", config.xgemm16.MWG);
+  writeParam(out, "xgemm16.NWG", config.xgemm16.NWG);
+  writeParam(out, "xgemm16.KWG", config.xgemm16.KWG);
+  writeParam(out, "xgemm16.MDIMC", config.xgemm16.MDIMC);
+  writeParam(out, "xgemm16.NDIMC", config.xgemm16.NDIMC);
+  writeParam(out, "xgemm16.MDIMA", config.xgemm16.MDIMA);
+  writeParam(out, "xgemm16.NDIMB", config.xgemm16.NDIMB);
+
+  writeParam(out, "hgemmCooperativeMatrix.MWG", config.hgemmCooperativeMatrix.MWG);
+  writeParam(out, "hgemmCooperativeMatrix.NWG", config.hgemmCooperativeMatrix.NWG);
+  writeParam(out, "hgemmCooperativeMatrix.KWG", config.hgemmCooperativeMatrix.KWG);
+  writeParam(out, "hgemmCooperativeMatrix.MWAVE", config.hgemmCooperativeMatrix.MWAVE);
+  writeParam(out, "hgemmCooperativeMatrix.NWAVE", config.hgemmCooperativeMatrix.NWAVE);
+  writeParam(out, "hgemmCooperativeMatrix.MWARP", config.hgemmCooperativeMatrix.MWARP);
+  writeParam(out, "hgemmCooperativeMatrix.NWARP", config.hgemmCooperativeMatrix.NWARP);
+  writeParam(out, "hgemmCooperativeMatrix.SA", config.hgemmCooperativeMatrix.SA);
+  writeParam(out, "hgemmCooperativeMatrix.SB", config.hgemmCooperativeMatrix.SB);
+  writeParam(out, "hgemmCooperativeMatrix.KDIM", config.hgemmCooperativeMatrix.KDIM);
+  writeParam(out, "hgemmCooperativeMatrix.subgroupSize", config.hgemmCooperativeMatrix.subgroupSize);
+
+  writeParam(out, "hgemmCooperativeMatrixNCHW.MWG", config.hgemmCooperativeMatrixNCHW.MWG);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.NWG", config.hgemmCooperativeMatrixNCHW.NWG);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.KWG", config.hgemmCooperativeMatrixNCHW.KWG);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.MWAVE", config.hgemmCooperativeMatrixNCHW.MWAVE);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.NWAVE", config.hgemmCooperativeMatrixNCHW.NWAVE);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.MWARP", config.hgemmCooperativeMatrixNCHW.MWARP);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.NWARP", config.hgemmCooperativeMatrixNCHW.NWARP);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.VWM", config.hgemmCooperativeMatrixNCHW.VWM);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.VWN", config.hgemmCooperativeMatrixNCHW.VWN);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.SB", config.hgemmCooperativeMatrixNCHW.SB);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.KDIM", config.hgemmCooperativeMatrixNCHW.KDIM);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.subgroupSize", config.hgemmCooperativeMatrixNCHW.subgroupSize);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.CType", config.hgemmCooperativeMatrixNCHW.CType);
+  writeParam(out, "hgemmCooperativeMatrixNCHW.ResultType", config.hgemmCooperativeMatrixNCHW.ResultType);
+
+#define WRITE_CONV(prefix, p) \
+  writeParam(out, prefix ".inTileXSize", p.inTileXSize); \
+  writeParam(out, prefix ".inTileYSize", p.inTileYSize); \
+  writeParam(out, prefix ".outTileXSize", p.outTileXSize); \
+  writeParam(out, prefix ".outTileYSize", p.outTileYSize); \
+  writeParam(out, prefix ".inputTransformLocalXSize", p.inputTransformLocalXSize); \
+  writeParam(out, prefix ".inputTransformLocalYSize", p.inputTransformLocalYSize); \
+  writeParam(out, prefix ".outputTransformLocalXSize", p.outputTransformLocalXSize); \
+  writeParam(out, prefix ".outputTransformLocalYSize", p.outputTransformLocalYSize); \
+  writeParam(out, prefix ".outputTransformLocalZSize", p.outputTransformLocalZSize)
+  WRITE_CONV("conv3x3", config.conv3x3);
+  WRITE_CONV("conv5x5", config.conv5x5);
+#undef WRITE_CONV
+
+  writeParam(out, "gPool.XYSTRIDE", config.gPool.XYSTRIDE);
+  writeParam(out, "gPool.CHANNELSTRIDE", config.gPool.CHANNELSTRIDE);
+  writeParam(out, "gPool.BATCHSTRIDE", config.gPool.BATCHSTRIDE);
   writeParam(out, "transformer.ATTN_BLOCK_Q", config.transformer.ATTN_BLOCK_Q);
   writeParam(out, "transformer.ATTN_BLOCK_KV", config.transformer.ATTN_BLOCK_KV);
   writeParam(out, "transformer.Q_PER_THREAD", config.transformer.Q_PER_THREAD);
@@ -384,6 +403,10 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "rmsNorm.WG_C_SIZE", config.rmsNorm.WG_C_SIZE);
   writeParam(out, "rmsNorm.WG_XY_SIZE", config.rmsNorm.WG_XY_SIZE);
   writeParam(out, "rmsNorm.C_PER_THREAD", config.rmsNorm.C_PER_THREAD);
+  writeParam(out, "pointwise.ELTS_PER_THREAD", config.pointwise.ELTS_PER_THREAD);
+  writeParam(out, "pointwise.LOCAL_SIZE", config.pointwise.LOCAL_SIZE);
+  writeParam(out, "addChannelBiases.XY_ELTS_PER_THREAD", config.addChannelBiases.XY_ELTS_PER_THREAD);
+  writeParam(out, "addChannelBiases.NC_ELTS_PER_THREAD", config.addChannelBiases.NC_ELTS_PER_THREAD);
   writeParam(out, "spatialRMSNorm.TILE_SIZE", config.spatialRMSNorm.TILE_SIZE);
   writeParam(out, "spatialRMSNorm.APPLY_ELTS_PER_THREAD", config.spatialRMSNorm.APPLY_ELTS_PER_THREAD);
   out.close();
@@ -414,7 +437,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 82 && values.size() != 83)
+  if(values.size() != 89 && values.size() != 90)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   VulkanTuneParams config;
@@ -481,6 +504,13 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   config.xgemm.KWG = getParam(values, "xgemm.KWG", filename);
   config.xgemm.MDIMA = getParam(values, "xgemm.MDIMA", filename);
   config.xgemm.NDIMB = getParam(values, "xgemm.NDIMB", filename);
+  config.xgemm16.MDIMC = getParam(values, "xgemm16.MDIMC", filename);
+  config.xgemm16.NDIMC = getParam(values, "xgemm16.NDIMC", filename);
+  config.xgemm16.MWG = getParam(values, "xgemm16.MWG", filename);
+  config.xgemm16.NWG = getParam(values, "xgemm16.NWG", filename);
+  config.xgemm16.KWG = getParam(values, "xgemm16.KWG", filename);
+  config.xgemm16.MDIMA = getParam(values, "xgemm16.MDIMA", filename);
+  config.xgemm16.NDIMB = getParam(values, "xgemm16.NDIMB", filename);
   config.xgemmDirect.WGD = getParam(values, "xgemmDirect.WGD", filename);
   config.xgemmDirect.MDIMCD = getParam(values, "xgemmDirect.MDIMCD", filename);
   config.xgemmDirect.NDIMCD = getParam(values, "xgemmDirect.NDIMCD", filename);
@@ -688,6 +718,78 @@ namespace {
     Logger* logger;
   };
 
+  struct GemmTuneCase {
+    int inChannels;
+    int outChannels;
+    double weight;
+  };
+
+  vector<GemmTuneCase> getGemmTuneCases(
+    const TuningContext& context,
+    bool includeTransformerCases,
+    bool use3x3
+  ) {
+    int maxConvChannels = use3x3 ? context.modelInfo.maxConvChannels3x3 : context.modelInfo.maxConvChannels1x1;
+    maxConvChannels = std::max(context.modelInfo.trunkNumChannels, maxConvChannels);
+    maxConvChannels = std::max(context.modelInfo.midNumChannels, maxConvChannels);
+    maxConvChannels = std::max(context.modelInfo.regularNumChannels, maxConvChannels);
+    maxConvChannels = std::max(context.modelInfo.gpoolNumChannels, maxConvChannels);
+
+    vector<GemmTuneCase> cases = {
+      {context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 0},
+      {context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 1},
+      {context.modelInfo.midNumChannels, context.modelInfo.trunkNumChannels, 1},
+      {context.modelInfo.trunkNumChannels, context.modelInfo.regularNumChannels, 0.2},
+      {context.modelInfo.trunkNumChannels, context.modelInfo.gpoolNumChannels, 0.2},
+      {maxConvChannels, maxConvChannels, 1}
+    };
+    if(includeTransformerCases && context.modelInfo.transformerNumHeads > 0) {
+      const int transformerQKC = context.modelInfo.transformerNumHeads * context.modelInfo.transformerHeadDim;
+      const int transformerVC = context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim;
+      const int transformerFFNC = context.modelInfo.transformerFFNChannels;
+      cases.push_back({context.modelInfo.midNumChannels, transformerQKC, 1});
+      cases.push_back({transformerVC, context.modelInfo.midNumChannels, 1});
+      cases.push_back({context.modelInfo.midNumChannels, transformerFFNC, 1});
+      cases.push_back({transformerFFNC, context.modelInfo.midNumChannels, 1});
+    }
+    return cases;
+  }
+
+  size_t getWorkloadCaseCount(const string& tunerName, const TuningContext& context);
+
+  vector<double> getWorkloadWeights(const string& tunerName, const TuningContext& context) {
+    if(tunerName == "xgemm" || tunerName == "xgemm16") {
+      vector<GemmTuneCase> cases = getGemmTuneCases(context, false, true);
+      vector<double> weights;
+      weights.reserve(cases.size());
+      for(const GemmTuneCase& tuneCase: cases)
+        weights.push_back(tuneCase.weight);
+      return weights;
+    }
+    if(tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW") {
+      vector<GemmTuneCase> cases = getGemmTuneCases(context, true, false);
+      vector<double> weights;
+      weights.reserve(cases.size());
+      for(const GemmTuneCase& tuneCase: cases)
+        weights.push_back(tuneCase.weight);
+      return weights;
+    }
+    if(tunerName == "hgemmCooperativeMatrix") {
+      vector<GemmTuneCase> cases = getGemmTuneCases(context, false, true);
+      vector<double> weights;
+      weights.reserve(cases.size());
+      for(const GemmTuneCase& tuneCase: cases)
+        weights.push_back(tuneCase.weight);
+      return weights;
+    }
+
+    const size_t workloadCaseCount = getWorkloadCaseCount(tunerName, context);
+    vector<double> weights(workloadCaseCount, 1.0);
+    if(!weights.empty())
+      weights[0] = 0.0;
+    return weights;
+  }
+
   struct TuningMeasurementPlan {
     string kernelName;
     size_t totalRuns;
@@ -695,16 +797,22 @@ namespace {
     double errorTolerance;
     double hardCutoff;
     vector<int> batchSizes;
+    vector<GemmTuneCase> gemmCases;
+    vector<double> workloadWeights;
 
     size_t timedRuns() const {
       return totalRuns > warmupRuns ? totalRuns - warmupRuns : 0;
+    }
+
+    double weightForRun(size_t run) const {
+      return workloadWeights.empty() ? 1.0 : workloadWeights[run % workloadWeights.size()];
     }
   };
 
   size_t getWorkloadCaseCount(const string& tunerName, const TuningContext& context) {
     if(tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW")
       return context.modelInfo.transformerNumHeads > 0 ? 10 : 6;
-    if(tunerName == "xgemm" || tunerName == "hgemmCooperativeMatrix")
+    if(tunerName == "xgemm" || tunerName == "xgemm16" || tunerName == "hgemmCooperativeMatrix")
       return 6;
     if(tunerName == "transformerAttention")
       return 6;
@@ -712,33 +820,32 @@ namespace {
   }
 
   vector<int> getTuningBatchSizes(const TuningContext& context) {
-    vector<int> batchSizes = {1};
-    if(context.batchSize > 1)
-      batchSizes.push_back(std::min(2, context.batchSize));
-    if(context.batchSize > 2)
-      batchSizes.push_back(context.batchSize);
-    return batchSizes;
+    return {std::max(1, context.batchSize)};
   }
 
   TuningMeasurementPlan makeMeasurementPlan(const string& tunerName, const TuningContext& context) {
-    const bool isGemm = tunerName == "xgemmDirect" || tunerName == "xgemm" ||
+    const bool isGemm = tunerName == "xgemmDirect" || tunerName == "xgemm" || tunerName == "xgemm16" ||
                         tunerName == "hgemmCooperativeMatrix" ||
                         tunerName == "hgemmCooperativeMatrixNCHW";
     const vector<int> batchSizes = getTuningBatchSizes(context);
-    const size_t workloadCaseCount = getWorkloadCaseCount(tunerName, context);
+    const vector<GemmTuneCase> gemmCases = tunerName == "xgemm" || tunerName == "xgemm16" ?
+      getGemmTuneCases(context, false, true) : vector<GemmTuneCase>();
+    const vector<double> workloadWeights = getWorkloadWeights(tunerName, context);
+    const size_t workloadCaseCount = workloadWeights.size();
     if(isGemm) {
       const size_t totalRuns = 3 * workloadCaseCount * batchSizes.size();
-      // OpenCL executes each GEMM workload case three times; the first case is
-      // reserved for warm-up and the remaining cases contribute to timing.
       const double tolerance = tunerName == "xgemmDirect" ? 0.01 :
                                tunerName == "xgemm" ? 0.005 : 0.002;
-      return {tunerName, totalRuns, std::min<size_t>(3, totalRuns - 1), tolerance, tolerance * 5.0, batchSizes};
+      return {
+        tunerName, totalRuns, std::min<size_t>(1, totalRuns - 1), tolerance, tolerance * 5.0,
+        batchSizes, gemmCases, workloadWeights
+      };
     }
     if(tunerName == "pointwise" || tunerName == "transformerRMSNorm" || tunerName == "spatialRMSNorm")
-      return {tunerName, 20, 2, 0.05, 0.25, batchSizes};
+      return {tunerName, 20, 1, 0.05, 0.25, batchSizes, {}, workloadWeights};
     if(tunerName == "transformerAttention")
-      return {tunerName, 12, 2, 0.005, 0.025, batchSizes};
-    return {tunerName, 20, 2, 0.005, 0.025, batchSizes};
+      return {tunerName, 12, 1, 0.005, 0.025, batchSizes, {}, workloadWeights};
+    return {tunerName, 20, 1, 0.005, 0.025, batchSizes, {}, workloadWeights};
   }
 
   bool validateReadback(
@@ -856,14 +963,15 @@ namespace {
       add("PADA", config.xgemmDirect.PADA);
       add("PADB", config.xgemmDirect.PADB);
     }
-    else if(tunerName == "xgemm") {
-      add("MDIMC", config.xgemm.MDIMC);
-      add("NDIMC", config.xgemm.NDIMC);
-      add("MWG", config.xgemm.MWG);
-      add("NWG", config.xgemm.NWG);
-      add("KWG", config.xgemm.KWG);
-      add("MDIMA", config.xgemm.MDIMA);
-      add("NDIMB", config.xgemm.NDIMB);
+    else if(tunerName == "xgemm" || tunerName == "xgemm16") {
+      const XgemmTuneParams& params = tunerName == "xgemm" ? config.xgemm : config.xgemm16;
+      add("MDIMC", params.MDIMC);
+      add("NDIMC", params.NDIMC);
+      add("MWG", params.MWG);
+      add("NWG", params.NWG);
+      add("KWG", params.KWG);
+      add("MDIMA", params.MDIMA);
+      add("NDIMB", params.NDIMB);
     }
     else if(tunerName == "hgemmCooperativeMatrix") {
       add("MWARP", config.hgemmCooperativeMatrix.MWARP);
@@ -1034,6 +1142,8 @@ namespace {
       VkResult result = VK_SUCCESS;
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
       const size_t xySize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const XgemmTuneParams& xgemmParams =
+        config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
       const size_t maxChannels = static_cast<size_t>(std::max({
         1,
         context.modelInfo.trunkNumChannels,
@@ -1046,8 +1156,8 @@ namespace {
       }));
       const size_t maxTilesX = (static_cast<size_t>(std::max(1, context.nnXLen)) + 1) / 2;
       const size_t maxTilesY = (static_cast<size_t>(std::max(1, context.nnYLen)) + 1) / 2;
-      const size_t paddedTiles = vk_helper::roundUpToMultiple(batchSize * maxTilesX * maxTilesY, static_cast<size_t>(config.xgemm.MWG));
-      const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(config.xgemm.KWG, config.xgemm.NWG)));
+      const size_t paddedTiles = vk_helper::roundUpToMultiple(batchSize * maxTilesX * maxTilesY, static_cast<size_t>(xgemmParams.MWG));
+      const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(xgemmParams.KWG, xgemmParams.NWG)));
       const size_t hgemmHWSize = vk_helper::roundUpToMultiple(
         xySize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP))
       );
@@ -1183,7 +1293,7 @@ namespace {
       VkQueryPoolCreateInfo queryPoolInfo = {};
       queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
       queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-      queryPoolInfo.queryCount = 2;
+      queryPoolInfo.queryCount = static_cast<uint32_t>(2 * plan.timedRuns());
       result = vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &queryPool);
       if(result != VK_SUCCESS) {
         error = "could not create tuning query pool: " + vk_helper::vkErrorToString(result);
@@ -1212,7 +1322,12 @@ namespace {
         return false;
       }
 
-      const auto recordPipeline = [&](const Pipeline* pipeline, VkDescriptorSet descriptorSet, int runBatchSize) {
+      const auto recordPipeline = [&](
+        const Pipeline* pipeline,
+        VkDescriptorSet descriptorSet,
+        int runBatchSize,
+        const GemmTuneCase* gemmCase
+      ) {
         const int batchSize = std::max(1, runBatchSize);
         const int xySize = std::max(1, context.nnXLen * context.nnYLen);
         const int channels = std::max(1, context.modelInfo.trunkNumChannels);
@@ -1253,16 +1368,27 @@ namespace {
           );
         }
         else if(pipeline->name.find("xgemm_batched") == 0) {
-          const uint32_t m = config.xgemm.MWG * 2;
-          const uint32_t n = config.xgemm.NWG * 2;
-          const uint32_t k = config.xgemm.KWG;
+          const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
+          const int tilesY = (context.nnYLen + config.conv3x3.outTileYSize - 1) / config.conv3x3.outTileYSize;
+          const int numTilesTotal = batchSize * tilesX * tilesY;
+          const uint32_t m = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(numTilesTotal, xgemmParams.MWG));
+          const uint32_t n = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(
+            gemmCase == nullptr ? xgemmParams.NWG * 2 : gemmCase->outChannels, xgemmParams.NWG
+          ));
+          const uint32_t k = static_cast<uint32_t>(vk_helper::roundUpToMultipleInt(
+            gemmCase == nullptr ? xgemmParams.KWG : gemmCase->inChannels, xgemmParams.KWG
+          ));
           vk_shader::push::XGEMMBatchedParams params = {m,n,k,m,k,n,k,m,n};
           push(params);
-          dispatch(m / config.xgemm.MWG, n / config.xgemm.NWG, static_cast<uint32_t>(batchSize));
+          dispatch(
+            static_cast<uint32_t>(m / xgemmParams.MWG),
+            static_cast<uint32_t>(n / xgemmParams.NWG),
+            static_cast<uint32_t>(batchSize)
+          );
         }
         else if(pipeline->name.find("xgemm_direct_batched_tt") == 0) {
           const uint32_t size = config.xgemmDirect.WGD * 2;
-          vk_shader::push::XgemmDirectBatchedTTParams params = {size,size,config.xgemmDirect.WGD,size,size,size,0,0,1};
+          vk_shader::push::XgemmDirectBatchedTTParams params = {size,size,config.xgemmDirect.WGD,config.xgemmDirect.WGD,config.xgemmDirect.WGD,size,0,0,1};
           push(params);
           dispatch(2, 2, static_cast<uint32_t>(batchSize));
         }
@@ -1280,8 +1406,8 @@ namespace {
           const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
-          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, config.xgemm.MWG);
-          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, config.xgemm.KWG);
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, xgemmParams.MWG);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, xgemmParams.KWG);
           vk_shader::push::WinogradInputTransformParams params = {
             batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,paddedChannels,paddedTiles,xySize
           };
@@ -1297,8 +1423,8 @@ namespace {
           const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
-          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, config.xgemm.MWG);
-          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, config.xgemm.NWG);
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, xgemmParams.MWG);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, xgemmParams.NWG);
           vk_shader::push::WinogradOutputTransformParams params = {
             batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,paddedChannels,paddedTiles,xySize
           };
@@ -1411,9 +1537,11 @@ namespace {
       const auto recordDispatches = [&](size_t repeat) {
         const int runBatchSize = plan.batchSizes.empty() ? std::max(1, context.batchSize) :
           plan.batchSizes[repeat % plan.batchSizes.size()];
+        const GemmTuneCase* gemmCase = plan.gemmCases.empty() ? nullptr :
+          &plan.gemmCases[repeat % plan.gemmCases.size()];
         for(size_t i = 0; i < pipelines.size(); i++) {
           const Pipeline* pipeline = pipelines[i];
-          recordPipeline(pipeline, descriptorSets[i], runBatchSize);
+          recordPipeline(pipeline, descriptorSets[i], runBatchSize, gemmCase);
           if(i + 1 < pipelines.size())
             vk_helper::barrierCommandBuffer(commandBuffer);
         }
@@ -1422,11 +1550,14 @@ namespace {
       // The warm-up dispatch is deliberately outside the timestamp interval.
       for(size_t repeat = 0; repeat < plan.warmupRuns; repeat++)
         recordDispatches(repeat);
-      vkCmdResetQueryPool(commandBuffer, queryPool, 0, 2);
-      vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, 0);
-      for(size_t repeat = 0; repeat < plan.timedRuns(); repeat++)
-        recordDispatches(plan.warmupRuns + repeat);
-      vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, 1);
+      const size_t timedRuns = plan.timedRuns();
+      vkCmdResetQueryPool(commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns));
+      for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
+        const uint32_t queryStart = static_cast<uint32_t>(2 * timedRepeat);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart);
+        recordDispatches(plan.warmupRuns + timedRepeat);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryStart + 1);
+      }
       vk_helper::barrierCommandBuffer(
         commandBuffer,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1452,22 +1583,42 @@ namespace {
         cleanup();
         return false;
       }
-      uint64_t timestamps[2] = {};
-      result = vkGetQueryPoolResults(
-        device->device, queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
-      );
-      if(result != VK_SUCCESS || timestamps[1] <= timestamps[0]) {
-        error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      const double elapsedSeconds = (timestamps[1] - timestamps[0]) * timestampPeriod * 1e-9;
-      if(plan.timedRuns() == 0) {
+      if(timedRuns == 0) {
         error = "tuning measurement plan has no timed runs";
         cleanup();
         return false;
       }
-      callsPerSecond = static_cast<double>(plan.timedRuns() * pipelines.size()) / elapsedSeconds;
+      vector<uint64_t> timestamps(2 * timedRuns, 0);
+      result = vkGetQueryPoolResults(
+        device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
+        timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
+      );
+      if(result != VK_SUCCESS) {
+        error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
+        cleanup();
+        return false;
+      }
+      double weightCounted = 0.0;
+      double weightedTimeTaken = 0.0;
+      for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
+        const uint64_t start = timestamps[2 * timedRepeat];
+        const uint64_t end = timestamps[2 * timedRepeat + 1];
+        if(end <= start) {
+          error = "could not read a valid tuning timestamp";
+          cleanup();
+          return false;
+        }
+        const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
+        const double weight = plan.weightForRun(plan.warmupRuns + timedRepeat);
+        weightCounted += weight * pipelines.size();
+        weightedTimeTaken += elapsedSeconds * weight;
+      }
+      if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
+        error = "tuning measurement has no weighted runs";
+        cleanup();
+        return false;
+      }
+      callsPerSecond = weightCounted / weightedTimeTaken;
 
       // Readback is outside the timestamp interval. The caller compares all
       // binding buffers with the reference candidate run using the same input
@@ -1518,6 +1669,13 @@ namespace {
     VulkanTuneParams defaults;
     configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
     dedupCandidates(configs);
+    if(configs.size() > 2) {
+      Rand rand("VulkanTuner:" + Tuner::name());
+      for(size_t i = configs.size() - 1; i > 1; i--) {
+        const size_t j = 1 + static_cast<size_t>(rand.nextUInt64(i));
+        swap(configs[i], configs[j]);
+      }
+    }
     const size_t validCandidateCount = count_if(configs.begin(), configs.end(), Tuner::isValid);
     const TuningMeasurementPlan plan = makeMeasurementPlan(Tuner::name(), context);
 
@@ -1762,7 +1920,53 @@ namespace {
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createXgemmBatched(pipelines.xgemmBatchedFp32, config.xgemm, config.vulkan);
+      VkResult result = pipelines.createXgemmBatched(pipelines.xgemmBatchedFp32, config.xgemm, config.xgemm16, config.vulkan);
+      if(result == VK_SUCCESS)
+        targets.push_back(&pipelines.xgemmBatchedFp32);
+      return result;
+    }
+  };
+
+  struct Xgemm16Tuner {
+    static string name() { return "xgemm16"; }
+    static bool isValid(const VulkanTuneParams& config) { return config.xgemm16.isValid(); }
+    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
+      VulkanTuneParams result = current;
+      result.xgemm16 = defaults.xgemm16;
+      return result;
+    }
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full) {
+      vector<VulkanTuneParams> configs = {current};
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.MWG = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.NWG = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.KWG = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.MDIMC = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMC = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.MDIMA = v; });
+      addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMB = v; });
+
+      VulkanTuneParams slightlyTunedConfig = current;
+      slightlyTunedConfig.xgemm16.MDIMC = 8;
+      slightlyTunedConfig.xgemm16.NDIMC = 8;
+      slightlyTunedConfig.xgemm16.MDIMA = 8;
+      slightlyTunedConfig.xgemm16.NDIMB = 8;
+      VulkanTuneParams slightlyTunedConfig2 = slightlyTunedConfig;
+      slightlyTunedConfig2.xgemm16.MWG = 16;
+      slightlyTunedConfig2.xgemm16.NWG = 16;
+      slightlyTunedConfig2.xgemm16.KWG = 16;
+      configs.insert(configs.begin(), slightlyTunedConfig2);
+      configs.insert(configs.begin(), slightlyTunedConfig);
+      if(!full) {
+        configs.erase(
+          remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.xgemm16.isSimple(); }),
+          configs.end()
+        );
+      }
+      configs.insert(configs.begin(), current);
+      return configs;
+    }
+    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+      VkResult result = pipelines.createXgemmBatched(pipelines.xgemmBatchedFp32, config.xgemm, config.xgemm16, config.vulkan);
       if(result == VK_SUCCESS)
         targets.push_back(&pipelines.xgemmBatchedFp32);
       return result;
@@ -2064,86 +2268,52 @@ namespace {
     runTuner<SpatialRMSNormTuner>(context, config);
   }
 
-  bool runFP16ProfileTuner(
+  bool tuneXgemm16(
     const TuningContext& context,
     VulkanTuneParams& config,
     double fp32CallsPerSecond
   ) {
-    config.vulkan.shouldUseFP16Storage = false;
-    config.vulkan.shouldUseFP16Compute = false;
-    config.vulkan.shouldUseCooperativeMatrix = false;
-
     if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute) {
       if(context.logger != nullptr)
-        context.logger->write("Skipping Vulkan FP16 profile tuning: FP16 storage or compute is unavailable");
+        context.logger->write("Skipping Vulkan xgemm16 tuning: FP16 storage or compute is unavailable");
       return false;
     }
-
-    VulkanTimestampTimer timer(context.device);
-    if(!timer.isUsable()) {
-      if(context.logger != nullptr)
-        context.logger->write("Skipping Vulkan FP16 profile tuning: compute timestamps are unavailable");
-      return false;
-    }
-
     if(!isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0) {
       if(context.logger != nullptr)
-        context.logger->write("Skipping Vulkan FP16 profile tuning: FP32 profile failed");
+        context.logger->write("Skipping Vulkan xgemm16 tuning: FP32 profile failed");
       return false;
     }
 
-    // Each precision profile gets its own xgemm candidate search. This keeps
-    // the comparison about the precision profile rather than reusing the
-    // FP32 winner for all shader variants.
-    VulkanTuneParams p32s16Config = config;
-    p32s16Config.vulkan.shouldUseFP16Storage = true;
-    p32s16Config.vulkan.shouldUseFP16Compute = false;
-    double p32s16CallsPerSecond = 0.0;
-    p32s16CallsPerSecond = testAllConfigs<XgemmTuner>(context, p32s16Config);
-
-    VulkanTuneParams p16s16Config = config;
-    p16s16Config.vulkan.shouldUseFP16Storage = true;
-    p16s16Config.vulkan.shouldUseFP16Compute = true;
-    double p16s16CallsPerSecond = 0.0;
-    p16s16CallsPerSecond = testAllConfigs<XgemmTuner>(context, p16s16Config);
-
-    const bool p32s16IsBest = isfinite(p32s16CallsPerSecond) &&
-      p32s16CallsPerSecond > 0.0 &&
-      (!isfinite(p16s16CallsPerSecond) || p32s16CallsPerSecond > p16s16CallsPerSecond);
-    const bool p16s16IsBest = isfinite(p16s16CallsPerSecond) &&
-      p16s16CallsPerSecond > 0.0 &&
-      (!isfinite(p32s16CallsPerSecond) || p16s16CallsPerSecond >= p32s16CallsPerSecond);
-    const bool storageIsFastEnough = p32s16IsBest &&
-      p32s16CallsPerSecond >= fp32CallsPerSecond * 1.10;
-    const bool computeIsFastEnough = p16s16IsBest &&
-      p16s16CallsPerSecond >= fp32CallsPerSecond * 1.10;
-    if(context.logger != nullptr) {
-      context.logger->write(
-        "Vulkan FP16 profile comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
-        " calls/s, p32s16=" + Global::strprintf("%.6g", p32s16CallsPerSecond) +
-        " calls/s, p16s16=" + Global::strprintf("%.6g", p16s16CallsPerSecond) +
-        " calls/s, required_ratio=1.10"
-      );
-    }
-    if(!storageIsFastEnough && !computeIsFastEnough) {
+    VulkanTuneParams tunedConfig = config;
+    tunedConfig.vulkan.shouldUseFP16Storage = true;
+    tunedConfig.vulkan.shouldUseFP16Compute = true;
+    const double fp16CallsPerSecond = runTuner<Xgemm16Tuner>(context, tunedConfig);
+    if(!isfinite(fp16CallsPerSecond) || fp16CallsPerSecond <= 0.0) {
+      config.xgemm16 = config.xgemm;
       if(context.logger != nullptr)
-        context.logger->write("Vulkan FP16 profiles did not reach the required 1.1x speedup over FP32");
+        context.logger->write("Vulkan xgemm16 tuning failed, retaining xgemm parameters");
       return false;
     }
 
-    if(computeIsFastEnough)
-      config = p16s16Config;
-    else
-      config = p32s16Config;
-    config.vulkan.shouldUseFP16Compute = computeIsFastEnough;
-    // FP16 compute cannot be used without FP16 storage in this backend.
-    config.vulkan.shouldUseFP16Storage = storageIsFastEnough || computeIsFastEnough;
+    config.xgemm16 = tunedConfig.xgemm16;
+    config.vulkan.canUseFP16Compute = true;
+    const bool computeIsFastEnough = fp16CallsPerSecond >= fp32CallsPerSecond * 1.20;
     if(context.logger != nullptr) {
       context.logger->write(
-        "Vulkan FP16 profile selected: " +
-        string(config.vulkan.shouldUseFP16Compute ? "p16s16" : "p32s16")
+        "Vulkan xgemm16 comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
+        " calls/s, p16s16=" + Global::strprintf("%.6g", fp16CallsPerSecond) +
+        " calls/s, required_ratio=1.20"
       );
     }
+    if(!computeIsFastEnough) {
+      if(context.logger != nullptr)
+        context.logger->write("Vulkan xgemm16 was not significantly faster, not enabling FP16 compute");
+      return true;
+    }
+    config.vulkan.shouldUseFP16Storage = true;
+    config.vulkan.shouldUseFP16Compute = true;
+    if(context.logger != nullptr)
+      context.logger->write("Enabling Vulkan FP16 compute due to better xgemm16 performance");
     return true;
   }
 }
@@ -2198,13 +2368,8 @@ void VulkanTuner::tune(
     context, tunedConfig, true,
     xgemmDirectBaselineCallsPerSecond, xgemmBaselineCallsPerSecond
   );
-  if(runFP16ProfileTuner(context, tunedConfig, xgemmBaselineCallsPerSecond)) {
-    tunedConfig.vulkan.shouldUseCooperativeMatrix = tunedConfig.vulkan.canUseCooperativeMatrix;
-    runOperationTuners(
-      context, tunedConfig, false,
-      xgemmDirectBaselineCallsPerSecond, xgemmBaselineCallsPerSecond
-    );
-  }
+  tunedConfig.xgemm16 = tunedConfig.xgemm;
+  tuneXgemm16(context, tunedConfig, xgemmBaselineCallsPerSecond);
 }
 
 VulkanTuneParams VulkanTuner::loadOrCreate(

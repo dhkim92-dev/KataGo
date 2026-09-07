@@ -1287,6 +1287,7 @@ struct LocalDimHash {
       uint32_t NDIMB=8;
 
       bool isValid() const;
+      bool isSimple() const;
     };
 
     struct XgemmDirectTuneParams {
@@ -1397,6 +1398,7 @@ struct LocalDimHash {
       HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
       HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
       XgemmTuneParams xgemm;
+      XgemmTuneParams xgemm16;
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
       TransformerRMSNormTuneParms rmsNorm;
@@ -1456,6 +1458,7 @@ struct LocalDimHash {
         // };
 
         xgemm = XgemmTuneParams();
+        xgemm16 = xgemm;
 
         xgemmDirect = XgemmDirectTuneParams();
       }
@@ -1551,7 +1554,12 @@ struct LocalDimHash {
     VkResult createHgemmCooperativeMatrix(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
     VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
-    VkResult createXgemmBatched(Pipeline& pipeline, const tune::XgemmTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createXgemmBatched(
+      Pipeline& pipeline,
+      const tune::XgemmTuneParams& tuneParams,
+      const tune::XgemmTuneParams& tuneParams16,
+      const tune::VulkanParams& vulkanParams
+    );
     VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);

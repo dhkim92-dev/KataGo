@@ -173,14 +173,26 @@ struct ComputeHandleInternal {
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
 
   int getXGemmMPaddingMult() const {
+    if(usingFP16TensorCores)
+      return tuneParams.hgemmCooperativeMatrix.MWG;
+    if(usingFP16Compute)
+      return tuneParams.xgemm16.MWG;
     return tuneParams.xgemm.MWG;
   }
 
   int getXGemmNPaddingMult() const {
+    if(usingFP16TensorCores)
+      return tuneParams.hgemmCooperativeMatrix.NWG;
+    if(usingFP16Compute)
+      return tuneParams.xgemm16.NWG;
     return tuneParams.xgemm.NWG;
   }
 
   int getXGemmKPaddingMult() const {
+    if(usingFP16TensorCores)
+      return tuneParams.hgemmCooperativeMatrix.KWG;
+    if(usingFP16Compute)
+      return tuneParams.xgemm16.KWG;
     return tuneParams.xgemm.KWG;
   }
 };

@@ -382,7 +382,7 @@ namespace vk_shader {
     if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -850,24 +850,34 @@ namespace vk_shader {
     return createPipeline("xgemm_direct_batched_tt_fp32", vk_shader::spirv_xgemm_direct_batched_tt_fp32, vk_shader::spirv_xgemm_direct_batched_tt_fp32_size, 3, sizeof(XgemmDirectBatchedTTParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createXgemmBatched(Pipeline& pipeline, const XgemmTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createXgemmBatched(
+    Pipeline& pipeline,
+    const XgemmTuneParams& tuneParams,
+    const XgemmTuneParams& tuneParams16,
+    const VulkanParams& vulkanParams
+  ) {
+
+    const bool useFP16Storage =
+      vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage;
+    const bool useFP16Compute = useFP16Storage && vulkanParams.shouldUseFP16Compute;
+    const XgemmTuneParams& selectedTuneParams = useFP16Compute ? tuneParams16 : tuneParams;
 
     auto spec = XGEMMBatchedSpec();
-    spec.localSizeX = tuneParams.MDIMC;
-    spec.localSizeY = tuneParams.NDIMC;
+    spec.localSizeX = selectedTuneParams.MDIMC;
+    spec.localSizeY = selectedTuneParams.NDIMC;
     spec.localSizeZ = 1;
-    spec.MWG = tuneParams.MWG;
-    spec.NWG = tuneParams.NWG;
-    spec.KWG = tuneParams.KWG;
-    spec.MDIMC = tuneParams.MDIMC;
-    spec.NDIMC = tuneParams.NDIMC;
-    spec.MDIMA = tuneParams.MDIMA;
-    spec.NDIMB = tuneParams.NDIMB;
+    spec.MWG = selectedTuneParams.MWG;
+    spec.NWG = selectedTuneParams.NWG;
+    spec.KWG = selectedTuneParams.KWG;
+    spec.MDIMC = selectedTuneParams.MDIMC;
+    spec.NDIMC = selectedTuneParams.NDIMC;
+    spec.MDIMA = selectedTuneParams.MDIMA;
+    spec.NDIMB = selectedTuneParams.NDIMB;
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
-      if(vulkanParams.shouldUseFP16Compute)
+    if(useFP16Storage) {
+      if(useFP16Compute)
         return createPipeline("xgemm_batched_p16s16", spirv_xgemm_batched_p16s16, spirv_xgemm_batched_p16s16_size, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
       return createPipeline("xgemm_batched_p32s16", spirv_xgemm_batched_p32s16, spirv_xgemm_batched_p32s16_size, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }

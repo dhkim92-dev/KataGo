@@ -358,8 +358,10 @@ void xgemmBatched(
 
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   
-  const uint32_t MWG = tuneParams.xgemm.MWG;
-  const uint32_t NWG = tuneParams.xgemm.NWG;
+  const vk_shader::tune::XgemmTuneParams& xgemmParams =
+    tuneParams.vulkan.shouldUseFP16Compute ? tuneParams.xgemm16 : tuneParams.xgemm;
+  const uint32_t MWG = xgemmParams.MWG;
+  const uint32_t NWG = xgemmParams.NWG;
   const uint32_t localSizeX = pipeline->localSizeX;
   const uint32_t localSizeY = pipeline->localSizeY;
   const uint32_t localSizeZ = pipeline->localSizeZ;

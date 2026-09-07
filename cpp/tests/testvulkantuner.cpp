@@ -68,6 +68,24 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
   testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
+  const auto lineIndex = [&](const string& prefix) {
+    for(size_t i = 0; i < defaultLines.size(); i++) {
+      if(defaultLines[i].find(prefix) == 0)
+        return i;
+    }
+    return defaultLines.size();
+  };
+  testAssert(lineIndex("xgemmDirect.WGD=") < lineIndex("xgemm.MWG="));
+  testAssert(lineIndex("xgemm.MWG=") < lineIndex("xgemm16.MWG="));
+  testAssert(lineIndex("xgemm16.MWG=") < lineIndex("hgemmCooperativeMatrix.MWG="));
+  testAssert(lineIndex("hgemmCooperativeMatrix.MWG=") < lineIndex("hgemmCooperativeMatrixNCHW.MWG="));
+  testAssert(lineIndex("hgemmCooperativeMatrixNCHW.MWG=") < lineIndex("conv3x3.inTileXSize="));
+  testAssert(lineIndex("conv5x5.inTileXSize=") < lineIndex("gPool.XYSTRIDE="));
+  testAssert(lineIndex("gPool.XYSTRIDE=") < lineIndex("transformer.ATTN_BLOCK_Q="));
+  testAssert(lineIndex("transformer.ATTN_BLOCK_Q=") < lineIndex("rmsNorm.WG_C_SIZE="));
+  testAssert(lineIndex("rmsNorm.WG_C_SIZE=") < lineIndex("pointwise.ELTS_PER_THREAD="));
+  testAssert(lineIndex("pointwise.ELTS_PER_THREAD=") < lineIndex("addChannelBiases.XY_ELTS_PER_THREAD="));
+  testAssert(lineIndex("addChannelBiases.XY_ELTS_PER_THREAD=") < lineIndex("spatialRMSNorm.TILE_SIZE="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
 
   VulkanTuneParams params;
@@ -75,6 +93,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.conv3x3.inputTransformLocalYSize = 4;
   params.conv5x5.outputTransformLocalXSize = 16;
   params.xgemm.KWG = 32;
+  params.xgemm16.MWG = 64;
+  params.xgemm16.NWG = 64;
   params.xgemmDirect.KWID = 1;
   params.addChannelBiases.XY_ELTS_PER_THREAD = 2;
   params.addChannelBiases.NC_ELTS_PER_THREAD = 8;

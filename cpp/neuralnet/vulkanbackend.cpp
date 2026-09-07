@@ -4900,6 +4900,11 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.shouldUseFP16Storage &&
     tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
     usingFP16Storage;
+  usingFP16TensorCores =
+    usingFP16Storage &&
+    tuneParams.vulkan.canUseCooperativeMatrix &&
+    tuneParams.vulkan.shouldUseCooperativeMatrix &&
+    tuneParams.hgemmCooperativeMatrix.isValid();
   if(usingFP16TensorCoresFor1x1) {
     const int spatialAlignment = std::max(16, tuneParams.hgemmCooperativeMatrixNCHW.MWARP);
     this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
