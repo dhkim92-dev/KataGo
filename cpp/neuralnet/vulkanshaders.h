@@ -10,6 +10,7 @@
 
 #include <vector>
 #include <cstddef>
+#include <map>
 #include <string>
 #include "../neuralnet/activations.h"
 #include "../neuralnet/vulkanhelpers.h"
@@ -1502,6 +1503,94 @@ struct LocalDimHash {
     Logger* logger;
     bool printPipelineCreation = false;
 
+    // Shader modules are shared by all specialization variants of a SPIR-V binary.
+    VkShaderModule shaderModule_add_channel_bias_nc_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_batched_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_batched_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_batched_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_p32s16 = VK_NULL_HANDLE;
+    std::vector<VkShaderModule*> shaderModuleFields;
     // In this code, assume that NCHW is default format if no postfix is given.
 
     // Conv2D pipelines
@@ -1619,8 +1708,7 @@ struct LocalDimHash {
     void destroyPipeline(Pipeline& pipeline);
     VkResult createPipeline(
       std::string pipelineName,
-      const unsigned char* spirvBytes,
-      size_t spirvSize,
+      VkShaderModule shaderModule,
       size_t bindingSize,
       uint32_t pushConstantSize,
       Pipeline &outPipeline,
@@ -1631,6 +1719,8 @@ struct LocalDimHash {
     );
 
   private :
+    VkResult createShaderModules();
+    void destroyShaderModules();
     void destroyPipelines();
   };
 }

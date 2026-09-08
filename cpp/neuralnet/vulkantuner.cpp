@@ -1135,6 +1135,8 @@ namespace {
           vk_helper::releaseVulkanBuffer(device, buffer);
       if(resources.pointwiseAccumulatorInitialBuffer != nullptr)
         vk_helper::releaseVulkanBuffer(device, resources.pointwiseAccumulatorInitialBuffer);
+      if(resources.attentionReadbackBuffer != nullptr)
+        vk_helper::releaseVulkanBuffer(device, resources.attentionReadbackBuffer);
       for(VulkanBuffer* buffer: resources.pointwiseValidationBuffers)
         if(buffer != nullptr)
           vk_helper::releaseVulkanBuffer(device, buffer);
@@ -1407,8 +1409,9 @@ namespace {
             pipeline->name.find("add_pointwise") == 0 ||
             pipeline->name.find("add_channel_bias_nchw") == 0;
           const bool outputBindingNeedsReset = binding == outputBinding(pipeline);
+          const bool attentionOutput = plan.kernelName == "transformerAttention" && outputBindingNeedsReset;
           const size_t initializedIndex = tuningBufferIndex - 1;
-          if(isGemm || inPlaceOutput || outputBindingNeedsReset || !resources.tuningBufferInitialized[initializedIndex]) {
+          if(!attentionOutput && (isGemm || inPlaceOutput || outputBindingNeedsReset || !resources.tuningBufferInitialized[initializedIndex])) {
             vk_helper::copyHostToDeviceBuffer(device, initialData, buffer, initialBytes, true, &result);
             if(result != VK_SUCCESS) {
               error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
@@ -1416,6 +1419,8 @@ namespace {
             }
             resources.tuningBufferInitialized[initializedIndex] = true;
           }
+          else if(attentionOutput)
+            resources.tuningBufferInitialized[initializedIndex] = true;
 
           // add_pointwise writes binding 0 in place. Keep an immutable copy of
           // its initialized input so every measured invocation has the same
@@ -1961,6 +1966,24 @@ namespace {
         cleanup();
         return false;
       }
+      if(plan.kernelName == "transformerAttention") {
+        VulkanBuffer* outputBuffer = tuningBuffers[outputBinding(pipelines[0])];
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, outputBuffer,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT
+        );
+        vkCmdFillBuffer(commandBuffer, outputBuffer->buffer, 0, VK_WHOLE_SIZE, 0);
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, outputBuffer,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          VK_ACCESS_SHADER_WRITE_BIT
+        );
+      }
       const size_t firstTimedPipeline = spatialRMSNorm ? 2 : 0;
       const size_t timedPipelineCount = spatialRMSNorm ? 1 : pipelines.size();
 
@@ -2249,27 +2272,12 @@ namespace {
       if(!attentionValidationBuffers.empty()) {
         const Pipeline* attentionPipeline = pipelines[0];
         const uint32_t binding = outputBinding(attentionPipeline);
-        for(VulkanBuffer* validationBuffer: attentionValidationBuffers) {
-          vector<float> output(attentionOutputElements);
-          if(halfBinding(attentionPipeline, binding)) {
-            vector<half_t> halves(attentionOutputElements);
-            vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, attentionOutputElements * sizeof(half_t), halves.data(), true, &result
-            );
-            for(size_t j = 0; j < attentionOutputElements; j++)
-              output[j] = half_float::half_cast<float>(halves[j]);
-          }
-          else {
-            vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, attentionOutputElements * sizeof(float), output.data(), true, &result
-            );
-          }
-          if(result != VK_SUCCESS) {
-            error = "could not read attention validation output: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-          readback.insert(readback.end(), output.begin(), output.end());
-        }
+        const bool useFP16 = halfBinding(attentionPipeline, binding);
+        const VkDeviceSize outputBytes = attentionOutputElements * (useFP16 ? sizeof(half_t) : sizeof(float));
+        if(!readAttentionValidationBuffers(
+          attentionValidationBuffers, outputBytes, attentionOutputElements, useFP16, readback, result, error
+        ))
+          return false;
         cleanup();
         return true;
       }
@@ -2345,6 +2353,7 @@ namespace {
       vector<bool> tuningBufferInitialized;
       VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
       bool pointwiseAccumulatorInitialized = false;
+      VulkanBuffer* attentionReadbackBuffer = nullptr;
       vector<VulkanBuffer*> pointwiseValidationBuffers;
       vector<VulkanBuffer*> winogradOutputValidationBuffers;
       vector<VulkanBuffer*> attentionValidationBuffers;
@@ -2392,6 +2401,109 @@ namespace {
         if(!ensureBuffer(buffers[i], requiredBytes, result, error, description))
           return false;
       }
+      return true;
+    }
+
+    bool ensureReadbackBuffer(
+      VulkanBuffer*& buffer,
+      VkDeviceSize requiredBytes,
+      VkResult& result,
+      string& error,
+      const string& description
+    ) {
+      if(buffer != nullptr && buffer->requestedSize >= requiredBytes)
+        return true;
+      if(buffer != nullptr) {
+        vk_helper::releaseVulkanBuffer(device, buffer);
+        buffer = nullptr;
+      }
+      buffer = vk_helper::createReadbackBuffer(device, requiredBytes, &result);
+      if(result != VK_SUCCESS || buffer == nullptr) {
+        error = "could not allocate reusable " + description + ": " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      return true;
+    }
+
+    bool readAttentionValidationBuffers(
+      const vector<VulkanBuffer*>& validationBuffers,
+      VkDeviceSize copyBytes,
+      size_t outputElements,
+      bool useFP16,
+      vector<float>& readback,
+      VkResult& result,
+      string& error
+    ) {
+      const VkDeviceSize stride = vk_helper::roundUpToMultiple(copyBytes, VkDeviceSize(4));
+      const VkDeviceSize totalBytes = stride * validationBuffers.size();
+      if(!ensureReadbackBuffer(resources.attentionReadbackBuffer, totalBytes, result, error, "attention readback buffer"))
+        return false;
+
+      result = vkResetCommandBuffer(resources.commandBuffer, 0);
+      if(result != VK_SUCCESS) {
+        error = "could not reset attention readback command buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vk_helper::beginCommandBuffer(resources.commandBuffer);
+      if(result != VK_SUCCESS) {
+        error = "could not begin attention readback command buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      for(size_t i = 0; i < validationBuffers.size(); i++) {
+        VkBufferCopy copyRegion = {};
+        copyRegion.size = copyBytes;
+        copyRegion.dstOffset = stride * i;
+        vkCmdCopyBuffer(
+          resources.commandBuffer,
+          validationBuffers[i]->buffer,
+          resources.attentionReadbackBuffer->buffer,
+          1,
+          &copyRegion
+        );
+      }
+      result = vk_helper::endCommandBuffer(resources.commandBuffer);
+      if(result != VK_SUCCESS) {
+        error = "could not end attention readback command buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vkResetFences(device->device, 1, &resources.fence);
+      if(result != VK_SUCCESS) {
+        error = "could not reset attention readback fence: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vk_helper::submitCommandBuffers(device, {resources.commandBuffer}, resources.fence);
+      if(result != VK_SUCCESS) {
+        error = "could not submit attention readback command buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vkWaitForFences(device->device, 1, &resources.fence, VK_TRUE, UINT64_MAX);
+      if(result != VK_SUCCESS) {
+        error = "could not wait for attention readback: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+
+      void* mappedData = nullptr;
+      result = vmaMapMemory(device->allocator, resources.attentionReadbackBuffer->allocation, &mappedData);
+      if(result != VK_SUCCESS) {
+        error = "could not map attention readback buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      readback.clear();
+      readback.reserve(outputElements * validationBuffers.size());
+      const unsigned char* raw = static_cast<const unsigned char*>(mappedData);
+      for(size_t i = 0; i < validationBuffers.size(); i++) {
+        const void* source = raw + stride * i;
+        if(useFP16) {
+          const half_t* halves = static_cast<const half_t*>(source);
+          for(size_t j = 0; j < outputElements; j++)
+            readback.push_back(half_float::half_cast<float>(halves[j]));
+        }
+        else {
+          const float* floats = static_cast<const float*>(source);
+          readback.insert(readback.end(), floats, floats + outputElements);
+        }
+      }
+      vmaUnmapMemory(device->allocator, resources.attentionReadbackBuffer->allocation);
       return true;
     }
 
