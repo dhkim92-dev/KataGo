@@ -3,6 +3,7 @@
 #include "../neuralnet/vulkantuner.h"
 #include "../neuralnet/vulkancompute.h"
 
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <algorithm>
@@ -1119,6 +1120,35 @@ namespace {
     explicit VulkanTimestampTimer(const VulkanDevice* device)
     : device(device), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
 
+    ~VulkanTimestampTimer() {
+      vkDeviceWaitIdle(device->device);
+      if(resources.commandBuffer != VK_NULL_HANDLE)
+        vkFreeCommandBuffers(device->device, device->commandPool, 1, &resources.commandBuffer);
+      if(resources.fence != VK_NULL_HANDLE)
+        vkDestroyFence(device->device, resources.fence, nullptr);
+      if(resources.queryPool != VK_NULL_HANDLE)
+        vkDestroyQueryPool(device->device, resources.queryPool, nullptr);
+      if(resources.descriptorPool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(device->device, resources.descriptorPool, nullptr);
+      for(VulkanBuffer* buffer: resources.tuningBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      if(resources.pointwiseAccumulatorInitialBuffer != nullptr)
+        vk_helper::releaseVulkanBuffer(device, resources.pointwiseAccumulatorInitialBuffer);
+      for(VulkanBuffer* buffer: resources.pointwiseValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.winogradOutputValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.attentionValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.spatialValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+    }
+
     bool isUsable() const {
       return device->info.properties.limits.timestampComputeAndGraphics == VK_TRUE && timestampPeriod > 0.0f;
     }
@@ -1133,7 +1163,7 @@ namespace {
       double& errorProp,
       string& error,
       vector<float>* cpuReference = nullptr
-    ) const {
+    ) {
       errorProp = numeric_limits<double>::quiet_NaN();
       if(!isUsable()) {
         error = "compute timestamps are not supported";
@@ -1260,53 +1290,21 @@ namespace {
       });
       const size_t scratchElements = isGemm ? gemmElements : transformElements;
       const size_t scratchBytes = vk_helper::roundUpToMultiple(std::max<size_t>(scratchElements, 4), size_t(4)) * sizeof(float);
-      vector<VulkanBuffer*> tuningBuffers;
-      VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
+      vector<VulkanBuffer*>& tuningBuffers = resources.tuningBuffers;
+      VulkanBuffer*& pointwiseAccumulatorInitialBuffer = resources.pointwiseAccumulatorInitialBuffer;
       VkDeviceSize pointwiseAccumulatorBytes = 0;
-      vector<VulkanBuffer*> pointwiseValidationBuffers;
-      vector<VulkanBuffer*> winogradOutputValidationBuffers;
-      vector<VulkanBuffer*> attentionValidationBuffers;
-      VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-      VkQueryPool queryPool = VK_NULL_HANDLE;
-      VkFence fence = VK_NULL_HANDLE;
-      VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-      vector<VulkanBuffer*> spatialValidationBuffers;
+      vector<VulkanBuffer*>& pointwiseValidationBuffers = resources.pointwiseValidationBuffers;
+      vector<VulkanBuffer*>& winogradOutputValidationBuffers = resources.winogradOutputValidationBuffers;
+      vector<VulkanBuffer*>& attentionValidationBuffers = resources.attentionValidationBuffers;
+      vector<VulkanBuffer*>& spatialValidationBuffers = resources.spatialValidationBuffers;
+      VkDescriptorPool& descriptorPool = resources.descriptorPool;
+      VkQueryPool& queryPool = resources.queryPool;
+      VkFence& fence = resources.fence;
+      VkCommandBuffer& commandBuffer = resources.commandBuffer;
+      bool commandBufferSubmitted = false;
       const auto cleanup = [&]() noexcept {
-        if(commandBuffer != VK_NULL_HANDLE) {
-          vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
-          commandBuffer = VK_NULL_HANDLE;
-        }
-        if(fence != VK_NULL_HANDLE) {
-          vkDestroyFence(device->device, fence, nullptr);
-          fence = VK_NULL_HANDLE;
-        }
-        if(queryPool != VK_NULL_HANDLE) {
-          vkDestroyQueryPool(device->device, queryPool, nullptr);
-          queryPool = VK_NULL_HANDLE;
-        }
-        if(descriptorPool != VK_NULL_HANDLE) {
-          vkDestroyDescriptorPool(device->device, descriptorPool, nullptr);
-          descriptorPool = VK_NULL_HANDLE;
-        }
-        for(VulkanBuffer* buffer: tuningBuffers)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-        tuningBuffers.clear();
-        if(pointwiseAccumulatorInitialBuffer != nullptr) {
-          vk_helper::releaseVulkanBuffer(device, pointwiseAccumulatorInitialBuffer);
-          pointwiseAccumulatorInitialBuffer = nullptr;
-        }
-        for(VulkanBuffer* buffer: pointwiseValidationBuffers)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-        pointwiseValidationBuffers.clear();
-        for(VulkanBuffer* buffer: winogradOutputValidationBuffers)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-        winogradOutputValidationBuffers.clear();
-        for(VulkanBuffer* buffer: attentionValidationBuffers)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-        attentionValidationBuffers.clear();
-        for(VulkanBuffer* buffer: spatialValidationBuffers)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-        spatialValidationBuffers.clear();
+        if(commandBuffer != VK_NULL_HANDLE && !commandBufferSubmitted)
+          vkResetCommandBuffer(commandBuffer, 0);
       };
       const auto cleanupGuard = makeScopeGuard(cleanup);
 
@@ -1343,8 +1341,8 @@ namespace {
       };
       vector<float> gemmInput, gemmFilter;
       vector<vector<float>> hostFloatBuffers;
-      tuningBuffers.reserve(descriptorCount);
       hostFloatBuffers.reserve(descriptorCount);
+      size_t tuningBufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
           vector<float> data(scratchBytes / sizeof(float), 0.0f);
@@ -1393,33 +1391,50 @@ namespace {
             initialData = halfData.data();
             initialBytes = halfData.size() * sizeof(half_t);
           }
-          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-          if(result != VK_SUCCESS || buffer == nullptr) {
-            error = "could not allocate tuning buffer: " + vk_helper::vkErrorToString(result);
+          if(tuningBufferIndex == tuningBuffers.size())
+            tuningBuffers.push_back(nullptr);
+          if(tuningBufferIndex == resources.tuningBufferInitialized.size())
+            resources.tuningBufferInitialized.push_back(false);
+          const bool bufferNeedsAllocation =
+            tuningBuffers[tuningBufferIndex] == nullptr ||
+            tuningBuffers[tuningBufferIndex]->requestedSize < scratchBytes;
+          if(bufferNeedsAllocation)
+            resources.tuningBufferInitialized[tuningBufferIndex] = false;
+          if(!ensureBuffer(tuningBuffers[tuningBufferIndex], scratchBytes, result, error, "tuning buffer"))
             return false;
-          }
-          tuningBuffers.push_back(buffer);
-          vk_helper::copyHostToDeviceBuffer(device, initialData, buffer, initialBytes, true, &result);
-          if(result != VK_SUCCESS) {
-            error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
-            return false;
+          VulkanBuffer* buffer = tuningBuffers[tuningBufferIndex++];
+          const bool inPlaceOutput =
+            pipeline->name.find("add_pointwise") == 0 ||
+            pipeline->name.find("add_channel_bias_nchw") == 0;
+          const bool outputBindingNeedsReset = binding == outputBinding(pipeline);
+          const size_t initializedIndex = tuningBufferIndex - 1;
+          if(isGemm || inPlaceOutput || outputBindingNeedsReset || !resources.tuningBufferInitialized[initializedIndex]) {
+            vk_helper::copyHostToDeviceBuffer(device, initialData, buffer, initialBytes, true, &result);
+            if(result != VK_SUCCESS) {
+              error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
+              return false;
+            }
+            resources.tuningBufferInitialized[initializedIndex] = true;
           }
 
           // add_pointwise writes binding 0 in place. Keep an immutable copy of
           // its initialized input so every measured invocation has the same
           // input, as in the OpenCL tuner.
           if(pipeline->name.find("add_pointwise") == 0 && binding == 0) {
-            pointwiseAccumulatorInitialBuffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-            if(result != VK_SUCCESS || pointwiseAccumulatorInitialBuffer == nullptr) {
-              error = "could not allocate pointwise reset buffer: " + vk_helper::vkErrorToString(result);
+            if(pointwiseAccumulatorInitialBuffer == nullptr ||
+               pointwiseAccumulatorInitialBuffer->requestedSize < scratchBytes)
+              resources.pointwiseAccumulatorInitialized = false;
+            if(!ensureBuffer(pointwiseAccumulatorInitialBuffer, scratchBytes, result, error, "pointwise reset buffer"))
               return false;
-            }
-            vk_helper::copyHostToDeviceBuffer(
-              device, initialData, pointwiseAccumulatorInitialBuffer, initialBytes, true, &result
-            );
-            if(result != VK_SUCCESS) {
-              error = "could not initialize pointwise reset buffer: " + vk_helper::vkErrorToString(result);
-              return false;
+            if(!resources.pointwiseAccumulatorInitialized) {
+              vk_helper::copyHostToDeviceBuffer(
+                device, initialData, pointwiseAccumulatorInitialBuffer, initialBytes, true, &result
+              );
+              if(result != VK_SUCCESS) {
+                error = "could not initialize pointwise reset buffer: " + vk_helper::vkErrorToString(result);
+                return false;
+              }
+              resources.pointwiseAccumulatorInitialized = true;
             }
             pointwiseAccumulatorBytes = initialBytes;
           }
@@ -1637,60 +1652,26 @@ namespace {
       }
 
       if(plan.kernelName == "pointwise" || plan.kernelName == "transformerRMSNorm") {
-        for(int repeat = 0; repeat < 10; repeat++) {
-          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-          if(result != VK_SUCCESS || buffer == nullptr) {
-            error = "could not allocate pointwise validation buffer: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-          pointwiseValidationBuffers.push_back(buffer);
-        }
+        if(!ensureBuffers(pointwiseValidationBuffers, 10, scratchBytes, result, error, "pointwise validation buffer"))
+          return false;
       }
       else if(plan.kernelName == "spatialRMSNorm") {
-        for(int repeat = 0; repeat < 10; repeat++) {
-          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-          if(result != VK_SUCCESS || buffer == nullptr) {
-            error = "could not allocate Spatial RMSNorm validation buffer: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-          spatialValidationBuffers.push_back(buffer);
-        }
+        if(!ensureBuffers(spatialValidationBuffers, 10, scratchBytes, result, error, "spatial RMSNorm validation buffer"))
+          return false;
       }
       else if(plan.kernelName.find("OutputTransform") != string::npos) {
-        for(int repeat = 0; repeat < 10; repeat++) {
-          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-          if(result != VK_SUCCESS || buffer == nullptr) {
-            error = "could not allocate Winograd output validation buffer: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-          winogradOutputValidationBuffers.push_back(buffer);
-        }
+        if(!ensureBuffers(winogradOutputValidationBuffers, 10, scratchBytes, result, error, "Winograd output validation buffer"))
+          return false;
       }
       else if(plan.kernelName == "transformerAttention") {
-        for(int repeat = 0; repeat < 6; repeat++) {
-          VulkanBuffer* buffer = vk_helper::createDeviceBuffer(device, scratchBytes, false, &result);
-          if(result != VK_SUCCESS || buffer == nullptr) {
-            error = "could not allocate attention validation buffer: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-          attentionValidationBuffers.push_back(buffer);
-        }
+        if(!ensureBuffers(attentionValidationBuffers, 6, scratchBytes, result, error, "attention validation buffer"))
+          return false;
       }
 
-      VkDescriptorPoolSize poolSize = {};
-      poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      poolSize.descriptorCount = descriptorCount;
-      VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
-      descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-      descriptorPoolInfo.poolSizeCount = 1;
-      descriptorPoolInfo.pPoolSizes = &poolSize;
-      descriptorPoolInfo.maxSets = static_cast<uint32_t>(pipelines.size());
-      result = vkCreateDescriptorPool(device->device, &descriptorPoolInfo, nullptr, &descriptorPool);
-      if(result != VK_SUCCESS) {
-        error = "could not create tuning descriptor pool: " + vk_helper::vkErrorToString(result);
-        cleanup();
+      if(!ensureDescriptorPool(
+        descriptorCount, static_cast<uint32_t>(pipelines.size()), result, error
+      ))
         return false;
-      }
 
       vector<VkDescriptorSet> descriptorSets;
       descriptorSets.reserve(pipelines.size());
@@ -1730,31 +1711,10 @@ namespace {
         descriptorSets.push_back(descriptorSet);
       }
 
-      VkQueryPoolCreateInfo queryPoolInfo = {};
-      queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-      queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-      queryPoolInfo.queryCount = static_cast<uint32_t>(2 * plan.timedRuns());
-      result = vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &queryPool);
-      if(result != VK_SUCCESS) {
-        error = "could not create tuning query pool: " + vk_helper::vkErrorToString(result);
-        cleanup();
+      if(!ensureQueryPool(static_cast<uint32_t>(2 * plan.timedRuns()), result, error))
         return false;
-      }
-
-      VkFenceCreateInfo fenceInfo = {};
-      fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
-      if(result != VK_SUCCESS) {
-        error = "could not create tuning fence: " + vk_helper::vkErrorToString(result);
-        cleanup();
+      if(!ensureCommandResources(result, error))
         return false;
-      }
-      commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
-      if(result != VK_SUCCESS) {
-        error = "could not allocate tuning command buffer: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
 
       const auto recordPipeline = [&](
         VkCommandBuffer targetCommandBuffer,
@@ -2141,18 +2101,26 @@ namespace {
         cleanup();
         return false;
       }
+      result = vkResetFences(device->device, 1, &fence);
+      if(result != VK_SUCCESS) {
+        error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
+        cleanup();
+        return false;
+      }
       result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
       if(result != VK_SUCCESS) {
         error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result);
         cleanup();
         return false;
       }
+      commandBufferSubmitted = true;
       result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
       if(result != VK_SUCCESS) {
         error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result);
         cleanup();
         return false;
       }
+      commandBufferSubmitted = false;
       if(timedRuns == 0) {
         error = "tuning measurement plan has no timed runs";
         cleanup();
@@ -2372,6 +2340,146 @@ namespace {
 
 
    private:
+    struct ReusableResources {
+      vector<VulkanBuffer*> tuningBuffers;
+      vector<bool> tuningBufferInitialized;
+      VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
+      bool pointwiseAccumulatorInitialized = false;
+      vector<VulkanBuffer*> pointwiseValidationBuffers;
+      vector<VulkanBuffer*> winogradOutputValidationBuffers;
+      vector<VulkanBuffer*> attentionValidationBuffers;
+      vector<VulkanBuffer*> spatialValidationBuffers;
+      VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+      uint32_t descriptorCount = 0;
+      uint32_t maxSets = 0;
+      VkQueryPool queryPool = VK_NULL_HANDLE;
+      uint32_t queryCount = 0;
+      VkFence fence = VK_NULL_HANDLE;
+      VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    } resources;
+
+    bool ensureBuffer(
+      VulkanBuffer*& buffer,
+      VkDeviceSize requiredBytes,
+      VkResult& result,
+      string& error,
+      const string& description
+    ) {
+      if(buffer != nullptr && buffer->requestedSize >= requiredBytes)
+        return true;
+      if(buffer != nullptr) {
+        vk_helper::releaseVulkanBuffer(device, buffer);
+        buffer = nullptr;
+      }
+      buffer = vk_helper::createDeviceBuffer(device, requiredBytes, false, &result);
+      if(result != VK_SUCCESS || buffer == nullptr) {
+        error = "could not allocate reusable " + description + ": " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      return true;
+    }
+
+    bool ensureBuffers(
+      vector<VulkanBuffer*>& buffers,
+      size_t count,
+      VkDeviceSize requiredBytes,
+      VkResult& result,
+      string& error,
+      const string& description
+    ) {
+      buffers.resize(std::max(buffers.size(), count), nullptr);
+      for(size_t i = 0; i < count; i++) {
+        if(!ensureBuffer(buffers[i], requiredBytes, result, error, description))
+          return false;
+      }
+      return true;
+    }
+
+    bool ensureDescriptorPool(
+      uint32_t descriptorCount,
+      uint32_t maxSets,
+      VkResult& result,
+      string& error
+    ) {
+      if(resources.descriptorPool == VK_NULL_HANDLE || resources.descriptorCount < descriptorCount || resources.maxSets < maxSets) {
+        if(resources.descriptorPool != VK_NULL_HANDLE)
+          vkDestroyDescriptorPool(device->device, resources.descriptorPool, nullptr);
+        VkDescriptorPoolSize poolSize = {};
+        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSize.descriptorCount = descriptorCount;
+        VkDescriptorPoolCreateInfo poolInfo = {};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = maxSets;
+        result = vkCreateDescriptorPool(device->device, &poolInfo, nullptr, &resources.descriptorPool);
+        if(result != VK_SUCCESS) {
+          error = "could not create tuning descriptor pool: " + vk_helper::vkErrorToString(result);
+          resources.descriptorPool = VK_NULL_HANDLE;
+          return false;
+        }
+        resources.descriptorCount = descriptorCount;
+        resources.maxSets = maxSets;
+        return true;
+      }
+      result = vkResetDescriptorPool(device->device, resources.descriptorPool, 0);
+      if(result != VK_SUCCESS) {
+        error = "could not reset tuning descriptor pool: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      return true;
+    }
+
+    bool ensureQueryPool(
+      uint32_t queryCount,
+      VkResult& result,
+      string& error
+    ) {
+      if(resources.queryPool != VK_NULL_HANDLE && resources.queryCount >= queryCount)
+        return true;
+      if(resources.queryPool != VK_NULL_HANDLE)
+        vkDestroyQueryPool(device->device, resources.queryPool, nullptr);
+      VkQueryPoolCreateInfo queryPoolInfo = {};
+      queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      queryPoolInfo.queryCount = queryCount;
+      result = vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &resources.queryPool);
+      if(result != VK_SUCCESS) {
+        error = "could not create tuning query pool: " + vk_helper::vkErrorToString(result);
+        resources.queryPool = VK_NULL_HANDLE;
+        resources.queryCount = 0;
+        return false;
+      }
+      resources.queryCount = queryCount;
+      return true;
+    }
+
+    bool ensureCommandResources(VkResult& result, string& error) {
+      if(resources.fence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fenceInfo = {};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(device->device, &fenceInfo, nullptr, &resources.fence);
+        if(result != VK_SUCCESS) {
+          error = "could not create tuning fence: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+      }
+      if(resources.commandBuffer == VK_NULL_HANDLE) {
+        resources.commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
+        if(result != VK_SUCCESS) {
+          error = "could not allocate tuning command buffer: " + vk_helper::vkErrorToString(result);
+          resources.commandBuffer = VK_NULL_HANDLE;
+          return false;
+        }
+      }
+      result = vkResetCommandBuffer(resources.commandBuffer, 0);
+      if(result != VK_SUCCESS) {
+        error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      return true;
+    }
+
     const VulkanDevice* device;
     float timestampPeriod;
   };
@@ -2400,6 +2508,8 @@ namespace {
       return 0.0;
     }
 
+    vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
+    vector<Pipeline*> previousTargets;
     bool found = false;
     double bestScore = 0.0;
     double bestCallsPerSecond = 0.0;
@@ -2410,7 +2520,11 @@ namespace {
         continue;
       const size_t currentCandidateIndex = candidateIndex++;
       try {
-        vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
+        // The previous candidate has finished before the next pipeline is built.
+        // Reuse the pipeline cache and avoid a device-idle wait for every candidate.
+        for(Pipeline* pipeline: previousTargets)
+          pipelines.destroyPipeline(*pipeline);
+        previousTargets.clear();
         vector<const Pipeline*> targets;
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
@@ -2419,8 +2533,12 @@ namespace {
             targets, Tuner::name(),
             "pipeline creation failed: " + vk_helper::vkErrorToString(result)
           );
+          for(const Pipeline* pipeline: targets)
+            pipelines.destroyPipeline(*const_cast<Pipeline*>(pipeline));
           continue;
         }
+        for(const Pipeline* pipeline: targets)
+          previousTargets.push_back(const_cast<Pipeline*>(pipeline));
         double callsPerSecond = 0.0;
         vector<float> readback;
         vector<float> cpuReference;
@@ -3066,6 +3184,7 @@ void VulkanTuner::tune(
   Logger* logger,
   VulkanTuneParams& tunedConfig
 ) {
+  const auto hostStart = std::chrono::steady_clock::now();
   if(device == nullptr)
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
@@ -3120,6 +3239,10 @@ void VulkanTuner::tune(
   // Start in the baseline profile. Auto mode may replace this after its
   // full-model comparison; explicit FP16 selects P16/S16 at context creation.
   tunedConfig.activateProfile(PrecisionProfile::P32S32);
+  if(logger != nullptr) {
+    const double hostSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
+    logger->write("Vulkan tuning total host time: " + Global::doubleToString(hostSeconds) + " sec");
+  }
 }
 
 VulkanTuneParams VulkanTuner::loadOrCreate(
