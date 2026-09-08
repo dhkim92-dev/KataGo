@@ -35,41 +35,98 @@
 #define KWB (KWG/KDIMB)               // Amount of loads-per-thread for matrix B (K-dimension)
 #define NWB (NWG/NDIMB)               // Amount of loads-per-thread for matrix B (N-dimension)
 
-#define realM real4
-#define realN real4
-#define realstoreM realstore4
-#define realstoreN realstore4
-
-#define LOAD4(__buf, __x) real4((__buf)[(__x)>>2])
-
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-  // Match OpenCL's vloada_half4/vstorea_half4 paths: FP16 storage, FP32 registers.
-  #define LOADGLOBALM(__buf, __x) vec4((__buf)[(__x)])
-  #define LOADGLOBALN(__buf, __x) vec4((__buf)[(__x)])
-  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
-  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
-  #define LOADLOCALM(__buf, __x) vec4((__buf)[(__x)])
-  #define LOADLOCALN(__buf, __x) vec4((__buf)[(__x)])
-  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
-  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = f16vec4(__y))
+#if PRECISION == 16
+  #define real2 f16vec2
 #else
-  #define LOADGLOBALM(__buf, __x) __buf[(__x)]
-  #define LOADGLOBALN(__buf, __x) __buf[(__x)]
-  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = (__y))
-  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = (__y))
-  #define LOADLOCALM(__buf, __x) __buf[(__x)]
-  #define LOADLOCALN(__buf, __x) __buf[(__x)]
-  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = (__y))
-  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = (__y))
+  #define real2 vec2
 #endif
 
-// return single real value from real4 buffer
-#define LOADGLOBAL(__buf, __x) (__buf[(__x)>>2][(__x)&3])
-#define STOREGLOBAL(__buf, __x, __y)  {           \
-    real4 _tmp = __buf[(__x)>>2];          \
-    _tmp[(__x)&3] = __y;                   \
-    __buf[(__x)>>2] = _tmp;                \
-}
+#if VWM == 1
+  #define realM real
+  #define realstoreM realstore
+#elif VWM == 2
+  #define realM real2
+  #define realstoreM realstore2
+#elif VWM == 4
+  #define realM real4
+  #define realstoreM realstore4
+#else
+  #error "VWM must be 1, 2, or 4"
+#endif
+
+#if VWN == 1
+  #define realN real
+  #define realstoreN realstore
+#elif VWN == 2
+  #define realN real2
+  #define realstoreN realstore2
+#elif VWN == 4
+  #define realN real4
+  #define realstoreN realstore4
+#else
+  #error "VWN must be 1, 2, or 4"
+#endif
+
+#define LOAD4(__buf, __x) real4((__buf)[(__x)], (__buf)[(__x)+1], \
+                                (__buf)[(__x)+2], (__buf)[(__x)+3])
+
+#if VWM == 1
+  #define LOADGLOBALM(__buf, __x) real((__buf)[(__x)])
+  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
+  #define LOADLOCALM(__buf, __x) real((__buf)[(__x)])
+  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
+#elif VWM == 2
+  #define LOADGLOBALM(__buf, __x) realM(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
+  #define STOREGLOBALM(__buf, __x, __y) do { \
+    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
+  } while (false)
+  #define LOADLOCALM(__buf, __x) realM(real((__buf)[(__x)*2]), real((__buf)[(__x)*2+1]))
+  #define STORELOCALM(__buf, __x, __y) do { \
+    (__buf)[(__x)*2] = realstore((__y).x); (__buf)[(__x)*2+1] = realstore((__y).y); \
+  } while (false)
+#elif VWM == 4
+  #define LOADGLOBALM(__buf, __x) realM(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
+  #define STOREGLOBALM(__buf, __x, __y) do { \
+    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
+    (__buf)[(__x)+2] = realstore((__y).z); (__buf)[(__x)+3] = realstore((__y).w); \
+  } while (false)
+  #define LOADLOCALM(__buf, __x) realM(real((__buf)[(__x)*4]), real((__buf)[(__x)*4+1]), real((__buf)[(__x)*4+2]), real((__buf)[(__x)*4+3]))
+  #define STORELOCALM(__buf, __x, __y) do { \
+    (__buf)[(__x)*4] = realstore((__y).x); (__buf)[(__x)*4+1] = realstore((__y).y); \
+    (__buf)[(__x)*4+2] = realstore((__y).z); (__buf)[(__x)*4+3] = realstore((__y).w); \
+  } while (false)
+#endif
+
+#if VWN == 1
+  #define LOADGLOBALN(__buf, __x) real((__buf)[(__x)])
+  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
+  #define LOADLOCALN(__buf, __x) real((__buf)[(__x)])
+  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
+#elif VWN == 2
+  #define LOADGLOBALN(__buf, __x) realN(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
+  #define STOREGLOBALN(__buf, __x, __y) do { \
+    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
+  } while (false)
+  #define LOADLOCALN(__buf, __x) realN(real((__buf)[(__x)*2]), real((__buf)[(__x)*2+1]))
+  #define STORELOCALN(__buf, __x, __y) do { \
+    (__buf)[(__x)*2] = realstore((__y).x); (__buf)[(__x)*2+1] = realstore((__y).y); \
+  } while (false)
+#elif VWN == 4
+  #define LOADGLOBALN(__buf, __x) realN(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
+  #define STOREGLOBALN(__buf, __x, __y) do { \
+    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
+    (__buf)[(__x)+2] = realstore((__y).z); (__buf)[(__x)+3] = realstore((__y).w); \
+  } while (false)
+  #define LOADLOCALN(__buf, __x) realN(real((__buf)[(__x)*4]), real((__buf)[(__x)*4+1]), real((__buf)[(__x)*4+2]), real((__buf)[(__x)*4+3]))
+  #define STORELOCALN(__buf, __x, __y) do { \
+    (__buf)[(__x)*4] = realstore((__y).x); (__buf)[(__x)*4+1] = realstore((__y).y); \
+    (__buf)[(__x)*4+2] = realstore((__y).z); (__buf)[(__x)*4+3] = realstore((__y).w); \
+  } while (false)
+#endif
+
+// Return a single real value from the scalar backing buffer.
+#define LOADGLOBAL(__buf, __x) real((__buf)[(__x)])
+#define STOREGLOBAL(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
 
 realM InitAccRegisters() {
     return realM(ZERO);
@@ -90,7 +147,8 @@ void GlobalToLocalA(const int kSizeM, const int tid, const int kwg, const int ba
       int idk = kg + kwg;
 
       // Loads the data from global memory (not transposed) into the local memory
-      alm[kg*(MWG/VWM) + mg] = agm[baseA + idk*(kSizeM/VWM) + idm];
+    STORELOCALM(alm, kg*(MWG/VWM) + mg,
+                LOADGLOBALM(agm, baseA + idk*kSizeM + idm*VWM));
     }
   }
 }
@@ -109,7 +167,8 @@ void GlobalToLocalB(const int kSizeN, const int tid, const int kwg, const int ba
       int idn = ng + GroupId1() * (NWG/VWN);
       int idk = kg + kwg;
 
-      blm[kg*(NWG/VWN) + ng] = bgm[baseB + idk*(kSizeN/VWN) + idn];
+      STORELOCALN(blm, kg*(NWG/VWN) + ng,
+                  LOADGLOBALN(bgm, baseB + idk*kSizeN + idn*VWN));
     }
   }
 }
@@ -133,18 +192,26 @@ realN LocalToPrivateB(const int _ni, const int kg) {
 // #define MultiplyAddVector(cvec, avec, bval) (cvec + avec * bval) 
 #define MUL_ADD_SCALAR(a, b, c) fma((a), (b), (c))
 
-#define MultiplyAddVector(cvec, avec, bval) \
-  real4( MUL_ADD_SCALAR(avec.x, bval, cvec.x), \
-          MUL_ADD_SCALAR(avec.y, bval, cvec.y), \
-          MUL_ADD_SCALAR(avec.z, bval, cvec.z), \
-          MUL_ADD_SCALAR(avec.w, bval, cvec.w) ) 
+realM MultiplyAddVector(realM cvec, realM avec, real bval) {
+#if VWM == 1
+  return MUL_ADD_SCALAR(avec, bval, cvec);
+#elif VWM == 2
+  return realM(MUL_ADD_SCALAR(avec.x, bval, cvec.x),
+               MUL_ADD_SCALAR(avec.y, bval, cvec.y));
+#elif VWM == 4
+  return realM(MUL_ADD_SCALAR(avec.x, bval, cvec.x),
+               MUL_ADD_SCALAR(avec.y, bval, cvec.y),
+               MUL_ADD_SCALAR(avec.z, bval, cvec.z),
+               MUL_ADD_SCALAR(avec.w, bval, cvec.w));
+#endif
+}
 
 void StoreResults(realM _c_value, int _mi, int _ni, int _kSizeM, int _baseC) {
   int mg = _mi + LocalId0()*(MWI/VWM);
   int ng = _ni + LocalId1()*NWI;
   int idm = mg + GroupId0() * (MWG/VWM);
   int idn = ng + GroupId1() * NWG;
-  int index = _baseC + idn*(_kSizeM/VWM) + idm;
+  int index = _baseC + idn*_kSizeM + idm*VWM;
   realM xval = _c_value;
   STOREGLOBALM(cgm, index, xval);
 }
@@ -153,7 +220,8 @@ void StoreResults(realM _c_value, int _mi, int _ni, int _kSizeM, int _baseC) {
 /**
 * @brief Performs C += A*B where A, B, C are matrices and the multiplication is done in a tiled, batched manner.
 * a_offset, b_offset, c_offset are the starting offsets for the A, B, C matrices for the current batch element.
-* required to be divided by 4 (size of real4)
+* Offsets are scalar element counts; vectorized dimensions must be divisible by
+* the selected VWM/VWN values.
 */
 void XgemmBody(
   const int kSizeM, const int kSizeN, const int kSizeK,
@@ -166,9 +234,9 @@ void XgemmBody(
   realM cpm[NWI*(MWI/VWM)]; // NWI * MWI
   volatile int tid = LocalId0() + MDIMC*LocalId1();
 
-  const int baseA = a_offset / VWM;
-  const int baseB = b_offset / VWN;
-  const int baseC = c_offset / VWM;
+  const int baseA = a_offset;
+  const int baseB = b_offset;
+  const int baseC = c_offset;
 
   #pragma unroll
   for (int _mi = 0; _mi < MWI/VWM; _mi += 1) {
@@ -202,7 +270,7 @@ void XgemmBody(
 
         // Loads matrix B
         #pragma unroll
-        for (int _ni = 0; _ni < NWI/VWN; _ni += 1) {
+    for (int _ni = 0; _ni < NWI/VWN; _ni += 1) {
           bpm[_ni] = LocalToPrivateB(_ni, kg);
         }
         // Performs the accumulation (Cpm += Apm * Bpm)
@@ -211,10 +279,17 @@ void XgemmBody(
           #pragma unroll
           for (int _mi = 0; _mi < MWI/VWM; _mi += 1) {
             const realM aval = apm[_mi];
+          #if VWN == 1
+            cpm[_ni*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[_ni*(MWI/VWM) + _mi], aval, bpm[_ni]);
+          #elif VWN == 2
+            cpm[(_ni*VWN + 0)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 0)*(MWI/VWM) + _mi], aval, bpm[_ni].x);
+            cpm[(_ni*VWN + 1)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 1)*(MWI/VWM) + _mi], aval, bpm[_ni].y);
+          #elif VWN == 4
             cpm[(_ni*VWN + 0)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 0)*(MWI/VWM) + _mi], aval, bpm[_ni].x);
             cpm[(_ni*VWN + 1)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 1)*(MWI/VWM) + _mi], aval, bpm[_ni].y);
             cpm[(_ni*VWN + 2)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 2)*(MWI/VWM) + _mi], aval, bpm[_ni].z);
             cpm[(_ni*VWN + 3)*(MWI/VWM) + _mi] = MultiplyAddVector(cpm[(_ni*VWN + 3)*(MWI/VWM) + _mi], aval, bpm[_ni].w);
+          #endif
           }
         }
       }

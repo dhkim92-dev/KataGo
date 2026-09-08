@@ -21,8 +21,12 @@
 //  M |  [A]  |      M | [C] |
 //    |       |        |     |
 //    o-------o        o-----o
-#define VWM 4 
+#ifndef VWM
+#define VWM 4
+#endif
+#ifndef VWN
 #define VWN 4
+#endif
 #define STRM 0 
 #define STRN 0
 #define SA 1
@@ -55,19 +59,19 @@ layout(push_constant) uniform BatchedXGEMMParams {
 };
 
 layout(set = 0, binding = 0) readonly buffer MatA {
-  realstore4 agm[];
+  realstore agm[];
 };
 
 layout(set = 0, binding = 1) readonly buffer MatB {
-  realstore4 bgm[];
+  realstore bgm[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer MatC {
-  realstore4 cgm[];
+  realstore cgm[];
 };
 
-shared realstore4 alm[(_MWG * _KWG) / VWM];
-shared realstore4 blm[(_NWG * _KWG) / VWN];
+shared realstore alm[_MWG * _KWG];
+shared realstore blm[_NWG * _KWG];
 
 #define STRM 0
 #define STRN 0

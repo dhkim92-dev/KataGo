@@ -122,6 +122,12 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaults.xgemmDirect.KWID == 2);
   testAssert(defaults.xgemmDirect.PADA == 1);
   testAssert(defaults.xgemmDirect.PADB == 1);
+  testAssert(defaults.xgemmDirect.VWMD == 4);
+  testAssert(defaults.xgemmDirect.VWND == 4);
+  testAssert(defaults.xgemm.VWM == 4);
+  testAssert(defaults.xgemm.VWN == 4);
+  testAssert(defaults.xgemm16.VWM == 4);
+  testAssert(defaults.xgemm16.VWN == 4);
   testAssert(defaults.spatialRMSNorm.TILE_SIZE == 32);
   testAssert(defaults.spatialRMSNorm.APPLY_ELTS_PER_THREAD == 1);
   testAssert(defaults.rmsNorm.WG_C_SIZE == 64);
@@ -144,7 +150,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
   testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
-  testAssert(defaultLines.size() == 91);
+  testAssert(defaultLines.size() == 97);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -179,6 +185,12 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.xgemm.KWG = 32;
   params.xgemm16.MWG = 64;
   params.xgemm16.NWG = 64;
+  params.xgemm.VWM = 2;
+  params.xgemm.VWN = 1;
+  params.xgemm16.VWM = 1;
+  params.xgemm16.VWN = 2;
+  params.xgemmDirect.VWMD = 1;
+  params.xgemmDirect.VWND = 2;
   params.addChannelBiases.XY_ELTS_PER_THREAD = 2;
   params.addChannelBiases.NC_ELTS_PER_THREAD = 8;
   params.pointwise.LOCAL_SIZE = 128;
@@ -225,7 +237,13 @@ void Tests::runVulkanTunerPersistenceTests() {
   invalid.xgemmDirect.MDIMAD = 16;
   testAssert(!invalid.isValid());
   invalid = params;
-  invalid.xgemmDirect.MDIMCD = 4;
+  invalid.xgemmDirect.MDIMCD = 3;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.xgemm.VWM = 3;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.xgemmDirect.VWND = 3;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.PADA = 2;

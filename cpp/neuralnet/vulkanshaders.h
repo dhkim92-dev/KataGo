@@ -155,6 +155,47 @@ extern "C" {
   extern const unsigned char* _binary_xgemm_strided_batched_nn_p16s16_end;
   extern const size_t _binary_xgemm_strided_batched_nn_p16s16_size;
 
+#define DECLARE_XGEMM_VARIANT(name) \
+  extern const unsigned char _binary_##name##_start[]; \
+  extern const unsigned char* _binary_##name##_end; \
+  extern const size_t _binary_##name##_size;
+
+#define DECLARE_XGEMM_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
+
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+
+#undef DECLARE_XGEMM_WIDTH_VARIANTS
+#undef DECLARE_XGEMM_VARIANT
+
   // bn_mask_identity_fp32.glsl
   extern const unsigned char _binary_bn_mask_identity_fp32_start[];
   extern const unsigned char* _binary_bn_mask_identity_fp32_end;
@@ -1286,6 +1327,8 @@ struct LocalDimHash {
       uint32_t KWG=32;
       uint32_t MDIMA=8;
       uint32_t NDIMB=8;
+      uint32_t VWM=4;
+      uint32_t VWN=4;
 
       bool isValid() const;
       bool isSimple() const;
@@ -1300,6 +1343,8 @@ struct LocalDimHash {
       uint32_t KWID = 2;
       uint32_t PADA = 1;
       uint32_t PADB = 1;
+      uint32_t VWMD = 4;
+      uint32_t VWND = 4;
 
       bool isValid() const;
     };
@@ -1571,6 +1616,10 @@ struct LocalDimHash {
     VkShaderModule shaderModule_xgemm_strided_batched_nn_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_xgemm_strided_batched_nn_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_xgemm_strided_batched_nn_p32s16 = VK_NULL_HANDLE;
+    // Width-specific source variants: precision-major, then (1,1),(1,2),(1,4),...
+    VkShaderModule shaderModule_xgemm_batched_variants[27] = {};
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[27] = {};
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_variants[27] = {};
     std::vector<VkShaderModule*> shaderModuleFields;
     // In this code, assume that NCHW is default format if no postfix is given.
 

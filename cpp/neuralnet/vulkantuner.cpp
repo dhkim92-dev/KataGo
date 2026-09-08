@@ -171,37 +171,34 @@ bool ConvTuneParams::isValid(uint32_t convSize) const {
 }
 
 bool XgemmTuneParams::isValid() const {
-  if(MDIMC == 0 || NDIMC == 0 || MWG == 0 || NWG == 0 || KWG == 0 || MDIMA == 0 || NDIMB == 0)
+  if(MDIMC == 0 || NDIMC == 0 || MWG == 0 || NWG == 0 || KWG == 0 || MDIMA == 0 || NDIMB == 0 ||
+     (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
   const uint64_t workgroupSize = static_cast<uint64_t>(MDIMC) * NDIMC;
   if(workgroupSize == 0 || workgroupSize > 1024)
     return false;
-  return isMultipleOf(MWG, static_cast<uint64_t>(MDIMC) * 4) &&
-         isMultipleOf(NWG, static_cast<uint64_t>(NDIMC) * 4) &&
-         isMultipleOf(MWG, static_cast<uint64_t>(MDIMA) * 4) &&
-         isMultipleOf(NWG, static_cast<uint64_t>(NDIMB) * 4) &&
-         isMultipleOf(KWG, 4) &&
+  return isMultipleOf(MWG, static_cast<uint64_t>(MDIMC) * VWM) &&
+         isMultipleOf(NWG, static_cast<uint64_t>(NDIMC) * VWN) &&
+         isMultipleOf(MWG, static_cast<uint64_t>(MDIMA) * VWM) &&
+         isMultipleOf(NWG, static_cast<uint64_t>(NDIMB) * VWN) &&
+         isMultipleOf(KWG, VWM) &&
          isMultipleOf(KWG, workgroupSize / MDIMA) &&
          isMultipleOf(KWG, workgroupSize / NDIMB);
 }
 
 bool XgemmTuneParams::isSimple() const {
-  return MDIMC == MDIMA && NDIMC == NDIMB && MWG == NWG;
+  return MDIMC == MDIMA && NDIMC == NDIMB && VWM == VWN && MWG == NWG;
 }
 
 bool XgemmDirectTuneParams::isValid() const {
-  if(WGD == 0 || MDIMCD == 0 || NDIMCD == 0 || MDIMAD == 0 || NDIMBD == 0 || KWID == 0)
+  if(WGD == 0 || MDIMCD == 0 || NDIMCD == 0 || MDIMAD == 0 || NDIMBD == 0 || KWID == 0 ||
+     (VWMD != 1 && VWMD != 2 && VWMD != 4) || (VWND != 1 && VWND != 2 && VWND != 4))
     return false;
   if(PADA != 1 || PADB != 1)
     return false;
   const uint64_t workgroupSize = static_cast<uint64_t>(MDIMCD) * NDIMCD;
   if(workgroupSize > 1024)
     return false;
-  // Vulkan's shader fixes the OpenCL vector widths at VWMD=VWND=4; these
-  // values are not specialization parameters but remain part of the
-  // divisibility contract.
-  constexpr uint64_t VWMD = 4;
-  constexpr uint64_t VWND = 4;
   if(!isMultipleOf(WGD, KWID) ||
      !isMultipleOf(WGD, static_cast<uint64_t>(MDIMCD) * VWMD) ||
      !isMultipleOf(WGD, static_cast<uint64_t>(NDIMCD) * VWND) ||
@@ -364,15 +361,16 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrixNCHW.VWN == other.hgemmCooperativeMatrixNCHW.VWN &&
          xgemm.MDIMC == other.xgemm.MDIMC && xgemm.NDIMC == other.xgemm.NDIMC && xgemm.MWG == other.xgemm.MWG &&
          xgemm.NWG == other.xgemm.NWG && xgemm.KWG == other.xgemm.KWG && xgemm.MDIMA == other.xgemm.MDIMA &&
-         xgemm.NDIMB == other.xgemm.NDIMB &&
+         xgemm.NDIMB == other.xgemm.NDIMB && xgemm.VWM == other.xgemm.VWM && xgemm.VWN == other.xgemm.VWN &&
          xgemm16.MDIMC == other.xgemm16.MDIMC && xgemm16.NDIMC == other.xgemm16.NDIMC &&
          xgemm16.MWG == other.xgemm16.MWG && xgemm16.NWG == other.xgemm16.NWG &&
          xgemm16.KWG == other.xgemm16.KWG && xgemm16.MDIMA == other.xgemm16.MDIMA &&
-         xgemm16.NDIMB == other.xgemm16.NDIMB && xgemmDirect.WGD == other.xgemmDirect.WGD &&
+         xgemm16.NDIMB == other.xgemm16.NDIMB && xgemm16.VWM == other.xgemm16.VWM && xgemm16.VWN == other.xgemm16.VWN && xgemmDirect.WGD == other.xgemmDirect.WGD &&
          xgemmDirect.MDIMCD == other.xgemmDirect.MDIMCD && xgemmDirect.NDIMCD == other.xgemmDirect.NDIMCD &&
          xgemmDirect.MDIMAD == other.xgemmDirect.MDIMAD && xgemmDirect.NDIMBD == other.xgemmDirect.NDIMBD &&
          xgemmDirect.KWID == other.xgemmDirect.KWID && xgemmDirect.PADA == other.xgemmDirect.PADA &&
-         xgemmDirect.PADB == other.xgemmDirect.PADB &&
+         xgemmDirect.PADB == other.xgemmDirect.PADB && xgemmDirect.VWMD == other.xgemmDirect.VWMD &&
+         xgemmDirect.VWND == other.xgemmDirect.VWND &&
          transformer.ATTN_BLOCK_Q == other.transformer.ATTN_BLOCK_Q &&
          transformer.ATTN_BLOCK_KV == other.transformer.ATTN_BLOCK_KV &&
          transformer.Q_PER_THREAD == other.transformer.Q_PER_THREAD &&
@@ -408,10 +406,12 @@ namespace {
     WRITE("xgemmDirect.NDIMCD", profile.xgemmDirect.NDIMCD); WRITE("xgemmDirect.MDIMAD", profile.xgemmDirect.MDIMAD);
     WRITE("xgemmDirect.NDIMBD", profile.xgemmDirect.NDIMBD); WRITE("xgemmDirect.KWID", profile.xgemmDirect.KWID);
     WRITE("xgemmDirect.PADA", profile.xgemmDirect.PADA); WRITE("xgemmDirect.PADB", profile.xgemmDirect.PADB);
+    WRITE("xgemmDirect.VWMD", profile.xgemmDirect.VWMD); WRITE("xgemmDirect.VWND", profile.xgemmDirect.VWND);
 #define WRITE_XGEMM(name, params) \
     WRITE(name ".MWG", params.MWG); WRITE(name ".NWG", params.NWG); WRITE(name ".KWG", params.KWG); \
     WRITE(name ".MDIMC", params.MDIMC); WRITE(name ".NDIMC", params.NDIMC); \
-    WRITE(name ".MDIMA", params.MDIMA); WRITE(name ".NDIMB", params.NDIMB)
+    WRITE(name ".MDIMA", params.MDIMA); WRITE(name ".NDIMB", params.NDIMB); \
+    WRITE(name ".VWM", params.VWM); WRITE(name ".VWN", params.VWN)
     WRITE_XGEMM("xgemm", profile.xgemm); WRITE_XGEMM("xgemm16", profile.xgemm16);
 #undef WRITE_XGEMM
 #define WRITE_HGEMM(name, params) \
@@ -485,17 +485,18 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 90)
+  if(values.size() != 96)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
     const auto read = [&](const string& name) {
       return getParam(values, prefix.empty() ? name : prefix + "." + name, filename);
     };
-    profile.xgemmDirect.WGD = read("xgemmDirect.WGD"); profile.xgemmDirect.MDIMCD = read("xgemmDirect.MDIMCD"); profile.xgemmDirect.NDIMCD = read("xgemmDirect.NDIMCD"); profile.xgemmDirect.MDIMAD = read("xgemmDirect.MDIMAD"); profile.xgemmDirect.NDIMBD = read("xgemmDirect.NDIMBD"); profile.xgemmDirect.KWID = read("xgemmDirect.KWID"); profile.xgemmDirect.PADA = read("xgemmDirect.PADA"); profile.xgemmDirect.PADB = read("xgemmDirect.PADB");
+    profile.xgemmDirect.WGD = read("xgemmDirect.WGD"); profile.xgemmDirect.MDIMCD = read("xgemmDirect.MDIMCD"); profile.xgemmDirect.NDIMCD = read("xgemmDirect.NDIMCD"); profile.xgemmDirect.MDIMAD = read("xgemmDirect.MDIMAD"); profile.xgemmDirect.NDIMBD = read("xgemmDirect.NDIMBD"); profile.xgemmDirect.KWID = read("xgemmDirect.KWID"); profile.xgemmDirect.PADA = read("xgemmDirect.PADA"); profile.xgemmDirect.PADB = read("xgemmDirect.PADB"); profile.xgemmDirect.VWMD = read("xgemmDirect.VWMD"); profile.xgemmDirect.VWND = read("xgemmDirect.VWND");
 #define READ_XGEMM(name, params) \
     params.MWG = read(name ".MWG"); params.NWG = read(name ".NWG"); params.KWG = read(name ".KWG"); \
-    params.MDIMC = read(name ".MDIMC"); params.NDIMC = read(name ".NDIMC"); params.MDIMA = read(name ".MDIMA"); params.NDIMB = read(name ".NDIMB")
+    params.MDIMC = read(name ".MDIMC"); params.NDIMC = read(name ".NDIMC"); params.MDIMA = read(name ".MDIMA"); params.NDIMB = read(name ".NDIMB"); \
+    params.VWM = read(name ".VWM"); params.VWN = read(name ".VWN")
     READ_XGEMM("xgemm", profile.xgemm); READ_XGEMM("xgemm16", profile.xgemm16);
 #undef READ_XGEMM
 #define READ_HGEMM(name, params) \
@@ -924,6 +925,8 @@ namespace {
       add("KWID", config.xgemmDirect.KWID);
       add("PADA", config.xgemmDirect.PADA);
       add("PADB", config.xgemmDirect.PADB);
+      add("VWMD", config.xgemmDirect.VWMD);
+      add("VWND", config.xgemmDirect.VWND);
     }
     else if(tunerName == "xgemm" || tunerName == "xgemm16") {
       const XgemmTuneParams& params = tunerName == "xgemm" ? config.xgemm : config.xgemm16;
@@ -934,6 +937,8 @@ namespace {
       add("KWG", params.KWG);
       add("MDIMA", params.MDIMA);
       add("NDIMB", params.NDIMB);
+      add("VWM", params.VWM);
+      add("VWN", params.VWN);
     }
     else if(tunerName == "hgemmCooperativeMatrix") {
       add("MWARP", config.hgemmCooperativeMatrix.MWARP);
@@ -2744,6 +2749,8 @@ namespace {
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMCD = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.MDIMAD = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.NDIMBD = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.VWMD = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.VWND = v; });
       addCandidates(configs, full ? vector<int>{2,8,16} : vector<int>{2,8}, [](VulkanTuneParams& p, int v) { p.xgemmDirect.KWID = v; });
       VulkanTuneParams slightlyTunedConfig = current;
       slightlyTunedConfig.xgemmDirect = VulkanTuneParams().xgemmDirect;
@@ -2870,6 +2877,8 @@ namespace {
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMA = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMB = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemm.VWM = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemm.VWN = v; });
       VulkanTuneParams slightlyTunedConfig = current;
       slightlyTunedConfig.xgemm = VulkanTuneParams().xgemm;
       slightlyTunedConfig.xgemm.MDIMC = 8;
@@ -2927,6 +2936,8 @@ namespace {
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.MDIMA = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMB = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemm16.VWM = v; });
+      addCandidates(configs, vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.xgemm16.VWN = v; });
 
       VulkanTuneParams slightlyTunedConfig = current;
       slightlyTunedConfig.xgemm16 = openCLReferenceParams();

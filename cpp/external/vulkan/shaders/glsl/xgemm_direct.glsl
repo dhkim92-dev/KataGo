@@ -6,6 +6,12 @@
 */
 #include "common.glsl"
 
+#if PRECISION == 16
+  #define real2d f16vec2
+#else
+  #define real2d vec2
+#endif
+
 #ifndef WGD 
 #define WGD _WGD 
 #endif 
@@ -73,45 +79,64 @@
 
 #define SetToZero(a) a = ZERO
 
-// Load a single element from global memory, __x means index of element that in real array, not index of real4 vector. This is used for loading the bias vector in the post-processing stage.
-// __buf is vectorized buffer, only real4
+// Load a single element from the scalar backing buffer. This is used for
+// loading individual elements on scalar and edge paths.
 #if PRECISION_STORAGE == 16 && PRECISION == 32
-    #define LOADSINGLEGLOBAL(__buf,__x) real((__buf)[(__x)>>2][(__x)&0x3])
-    #define LOADSINGLELOCAL(__buf,__x) real((__buf)[(__x)>>2][(__x)&0x3])
-    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)>>2][(__x)&0x3] = realstore(__val))
+    #define LOADSINGLEGLOBAL(__buf,__x) real((__buf)[(__x)])
+    #define LOADSINGLELOCAL(__buf,__x) real((__buf)[(__x)])
+    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
 #else
-    #define LOADSINGLEGLOBAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
-    #define LOADSINGLELOCAL(__buf,__x) ((__buf)[(__x)>>2][(__x)&0x3])
-    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)>>2][(__x)&0x3] = (__val))
+    #define LOADSINGLEGLOBAL(__buf,__x) ((__buf)[(__x)])
+    #define LOADSINGLELOCAL(__buf,__x) ((__buf)[(__x)])
+    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
 #endif
 
-#define realMD real4
-#define realstoreMD realstore4
-#define realND real4
-#define realstoreND realstore4
-
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-    #define LOADGLOBALM(__buf,__x) real4((__buf)[(__x)])
-    #define LOADLOCALM(__buf,__x) real4((__buf)[(__x)])
-    #define STOREGLOBALM(__buf,__x,__val) ((__buf)[(__x)] = realstore4(__val))
+#if VWMD == 1
+  #define realMD real
+  #define realstoreMD realstore
+#elif VWMD == 2
+  #define realMD real2d
+  #define realstoreMD realstore2
+#elif VWMD == 4
+  #define realMD real4
+  #define realstoreMD realstore4
 #else
-    #define LOADGLOBALM(__buf,__x) ((__buf)[(__x)])
-    #define LOADLOCALM(__buf,__x) ((__buf)[(__x)])
-    #define STOREGLOBALM(__buf,__x,__val) ((__buf)[(__x)] = (__val))
+  #error "VWMD must be 1, 2, or 4"
 #endif
 
-#define realND real4
-#define realstoreND realstore4
-
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-    #define LOADGLOBALN(__buf,__x) real4((__buf)[(__x)])
-    #define LOADLOCALN(__buf,__x) real4((__buf)[(__x)])
-    #define STOREGLOBALN(__buf,__x,__val) ((__buf)[(__x)] = realstore4(__val))
+#if VWND == 1
+  #define realND real
+  #define realstoreND realstore
+#elif VWND == 2
+  #define realND real2d
+  #define realstoreND realstore2
+#elif VWND == 4
+  #define realND real4
+  #define realstoreND realstore4
 #else
-  #define LOADGLOBALN(__buf,__x) ((__buf)[(__x)])
-  #define LOADLOCALN(__buf,__x) ((__buf)[(__x)])
-  #define STOREGLOBALN(__buf,__x,__val) ((__buf)[(__x)] = (__val))
+  #error "VWND must be 1, 2, or 4"
 #endif
+
+#if VWMD == 1
+  #define LOADGLOBALM(__buf,__x) real((__buf)[(__x)])
+#elif VWMD == 2
+  #define LOADGLOBALM(__buf,__x) realMD(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
+#elif VWMD == 4
+  #define LOADGLOBALM(__buf,__x) realMD(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
+#endif
+
+#if VWND == 1
+  #define LOADGLOBALN(__buf,__x) real((__buf)[(__x)])
+#elif VWND == 2
+  #define LOADGLOBALN(__buf,__x) realND(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
+#elif VWND == 4
+  #define LOADGLOBALN(__buf,__x) realND(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
+#endif
+
+#define LOADLOCALM(__buf,__x) ((__buf)[(__x)])
+#define STOREGLOBALM(__buf,__x,__val) ((__buf)[(__x)] = (__val))
+#define LOADLOCALN(__buf,__x) ((__buf)[(__x)])
+#define STOREGLOBALN(__buf,__x,__val) ((__buf)[(__x)] = (__val))
 
 #define Multiply(c, a, b) (c) = (a) * (b)
 #define MultiplyAdd(c, a, b) (c) += (a) * (b)
@@ -123,7 +148,7 @@ real GlobalToPrivateDirectA(
     const int a_conjugate
 ) {
   // in opencl, agms means global memory for matrix A(not vectorized buffer)
-  // in opengl, we consider it as an array of real4 vector. 
+  // Vulkan uses a scalar backing array; vector loads are expanded below.
   const int a_index = (a_transpose == 1) ? (idm + _mi)*a_ld + idk : idk*a_ld + (idm + _mi);
   // real result = LOADGLOBAL(agms,a_index + a_offset);
   real result = LOADSINGLEGLOBAL(agm,a_index + a_offset);
@@ -272,11 +297,18 @@ void GlobalToLocalDirectA(const int a_ld, const int a_offset, const int kwg,
       int idk = (a_transpose==1) ? kg + GroupId0()*WGD : kg + kwg;
 
       // Loads the data from global memory into the local memory
-      const realMD avec = LOADGLOBALM(agm,idk*(a_ld/VWMD) + idm + (a_offset/VWMD));
-        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 0, avec.x);
-        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 1, avec.y);
-        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 2, avec.z);
-        STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 3, avec.w);
+      const realMD avec = LOADGLOBALM(agm,idk*a_ld + idm*VWMD + a_offset);
+#if VWMD == 1
+      STORELOCAL(alm, kg*(WGD + PADA) + mg, avec);
+#elif VWMD == 2
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 0, avec.x);
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 1, avec.y);
+#elif VWMD == 4
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 0, avec.x);
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 1, avec.y);
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 2, avec.z);
+      STORELOCAL(alm, kg*(WGD + PADA) + mg*VWMD + 3, avec.w);
+#endif
     }
   }
 }
@@ -309,11 +341,18 @@ void GlobalToLocalDirectB(
       int idk = (b_transpose==1) ? kg + GroupId1()*WGD : kg + kwg;
 
       // Loads the data from global memory into the local memory
-      const realND bvec = LOADGLOBALN(bgm,idk*(b_ld/VWND) + idn + (b_offset/VWND));
+      const realND bvec = LOADGLOBALN(bgm,idk*b_ld + idn*VWND + b_offset);
+#if VWND == 1
+      STORELOCAL(blm, kg*(WGD + PADB) + ng, bvec);
+#elif VWND == 2
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 0, bvec.x);
+      STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 1, bvec.y);
+#elif VWND == 4
       STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 0, bvec.x);
       STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 1, bvec.y);
       STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 2, bvec.z);
       STORELOCAL(blm, kg*(WGD + PADB) + ng*VWND + 3, bvec.w);
+#endif
     }
   }
 }

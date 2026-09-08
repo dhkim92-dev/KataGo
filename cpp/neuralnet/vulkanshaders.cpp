@@ -16,6 +16,26 @@ using namespace vk_shader::tune;
 namespace vk_shader {
 
   namespace {
+    int vectorWidthSlot(uint32_t width) {
+      return width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : -1;
+    }
+
+    int xgemmVariantIndex(uint32_t firstWidth, uint32_t secondWidth, int precision) {
+      const int firstSlot = vectorWidthSlot(firstWidth);
+      const int secondSlot = vectorWidthSlot(secondWidth);
+      return firstSlot < 0 || secondSlot < 0 ? -1 : precision * 9 + firstSlot * 3 + secondSlot;
+    }
+
+    const char* xgemmPrecisionName(int precision) {
+      return precision == 0 ? "p32s32" : precision == 1 ? "p32s16" : "p16s16";
+    }
+
+    std::string xgemmVariantName(const char* base, const char* firstPrefix, const char* secondPrefix,
+                                 uint32_t firstWidth, uint32_t secondWidth, int precision) {
+      return std::string(base) + "_" + firstPrefix + std::to_string(firstWidth) + "_" +
+        secondPrefix + std::to_string(secondWidth) + "_" + xgemmPrecisionName(precision);
+    }
+
     template <typename Spec>
     struct SpecializationData {
       std::vector<int32_t> data;
@@ -127,6 +147,44 @@ namespace vk_shader {
   // xgemm_strided_batched_nn_p16s16
   const unsigned char* spirv_xgemm_strided_batched_nn_p16s16 = _binary_xgemm_strided_batched_nn_p16s16_start;
   size_t spirv_xgemm_strided_batched_nn_p16s16_size = _binary_xgemm_strided_batched_nn_p16s16_size;
+
+#define DEFINE_XGEMM_VARIANT(name) \
+  const unsigned char* spirv_##name = _binary_##name##_start; \
+  size_t spirv_##name##_size = _binary_##name##_size;
+#define DEFINE_XGEMM_WIDTH_VARIANTS(base, mp, np) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##1_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##2_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##4_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##1_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##2_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##4_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##1_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
+
+  DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
+  DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+#undef DEFINE_XGEMM_WIDTH_VARIANTS
+#undef DEFINE_XGEMM_VARIANT
 
   // bn_mask_identity_fp32
   const unsigned char* spirv_bn_mask_identity_fp32 = _binary_bn_mask_identity_fp32_start;
@@ -325,6 +383,34 @@ namespace vk_shader {
       size_t size;
       VkShaderModule* module;
     };
+#define XGEMM_WIDTH_SOURCES(base, mp, np, modules) \
+      {spirv_##base##_##mp##1_##np##1_p32s32, spirv_##base##_##mp##1_##np##1_p32s32_size, &modules[0]}, \
+      {spirv_##base##_##mp##1_##np##2_p32s32, spirv_##base##_##mp##1_##np##2_p32s32_size, &modules[1]}, \
+      {spirv_##base##_##mp##1_##np##4_p32s32, spirv_##base##_##mp##1_##np##4_p32s32_size, &modules[2]}, \
+      {spirv_##base##_##mp##2_##np##1_p32s32, spirv_##base##_##mp##2_##np##1_p32s32_size, &modules[3]}, \
+      {spirv_##base##_##mp##2_##np##2_p32s32, spirv_##base##_##mp##2_##np##2_p32s32_size, &modules[4]}, \
+      {spirv_##base##_##mp##2_##np##4_p32s32, spirv_##base##_##mp##2_##np##4_p32s32_size, &modules[5]}, \
+      {spirv_##base##_##mp##4_##np##1_p32s32, spirv_##base##_##mp##4_##np##1_p32s32_size, &modules[6]}, \
+      {spirv_##base##_##mp##4_##np##2_p32s32, spirv_##base##_##mp##4_##np##2_p32s32_size, &modules[7]}, \
+      {spirv_##base##_##mp##4_##np##4_p32s32, spirv_##base##_##mp##4_##np##4_p32s32_size, &modules[8]}, \
+      {spirv_##base##_##mp##1_##np##1_p32s16, spirv_##base##_##mp##1_##np##1_p32s16_size, &modules[9]}, \
+      {spirv_##base##_##mp##1_##np##2_p32s16, spirv_##base##_##mp##1_##np##2_p32s16_size, &modules[10]}, \
+      {spirv_##base##_##mp##1_##np##4_p32s16, spirv_##base##_##mp##1_##np##4_p32s16_size, &modules[11]}, \
+      {spirv_##base##_##mp##2_##np##1_p32s16, spirv_##base##_##mp##2_##np##1_p32s16_size, &modules[12]}, \
+      {spirv_##base##_##mp##2_##np##2_p32s16, spirv_##base##_##mp##2_##np##2_p32s16_size, &modules[13]}, \
+      {spirv_##base##_##mp##2_##np##4_p32s16, spirv_##base##_##mp##2_##np##4_p32s16_size, &modules[14]}, \
+      {spirv_##base##_##mp##4_##np##1_p32s16, spirv_##base##_##mp##4_##np##1_p32s16_size, &modules[15]}, \
+      {spirv_##base##_##mp##4_##np##2_p32s16, spirv_##base##_##mp##4_##np##2_p32s16_size, &modules[16]}, \
+      {spirv_##base##_##mp##4_##np##4_p32s16, spirv_##base##_##mp##4_##np##4_p32s16_size, &modules[17]}, \
+      {spirv_##base##_##mp##1_##np##1_p16s16, spirv_##base##_##mp##1_##np##1_p16s16_size, &modules[18]}, \
+      {spirv_##base##_##mp##1_##np##2_p16s16, spirv_##base##_##mp##1_##np##2_p16s16_size, &modules[19]}, \
+      {spirv_##base##_##mp##1_##np##4_p16s16, spirv_##base##_##mp##1_##np##4_p16s16_size, &modules[20]}, \
+      {spirv_##base##_##mp##2_##np##1_p16s16, spirv_##base##_##mp##2_##np##1_p16s16_size, &modules[21]}, \
+      {spirv_##base##_##mp##2_##np##2_p16s16, spirv_##base##_##mp##2_##np##2_p16s16_size, &modules[22]}, \
+      {spirv_##base##_##mp##2_##np##4_p16s16, spirv_##base##_##mp##2_##np##4_p16s16_size, &modules[23]}, \
+      {spirv_##base##_##mp##4_##np##1_p16s16, spirv_##base##_##mp##4_##np##1_p16s16_size, &modules[24]}, \
+      {spirv_##base##_##mp##4_##np##2_p16s16, spirv_##base##_##mp##4_##np##2_p16s16_size, &modules[25]}, \
+      {spirv_##base##_##mp##4_##np##4_p16s16, spirv_##base##_##mp##4_##np##4_p16s16_size, &modules[26]},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -411,8 +497,12 @@ namespace vk_shader {
       {spirv_xgemm_direct_batched_tt_p32s16, spirv_xgemm_direct_batched_tt_p32s16_size, &shaderModule_xgemm_direct_batched_tt_p32s16},
       {spirv_xgemm_strided_batched_nn_fp32, spirv_xgemm_strided_batched_nn_fp32_size, &shaderModule_xgemm_strided_batched_nn_fp32},
       {spirv_xgemm_strided_batched_nn_p16s16, spirv_xgemm_strided_batched_nn_p16s16_size, &shaderModule_xgemm_strided_batched_nn_p16s16},
-      {spirv_xgemm_strided_batched_nn_p32s16, spirv_xgemm_strided_batched_nn_p32s16_size, &shaderModule_xgemm_strided_batched_nn_p32s16}
+      {spirv_xgemm_strided_batched_nn_p32s16, spirv_xgemm_strided_batched_nn_p32s16_size, &shaderModule_xgemm_strided_batched_nn_p32s16},
+      XGEMM_WIDTH_SOURCES(xgemm_batched, vwm, vwn, shaderModule_xgemm_batched_variants)
+      XGEMM_WIDTH_SOURCES(xgemm_direct_batched_tt, vwmd, vwnd, shaderModule_xgemm_direct_batched_tt_variants)
+      XGEMM_WIDTH_SOURCES(xgemm_strided_batched_nn, vwmd, vwnd, shaderModule_xgemm_strided_batched_nn_variants)
     };
+#undef XGEMM_WIDTH_SOURCES
     shaderModuleFields.clear();
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
@@ -955,7 +1045,15 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    return createPipeline("xgemm_direct_batched_tt_fp32", shaderModule_xgemm_direct_batched_tt_fp32, 3, sizeof(XgemmDirectBatchedTTParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    const int precision = 0;
+    const int variant = xgemmVariantIndex(tuneParams.VWMD, tuneParams.VWND, precision);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    return createPipeline(
+      xgemmVariantName("xgemm_direct_batched_tt", "vwmd", "vwnd", tuneParams.VWMD, tuneParams.VWND, precision),
+      shaderModule_xgemm_direct_batched_tt_variants[variant], 3, sizeof(XgemmDirectBatchedTTParams), pipeline,
+      &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+    );
   }
 
   VkResult ComputePipelines::createXgemmBatched(
@@ -984,12 +1082,15 @@ namespace vk_shader {
     std::vector<VkSpecializationMapEntry> mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    if(useFP16Storage) {
-      if(useFP16Compute)
-        return createPipeline("xgemm_batched_p16s16", shaderModule_xgemm_batched_p16s16, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("xgemm_batched_p32s16", shaderModule_xgemm_batched_p32s16, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    }
-    return createPipeline("xgemm_batched_fp32", shaderModule_xgemm_batched_fp32, 3, sizeof(XGEMMBatchedParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    const int precision = useFP16Storage ? (useFP16Compute ? 2 : 1) : 0;
+    const int variant = xgemmVariantIndex(selectedTuneParams.VWM, selectedTuneParams.VWN, precision);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    return createPipeline(
+      xgemmVariantName("xgemm_batched", "vwm", "vwn", selectedTuneParams.VWM, selectedTuneParams.VWN, precision),
+      shaderModule_xgemm_batched_variants[variant], 3, sizeof(XGEMMBatchedParams), pipeline,
+      &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+    );
   }
 
   VkResult ComputePipelines::createXgemmStridedBatched(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams) {
@@ -1008,12 +1109,16 @@ namespace vk_shader {
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
-      if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("xgemm_strided_batched_nn_p16s16", shaderModule_xgemm_strided_batched_nn_p16s16, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("xgemm_strided_batched_nn_p32s16", shaderModule_xgemm_strided_batched_nn_p32s16, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-    }
-    return createPipeline("xgemm_strided_batched_nn_fp32", shaderModule_xgemm_strided_batched_nn_fp32, 3, sizeof(XgemmStridedBatchedFp32Params), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    const int precision = vulkanParams.canUseFP16Storage && vulkanParams.shouldUseFP16Storage
+      ? (vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Compute ? 2 : 1) : 0;
+    const int variant = xgemmVariantIndex(tuneParams.VWMD, tuneParams.VWND, precision);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    return createPipeline(
+      xgemmVariantName("xgemm_strided_batched_nn", "vwmd", "vwnd", tuneParams.VWMD, tuneParams.VWND, precision),
+      shaderModule_xgemm_strided_batched_nn_variants[variant], 3, sizeof(XgemmStridedBatchedFp32Params), pipeline,
+      &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+    );
   }
 
   VkResult ComputePipelines::createBatchNormMaskIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams) {
