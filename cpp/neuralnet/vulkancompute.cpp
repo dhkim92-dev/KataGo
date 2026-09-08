@@ -473,7 +473,7 @@ void batchedXGemmDirect_MK_NK_MN(
     params.cTranspose = 1;
     vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
-    const uint32_t WGD = tuneParams.p32s32.xgemmDirect.WGD;
+    const uint32_t WGD = tuneParams.xgemmDirect.WGD;
     size_t mCeiled = vk_helper::roundUpToMultiple(M, WGD);
     size_t nCeiled = vk_helper::roundUpToMultiple(N, WGD);
     uint32_t global[3] = {

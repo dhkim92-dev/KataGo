@@ -384,50 +384,8 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          spatialRMSNorm.APPLY_ELTS_PER_THREAD == other.spatialRMSNorm.APPLY_ELTS_PER_THREAD;
 }
 
-VulkanTuneParams::VulkanTuneParams() {
-  p32s32 = static_cast<const VulkanTuningProfile&>(*this);
-  p32s16 = p32s32;
-  p16s16 = p32s32;
-}
-
-VulkanTuningProfile& VulkanTuneParams::profile(PrecisionProfile precision) {
-  switch(precision) {
-  case PrecisionProfile::P32S32: return p32s32;
-  case PrecisionProfile::P32S16: return p32s16;
-  case PrecisionProfile::P16S16: return p16s16;
-  default: break;
-  }
-  throw StringError("VulkanTuneParams::profile: invalid precision profile");
-}
-
-const VulkanTuningProfile& VulkanTuneParams::profile(PrecisionProfile precision) const {
-  return const_cast<VulkanTuneParams*>(this)->profile(precision);
-}
-
-PrecisionProfile VulkanTuneParams::configuredProfile() const {
-  if(vulkan.shouldUseFP16Compute)
-    return PrecisionProfile::P16S16;
-  if(vulkan.shouldUseFP16Storage)
-    return PrecisionProfile::P32S16;
-  return PrecisionProfile::P32S32;
-}
-
-void VulkanTuneParams::activateProfile(PrecisionProfile precision) {
-  static_cast<VulkanTuningProfile&>(*this) = profile(precision);
-  vulkan.shouldUseFP16Storage = precision != PrecisionProfile::P32S32;
-  vulkan.shouldUseFP16Compute = precision == PrecisionProfile::P16S16;
-}
-
-void VulkanTuneParams::activateConfiguredProfile() {
-  static_cast<VulkanTuningProfile&>(*this) = profile(configuredProfile());
-}
-
-void VulkanTuneParams::commitActiveProfile(PrecisionProfile precision) {
-  profile(precision) = static_cast<const VulkanTuningProfile&>(*this);
-}
-
 bool VulkanTuneParams::isValid() const {
-  return VulkanTuningProfile::isValid() && p32s32.isValid() && p32s16.isValid() && p16s16.isValid();
+  return VulkanTuningProfile::isValid();
 }
 
 bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
@@ -440,13 +398,12 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          vulkan.shouldUseCooperativeMatrix == other.vulkan.shouldUseCooperativeMatrix &&
          vulkan.shouldUseHgemmCooperativeMatrixNCHW == other.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
          vulkan.shouldUseSubgroup == other.vulkan.shouldUseSubgroup &&
-         static_cast<const VulkanTuningProfile&>(*this) == static_cast<const VulkanTuningProfile&>(other) &&
-         p32s32 == other.p32s32 && p32s16 == other.p32s16 && p16s16 == other.p16s16;
+         static_cast<const VulkanTuningProfile&>(*this) == static_cast<const VulkanTuningProfile&>(other);
 }
 
 namespace {
   void writeTuningProfile(ofstream& out, const string& prefix, const VulkanTuningProfile& profile) {
-#define WRITE(name, value) writeParam(out, prefix + "." name, value)
+#define WRITE(name, value) writeParam(out, prefix.empty() ? name : prefix + "." name, value)
     WRITE("xgemmDirect.WGD", profile.xgemmDirect.WGD); WRITE("xgemmDirect.MDIMCD", profile.xgemmDirect.MDIMCD);
     WRITE("xgemmDirect.NDIMCD", profile.xgemmDirect.NDIMCD); WRITE("xgemmDirect.MDIMAD", profile.xgemmDirect.MDIMAD);
     WRITE("xgemmDirect.NDIMBD", profile.xgemmDirect.NDIMBD); WRITE("xgemmDirect.KWID", profile.xgemmDirect.KWID);
@@ -500,9 +457,7 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
   writeParam(out, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
   writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
-  writeTuningProfile(out, "p32s32", config.p32s32);
-  writeTuningProfile(out, "p32s16", config.p32s16);
-  writeTuningProfile(out, "p16s16", config.p16s16);
+  writeTuningProfile(out, "", static_cast<const VulkanTuningProfile&>(config));
 }
 
 VulkanTuneParams VulkanTuneParams::load(const string& filename) {
@@ -530,11 +485,13 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 252)
+  if(values.size() != 90)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
-    const auto read = [&](const string& name) { return getParam(values, prefix + "." + name, filename); };
+    const auto read = [&](const string& name) {
+      return getParam(values, prefix.empty() ? name : prefix + "." + name, filename);
+    };
     profile.xgemmDirect.WGD = read("xgemmDirect.WGD"); profile.xgemmDirect.MDIMCD = read("xgemmDirect.MDIMCD"); profile.xgemmDirect.NDIMCD = read("xgemmDirect.NDIMCD"); profile.xgemmDirect.MDIMAD = read("xgemmDirect.MDIMAD"); profile.xgemmDirect.NDIMBD = read("xgemmDirect.NDIMBD"); profile.xgemmDirect.KWID = read("xgemmDirect.KWID"); profile.xgemmDirect.PADA = read("xgemmDirect.PADA"); profile.xgemmDirect.PADB = read("xgemmDirect.PADB");
 #define READ_XGEMM(name, params) \
     params.MWG = read(name ".MWG"); params.NWG = read(name ".NWG"); params.KWG = read(name ".KWG"); \
@@ -570,10 +527,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   config.vulkan.shouldUseCooperativeMatrix = getBoolParam(values, "vulkan.shouldUseCooperativeMatrix", filename);
   config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = getBoolParam(values, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", filename);
   config.vulkan.shouldUseSubgroup = getBoolParam(values, "vulkan.shouldUseSubgroup", filename);
-  readProfile("p32s32", config.p32s32);
-  readProfile("p32s16", config.p32s16);
-  readProfile("p16s16", config.p16s16);
-  config.activateConfiguredProfile();
+  readProfile("", static_cast<VulkanTuningProfile&>(config));
   if(!config.isValid())
     throw IOError("VulkanTuneParams::load: parameters are invalid in " + filename);
   return config;
@@ -761,7 +715,6 @@ namespace {
     int nnYLen;
     const VulkanTuner::ModelInfoForTuning& modelInfo;
     bool full;
-    bool testOnly;
     Logger* logger;
   };
 
@@ -2650,20 +2603,16 @@ namespace {
   template<typename Tuner>
   double testAllConfigs(const TuningContext& context, VulkanTuneParams& currentConfig) {
     vector<VulkanTuneParams> configs;
-    if(context.testOnly)
-      configs = {currentConfig};
-    else {
-      configs = Tuner::candidates(currentConfig, context.full, context);
-      VulkanTuneParams defaults;
-      configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
-      dedupCandidates(configs);
-      const size_t firstShuffledIndex = KeepsCurrentConfigFirst<Tuner>::value ? 2 : 1;
-      if(configs.size() > 2) {
-        Rand rand("VulkanTuner:" + Tuner::name());
-        for(size_t i = configs.size() - 1; i > firstShuffledIndex; i--) {
-          const size_t j = firstShuffledIndex + static_cast<size_t>(rand.nextUInt64(i - firstShuffledIndex + 1));
-          swap(configs[i], configs[j]);
-        }
+    configs = Tuner::candidates(currentConfig, context.full, context);
+    VulkanTuneParams defaults;
+    configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
+    dedupCandidates(configs);
+    const size_t firstShuffledIndex = KeepsCurrentConfigFirst<Tuner>::value ? 2 : 1;
+    if(configs.size() > 2) {
+      Rand rand("VulkanTuner:" + Tuner::name());
+      for(size_t i = configs.size() - 1; i > firstShuffledIndex; i--) {
+        const size_t j = firstShuffledIndex + static_cast<size_t>(rand.nextUInt64(i - firstShuffledIndex + 1));
+        swap(configs[i], configs[j]);
       }
     }
     const size_t validCandidateCount = count_if(configs.begin(), configs.end(), Tuner::isValid);
@@ -2768,23 +2717,6 @@ namespace {
   template<typename Tuner>
   double runTuner(const TuningContext& context, VulkanTuneParams& currentConfig) {
     return testAllConfigs<Tuner>(context, currentConfig);
-  }
-
-  template<typename Tuner>
-  double testCurrentConfig(const TuningContext& context, VulkanTuneParams& currentConfig) {
-    TuningContext testContext = context;
-    testContext.testOnly = true;
-    return runTuner<Tuner>(testContext, currentConfig);
-  }
-
-  template<typename Tuner>
-  double testOrTuneCurrentConfig(const TuningContext& context, VulkanTuneParams& currentConfig) {
-    const double callsPerSecond = testCurrentConfig<Tuner>(context, currentConfig);
-    if(callsPerSecond > 0.0)
-      return callsPerSecond;
-    if(context.logger != nullptr)
-      context.logger->write("Copied P16/S16 parameters failed for " + Tuner::name() + "; tuning this pipeline");
-    return runTuner<Tuner>(context, currentConfig);
   }
 
   vector<int> powersOfTwoUpTo(int maximum) {
@@ -3265,7 +3197,7 @@ namespace {
     static constexpr bool value = true;
   };
 
-  void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config, bool tuneTransformerKernels) {
+  void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
     runTuner<Conv3x3InputTuner>(context, config);
     runTuner<Conv3x3OutputTuner>(context, config);
     config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
@@ -3277,42 +3209,93 @@ namespace {
     const bool hasTransformerModel =
       context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
       context.modelInfo.transformerNumHeads > 0 && context.modelInfo.transformerNumKVHeads > 0;
-    if(hasTransformerModel && tuneTransformerKernels) {
+    if(hasTransformerModel) {
       runTuner<TransformerTuner>(context, config);
       runTuner<TransformerRMSNormTuner>(context, config);
     }
     runTuner<PointwiseTuner>(context, config);
     runTuner<AddChannelBiasesTuner>(context, config);
-    if(hasTransformerModel && tuneTransformerKernels)
+    if(hasTransformerModel)
       runTuner<SpatialRMSNormTuner>(context, config);
   }
 
-  struct P16PipelineTestResult {
-    bool succeeded;
-    double xgemmDirectCallsPerSecond;
-    double xgemmCallsPerSecond;
-  };
-
-  P16PipelineTestResult testOrTuneP16Pipelines(const TuningContext& context, VulkanTuneParams& config) {
-    const bool hasTransformerModel =
-      context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
-      context.modelInfo.transformerNumHeads > 0 && context.modelInfo.transformerNumKVHeads > 0;
-    const double xgemmDirectCallsPerSecond = testOrTuneCurrentConfig<XgemmDirectTuner>(context, config);
-    const double xgemmCallsPerSecond = testOrTuneCurrentConfig<Xgemm16Tuner>(context, config);
-    bool succeeded = xgemmDirectCallsPerSecond > 0.0 && xgemmCallsPerSecond > 0.0;
-    succeeded = testOrTuneCurrentConfig<Conv3x3InputTuner>(context, config) > 0.0 && succeeded;
-    succeeded = testOrTuneCurrentConfig<Conv3x3OutputTuner>(context, config) > 0.0 && succeeded;
-    succeeded = testOrTuneCurrentConfig<Conv5x5InputTuner>(context, config) > 0.0 && succeeded;
-    succeeded = testOrTuneCurrentConfig<Conv5x5OutputTuner>(context, config) > 0.0 && succeeded;
-    succeeded = testOrTuneCurrentConfig<GPoolTuner>(context, config) > 0.0 && succeeded;
-    if(hasTransformerModel) {
-      succeeded = testOrTuneCurrentConfig<TransformerTuner>(context, config) > 0.0 && succeeded;
-      succeeded = testOrTuneCurrentConfig<TransformerRMSNormTuner>(context, config) > 0.0 && succeeded;
-      succeeded = testOrTuneCurrentConfig<SpatialRMSNormTuner>(context, config) > 0.0 && succeeded;
+  bool tuneXgemm16(
+    const TuningContext& context,
+    VulkanTuneParams& config,
+    double fp32CallsPerSecond
+  ) {
+    if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan xgemm16 tuning: FP16 storage or compute is unavailable");
+      return false;
     }
-    succeeded = testOrTuneCurrentConfig<PointwiseTuner>(context, config) > 0.0 && succeeded;
-    succeeded = testOrTuneCurrentConfig<AddChannelBiasesTuner>(context, config) > 0.0 && succeeded;
-    return {succeeded, xgemmDirectCallsPerSecond, xgemmCallsPerSecond};
+    if(!isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan xgemm16 tuning: FP32 xgemm tuning failed");
+      return false;
+    }
+
+    VulkanTuneParams tunedConfig = config;
+    tunedConfig.vulkan.shouldUseFP16Storage = true;
+    tunedConfig.vulkan.shouldUseFP16Compute = true;
+    const double fp16CallsPerSecond = runTuner<Xgemm16Tuner>(context, tunedConfig);
+    if(!isfinite(fp16CallsPerSecond) || fp16CallsPerSecond <= 0.0) {
+      config.xgemm16 = config.xgemm;
+      if(context.logger != nullptr)
+        context.logger->write("Vulkan xgemm16 tuning failed, retaining xgemm parameters");
+      return false;
+    }
+
+    config.xgemm16 = tunedConfig.xgemm16;
+    const bool computeIsFastEnough = VulkanTuner::isFastEnough(
+      fp16CallsPerSecond, fp32CallsPerSecond, VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO
+    );
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan xgemm16 comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
+        " calls/s, p16s16=" + Global::strprintf("%.6g", fp16CallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO)
+      );
+    }
+    if(!computeIsFastEnough)
+      return false;
+
+    config.vulkan.shouldUseFP16Storage = true;
+    config.vulkan.shouldUseFP16Compute = true;
+    if(context.logger != nullptr)
+      context.logger->write("Enabling Vulkan FP16 compute due to xgemm16 throughput");
+    return true;
+  }
+
+  bool tuneXgemmStorage(
+    const TuningContext& context,
+    VulkanTuneParams& config,
+    double fp32CallsPerSecond
+  ) {
+    if(!config.vulkan.canUseFP16Storage || !isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0)
+      return false;
+
+    VulkanTuneParams tunedConfig = config;
+    tunedConfig.vulkan.shouldUseFP16Storage = true;
+    tunedConfig.vulkan.shouldUseFP16Compute = false;
+    const double fp16StorageCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
+    const bool storageIsFastEnough = VulkanTuner::isFastEnough(
+      fp16StorageCallsPerSecond, fp32CallsPerSecond, VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO
+    );
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan xgemm storage comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
+        " calls/s, p32s16=" + Global::strprintf("%.6g", fp16StorageCallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (storageIsFastEnough ? "true" : "false")
+      );
+    }
+    if(!storageIsFastEnough)
+      return false;
+
+    config.xgemm = tunedConfig.xgemm;
+    config.vulkan.shouldUseFP16Storage = true;
+    return true;
   }
 
   void tuneCooperativeMatrices(
@@ -3402,7 +3385,7 @@ void VulkanTuner::tune(
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
-  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, false, logger};
+  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger};
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning capabilities: fp16Storage=" + string(tunedConfig.vulkan.canUseFP16Storage ? "true" : "false") +
@@ -3411,74 +3394,31 @@ void VulkanTuner::tune(
       ", cooperativeMatrix=" + string(tunedConfig.vulkan.canUseCooperativeMatrix ? "true" : "false")
     );
   }
-  const auto tuneProfile = [&](PrecisionProfile precision, bool tuneTransformerKernels) {
-    tunedConfig.activateProfile(precision);
-    tunedConfig.xgemmDirect.PADA = 1;
-    tunedConfig.xgemmDirect.PADB = 1;
-    if(tunedConfig.vulkan.canUseCooperativeMatrix &&
-       !HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix)) {
-      tunedConfig.vulkan.canUseCooperativeMatrix = false;
-    }
-    if(tunedConfig.vulkan.canUseCooperativeMatrix &&
-       HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrixNCHW)) {
-      tunedConfig.hgemmCooperativeMatrix.MWARP = tunedConfig.hgemmCooperativeMatrixNCHW.MWARP;
-      tunedConfig.hgemmCooperativeMatrix.NWARP = tunedConfig.hgemmCooperativeMatrixNCHW.NWARP;
-      tunedConfig.hgemmCooperativeMatrix.KDIM = tunedConfig.hgemmCooperativeMatrixNCHW.KDIM;
-      tunedConfig.hgemmCooperativeMatrix.subgroupSize = tunedConfig.hgemmCooperativeMatrixNCHW.subgroupSize;
-    }
-
-    const double xgemmDirectCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
-    if(precision == PrecisionProfile::P16S16) {
-      const double xgemmCallsPerSecond = runTuner<Xgemm16Tuner>(context, tunedConfig);
-      tuneCooperativeMatrices(context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond);
-    }
-    else {
-      runTuner<XgemmTuner>(context, tunedConfig);
-      tunedConfig.xgemm16 = tunedConfig.xgemm;
-    }
-    runNonGemmTuners(context, tunedConfig, tuneTransformerKernels);
-    tunedConfig.commitActiveProfile(precision);
-  };
-
+  if(tunedConfig.vulkan.canUseCooperativeMatrix &&
+     !HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix))
+    tunedConfig.vulkan.canUseCooperativeMatrix = false;
+  if(tunedConfig.vulkan.canUseCooperativeMatrix &&
+     HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrixNCHW)) {
+    tunedConfig.hgemmCooperativeMatrix.MWARP = tunedConfig.hgemmCooperativeMatrixNCHW.MWARP;
+    tunedConfig.hgemmCooperativeMatrix.NWARP = tunedConfig.hgemmCooperativeMatrixNCHW.NWARP;
+    tunedConfig.hgemmCooperativeMatrix.KDIM = tunedConfig.hgemmCooperativeMatrixNCHW.KDIM;
+    tunedConfig.hgemmCooperativeMatrix.subgroupSize = tunedConfig.hgemmCooperativeMatrixNCHW.subgroupSize;
+  }
+  tunedConfig.xgemmDirect.PADA = 1;
+  tunedConfig.xgemmDirect.PADB = 1;
+  tunedConfig.vulkan.shouldUseFP16Storage = false;
+  tunedConfig.vulkan.shouldUseFP16Compute = false;
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
   tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
-  tuneProfile(PrecisionProfile::P32S32, true);
-  if(full) {
-    if(tunedConfig.vulkan.canUseFP16Storage && tunedConfig.vulkan.canUseFP16Compute) {
-      tuneProfile(PrecisionProfile::P32S16, true);
-
-      // Transformer kernels use float intermediates and half storage in both
-      // P32/S16 and P16/S16. Their GLSL therefore compiles to the same SPIR-V,
-      // so only their specialization values can be reused. Pointwise remains
-      // independently tuned because it also creates add_pointwise, whose P16
-      // pipeline is distinct.
-      tunedConfig.p16s16.transformer = tunedConfig.p32s16.transformer;
-      tunedConfig.p16s16.rmsNorm = tunedConfig.p32s16.rmsNorm;
-      tunedConfig.p16s16.spatialRMSNorm = tunedConfig.p32s16.spatialRMSNorm;
-      tuneProfile(PrecisionProfile::P16S16, false);
-    }
-  }
-  else if(tunedConfig.vulkan.canUseFP16Storage && tunedConfig.vulkan.canUseFP16Compute) {
-    tunedConfig.p32s16 = tunedConfig.p32s32;
-    tunedConfig.p16s16 = tunedConfig.p32s32;
-    tunedConfig.activateProfile(PrecisionProfile::P16S16);
-    const P16PipelineTestResult p16Test = testOrTuneP16Pipelines(context, tunedConfig);
-    if(!p16Test.succeeded) {
-      if(logger != nullptr)
-        logger->write("P16/S16 validation did not find a usable pipeline configuration");
-    }
-    else {
-      tuneCooperativeMatrices(
-        context, tunedConfig, p16Test.xgemmDirectCallsPerSecond, p16Test.xgemmCallsPerSecond
-      );
-    }
-    tunedConfig.commitActiveProfile(PrecisionProfile::P16S16);
-  }
-
-  // Start in the baseline profile. Auto mode may replace this after its
-  // full-model comparison; explicit FP16 selects P16/S16 at context creation.
-  tunedConfig.activateProfile(PrecisionProfile::P32S32);
+  const double xgemmDirectCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
+  const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
+  tunedConfig.xgemm16 = tunedConfig.xgemm;
+  tuneCooperativeMatrices(context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond);
+  tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
+  if(!tunedConfig.vulkan.shouldUseFP16Compute)
+    tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
+  runNonGemmTuners(context, tunedConfig);
   if(logger != nullptr) {
     const double hostSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
     logger->write("Vulkan tuning total host time: " + Global::doubleToString(hostSeconds) + " sec");

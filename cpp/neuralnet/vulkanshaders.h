@@ -1389,15 +1389,9 @@ struct LocalDimHash {
       bool shouldUseSubgroup = false;
     };
 
-    enum class PrecisionProfile {
-      P32S32,
-      P32S16,
-      P16S16,
-    };
-
-    // All specialization parameters for one arithmetic/storage precision pair.
-    // xgemm16 remains here because the existing batched-GEMM dispatch selects it
-    // for P16/S16; P32 profiles retain a valid fallback value for serialization.
+    // All non-GEMM specialization parameters are stored once for the final
+    // selected precision. xgemm and xgemm16 remain independent because the
+    // batched-GEMM pipeline selects between them at runtime.
     struct VulkanTuningProfile {
       AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
@@ -1468,24 +1462,11 @@ struct LocalDimHash {
       }
     };
 
-    // The base profile is the active runtime/tuning workspace. All persisted
-    // values live in the explicitly named precision profiles below.
     struct VulkanTuneParams : VulkanTuningProfile {
       VulkanParams vulkan;
-      VulkanTuningProfile p32s32;
-      VulkanTuningProfile p32s16;
-      VulkanTuningProfile p16s16;
-
-      VulkanTuneParams();
+      VulkanTuneParams() = default;
       VulkanTuneParams(const VulkanTuneParams& other) = default;
       VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
-
-      VulkanTuningProfile& profile(PrecisionProfile precision);
-      const VulkanTuningProfile& profile(PrecisionProfile precision) const;
-      PrecisionProfile configuredProfile() const;
-      void activateProfile(PrecisionProfile precision);
-      void activateConfiguredProfile();
-      void commitActiveProfile(PrecisionProfile precision);
 
       bool isValid() const;
       bool operator==(const VulkanTuneParams& other) const;
