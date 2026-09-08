@@ -1,7 +1,0 @@
-#version 460
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-#define VWMD 1
-#define VWND 2
-
-#include "xgemm_direct_batched_tt.glsl"

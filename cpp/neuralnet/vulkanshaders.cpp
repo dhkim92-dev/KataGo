@@ -112,42 +112,6 @@ namespace vk_shader {
   const unsigned char* spirv_add_pointwise_p16s16 = _binary_add_pointwise_p16s16_start;
   size_t spirv_add_pointwise_p16s16_size = _binary_add_pointwise_p16s16_size;
 
-  // xgemm_batched_fp32
-  const unsigned char* spirv_xgemm_batched_fp32 = _binary_xgemm_batched_fp32_start;
-  size_t spirv_xgemm_batched_fp32_size = _binary_xgemm_batched_fp32_size;
-
-  // xgemm_batched_p32s16
-  const unsigned char* spirv_xgemm_batched_p32s16 = _binary_xgemm_batched_p32s16_start;
-  size_t spirv_xgemm_batched_p32s16_size = _binary_xgemm_batched_p32s16_size;
-
-  // xgemm_batched_p16s16
-  const unsigned char* spirv_xgemm_batched_p16s16 = _binary_xgemm_batched_p16s16_start;
-  size_t spirv_xgemm_batched_p16s16_size = _binary_xgemm_batched_p16s16_size;
-
-  // xgemm_direct_batched_tt_fp32_fp32
-  const unsigned char* spirv_xgemm_direct_batched_tt_fp32 = _binary_xgemm_direct_batched_tt_fp32_start;
-  size_t spirv_xgemm_direct_batched_tt_fp32_size = _binary_xgemm_direct_batched_tt_fp32_size;
-
-  // xgemm_direct_batched_tt_p32s16
-  const unsigned char* spirv_xgemm_direct_batched_tt_p32s16 = _binary_xgemm_direct_batched_tt_p32s16_start;
-  size_t spirv_xgemm_direct_batched_tt_p32s16_size = _binary_xgemm_direct_batched_tt_p32s16_size;
-
-  // xgemm_direct_batched_tt_p16s16
-  const unsigned char* spirv_xgemm_direct_batched_tt_p16s16 = _binary_xgemm_direct_batched_tt_p16s16_start;
-  size_t spirv_xgemm_direct_batched_tt_p16s16_size = _binary_xgemm_direct_batched_tt_p16s16_size;
-
-  // xgemm_strided_batched_nn_fp32
-  const unsigned char* spirv_xgemm_strided_batched_nn_fp32 = _binary_xgemm_strided_batched_nn_fp32_start;
-  size_t spirv_xgemm_strided_batched_nn_fp32_size = _binary_xgemm_strided_batched_nn_fp32_size;
-
-  // xgemm_strided_batched_nn_p32s16
-  const unsigned char* spirv_xgemm_strided_batched_nn_p32s16 = _binary_xgemm_strided_batched_nn_p32s16_start;
-  size_t spirv_xgemm_strided_batched_nn_p32s16_size = _binary_xgemm_strided_batched_nn_p32s16_size;
-
-  // xgemm_strided_batched_nn_p16s16
-  const unsigned char* spirv_xgemm_strided_batched_nn_p16s16 = _binary_xgemm_strided_batched_nn_p16s16_start;
-  size_t spirv_xgemm_strided_batched_nn_p16s16_size = _binary_xgemm_strided_batched_nn_p16s16_size;
-
 #define DEFINE_XGEMM_VARIANT(name) \
   const unsigned char* spirv_##name = _binary_##name##_start; \
   size_t spirv_##name##_size = _binary_##name##_size;
@@ -180,9 +144,21 @@ namespace vk_shader {
   DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
   DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
 
+#define DEFINE_XGEMM_DIRECT_WIDTH_VARIANTS(base, mp, np) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DEFINE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32)
+
   DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
-  DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DEFINE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
   DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+#undef DEFINE_XGEMM_DIRECT_WIDTH_VARIANTS
 #undef DEFINE_XGEMM_WIDTH_VARIANTS
 #undef DEFINE_XGEMM_VARIANT
 
@@ -411,6 +387,16 @@ namespace vk_shader {
       {spirv_##base##_##mp##4_##np##1_p16s16, spirv_##base##_##mp##4_##np##1_p16s16_size, &modules[24]}, \
       {spirv_##base##_##mp##4_##np##2_p16s16, spirv_##base##_##mp##4_##np##2_p16s16_size, &modules[25]}, \
       {spirv_##base##_##mp##4_##np##4_p16s16, spirv_##base##_##mp##4_##np##4_p16s16_size, &modules[26]},
+#define XGEMM_DIRECT_WIDTH_SOURCES(base, mp, np, modules) \
+      {spirv_##base##_##mp##1_##np##1_p32s32, spirv_##base##_##mp##1_##np##1_p32s32_size, &modules[0]}, \
+      {spirv_##base##_##mp##1_##np##2_p32s32, spirv_##base##_##mp##1_##np##2_p32s32_size, &modules[1]}, \
+      {spirv_##base##_##mp##1_##np##4_p32s32, spirv_##base##_##mp##1_##np##4_p32s32_size, &modules[2]}, \
+      {spirv_##base##_##mp##2_##np##1_p32s32, spirv_##base##_##mp##2_##np##1_p32s32_size, &modules[3]}, \
+      {spirv_##base##_##mp##2_##np##2_p32s32, spirv_##base##_##mp##2_##np##2_p32s32_size, &modules[4]}, \
+      {spirv_##base##_##mp##2_##np##4_p32s32, spirv_##base##_##mp##2_##np##4_p32s32_size, &modules[5]}, \
+      {spirv_##base##_##mp##4_##np##1_p32s32, spirv_##base##_##mp##4_##np##1_p32s32_size, &modules[6]}, \
+      {spirv_##base##_##mp##4_##np##2_p32s32, spirv_##base##_##mp##4_##np##2_p32s32_size, &modules[7]}, \
+      {spirv_##base##_##mp##4_##np##4_p32s32, spirv_##base##_##mp##4_##np##4_p32s32_size, &modules[8]},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -489,19 +475,11 @@ namespace vk_shader {
       {spirv_winograd_output_transform_fp32, spirv_winograd_output_transform_fp32_size, &shaderModule_winograd_output_transform_fp32},
       {spirv_winograd_output_transform_p16s16, spirv_winograd_output_transform_p16s16_size, &shaderModule_winograd_output_transform_p16s16},
       {spirv_winograd_output_transform_p32s16, spirv_winograd_output_transform_p32s16_size, &shaderModule_winograd_output_transform_p32s16},
-      {spirv_xgemm_batched_fp32, spirv_xgemm_batched_fp32_size, &shaderModule_xgemm_batched_fp32},
-      {spirv_xgemm_batched_p16s16, spirv_xgemm_batched_p16s16_size, &shaderModule_xgemm_batched_p16s16},
-      {spirv_xgemm_batched_p32s16, spirv_xgemm_batched_p32s16_size, &shaderModule_xgemm_batched_p32s16},
-      {spirv_xgemm_direct_batched_tt_fp32, spirv_xgemm_direct_batched_tt_fp32_size, &shaderModule_xgemm_direct_batched_tt_fp32},
-      {spirv_xgemm_direct_batched_tt_p16s16, spirv_xgemm_direct_batched_tt_p16s16_size, &shaderModule_xgemm_direct_batched_tt_p16s16},
-      {spirv_xgemm_direct_batched_tt_p32s16, spirv_xgemm_direct_batched_tt_p32s16_size, &shaderModule_xgemm_direct_batched_tt_p32s16},
-      {spirv_xgemm_strided_batched_nn_fp32, spirv_xgemm_strided_batched_nn_fp32_size, &shaderModule_xgemm_strided_batched_nn_fp32},
-      {spirv_xgemm_strided_batched_nn_p16s16, spirv_xgemm_strided_batched_nn_p16s16_size, &shaderModule_xgemm_strided_batched_nn_p16s16},
-      {spirv_xgemm_strided_batched_nn_p32s16, spirv_xgemm_strided_batched_nn_p32s16_size, &shaderModule_xgemm_strided_batched_nn_p32s16},
       XGEMM_WIDTH_SOURCES(xgemm_batched, vwm, vwn, shaderModule_xgemm_batched_variants)
-      XGEMM_WIDTH_SOURCES(xgemm_direct_batched_tt, vwmd, vwnd, shaderModule_xgemm_direct_batched_tt_variants)
+      XGEMM_DIRECT_WIDTH_SOURCES(xgemm_direct_batched_tt, vwmd, vwnd, shaderModule_xgemm_direct_batched_tt_variants)
       XGEMM_WIDTH_SOURCES(xgemm_strided_batched_nn, vwmd, vwnd, shaderModule_xgemm_strided_batched_nn_variants)
     };
+#undef XGEMM_DIRECT_WIDTH_SOURCES
 #undef XGEMM_WIDTH_SOURCES
     shaderModuleFields.clear();
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));

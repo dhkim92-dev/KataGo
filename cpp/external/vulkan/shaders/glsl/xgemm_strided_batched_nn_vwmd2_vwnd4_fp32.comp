@@ -1,7 +1,0 @@
-#version 460
-#define PRECISION 32
-#define PRECISION_STORAGE 32
-#define VWMD 2
-#define VWND 4
-
-#include "xgemm_strided_batched_nn.glsl"

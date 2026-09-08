@@ -110,51 +110,6 @@ extern "C" {
   extern const unsigned char* _binary_add_pointwise_p16s16_end;
   extern const size_t _binary_add_pointwise_p16s16_size;
 
-  // xgemm_batched_fp32.glsl
-  extern const unsigned char _binary_xgemm_batched_fp32_start[];
-  extern const unsigned char* _binary_xgemm_batched_fp32_end;
-  extern const size_t _binary_xgemm_batched_fp32_size;
-
-  // xgemm_batched_p32s16.glsl
-  extern const unsigned char _binary_xgemm_batched_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_batched_p32s16_end;
-  extern const size_t _binary_xgemm_batched_p32s16_size;
-
-  // xgemm_batched_p16s16.glsl
-  extern const unsigned char _binary_xgemm_batched_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_batched_p16s16_end;
-  extern const size_t _binary_xgemm_batched_p16s16_size;
-
-  // xgemm_direct_batched_tt_fp32_fp32.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_fp32_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_fp32_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_fp32_size;
-
-  // xgemm_direct_batched_tt_p32s16.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_p32s16_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_p32s16_size;
-
-  // xgemm_direct_batched_tt_p16s16.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_p16s16_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_p16s16_size;
-
-  // xgemm_strided_batched_nn_fp32.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_fp32_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_fp32_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_fp32_size;
-
-  // xgemm_strided_batched_nn_p32s16.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_p32s16_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_p32s16_size;
-
-  // xgemm_strided_batched_nn_p16s16.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_p16s16_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_p16s16_size;
-
 #define DECLARE_XGEMM_VARIANT(name) \
   extern const unsigned char _binary_##name##_start[]; \
   extern const unsigned char* _binary_##name##_end; \
@@ -189,10 +144,22 @@ extern "C" {
   DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
   DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
 
+#define DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32)
+
   DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
-  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
   DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
 
+#undef DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS
 #undef DECLARE_XGEMM_WIDTH_VARIANTS
 #undef DECLARE_XGEMM_VARIANT
 
@@ -547,35 +514,6 @@ namespace vk_shader {
 
   extern const unsigned char* spirv_add_pointwise_p16s16;
   extern size_t spirv_add_pointwise_p16s16_size;
-
-  extern const unsigned char* spirv_xgemm_batched_fp32;
-  extern size_t spirv_xgemm_batched_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_batched_p32s16;
-  extern size_t spirv_xgemm_batched_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_batched_p16s16;
-  extern size_t spirv_xgemm_batched_p16s16_size;
-
-  // xgemm_direct_batched_tt_fp32_fp32 - batched xgemm direct fp32
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_fp32;
-  extern size_t spirv_xgemm_direct_batched_tt_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_p32s16;
-  extern size_t spirv_xgemm_direct_batched_tt_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_p16s16;
-  extern size_t spirv_xgemm_direct_batched_tt_p16s16_size;
-
-  // strided batched matmul fp32 - for 1x1 conv
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_fp32;;
-  extern size_t spirv_xgemm_strided_batched_nn_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_p32s16;
-  extern size_t spirv_xgemm_strided_batched_nn_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_p16s16;
-  extern size_t spirv_xgemm_strided_batched_nn_p16s16_size;
 
   // Future support, NCHW matmul Fp32
   // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;
@@ -1607,18 +1545,9 @@ struct LocalDimHash {
     VkShaderModule shaderModule_winograd_output_transform_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_winograd_output_transform_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_winograd_output_transform_p32s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_batched_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_batched_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_batched_p32s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_direct_batched_tt_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_direct_batched_tt_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_direct_batched_tt_p32s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_strided_batched_nn_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_strided_batched_nn_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_xgemm_strided_batched_nn_p32s16 = VK_NULL_HANDLE;
-    // Width-specific source variants: precision-major, then (1,1),(1,2),(1,4),...
+    // Width-specific source variants; direct-batched-TT contains p32s32 only.
     VkShaderModule shaderModule_xgemm_batched_variants[27] = {};
-    VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[27] = {};
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[9] = {};
     VkShaderModule shaderModule_xgemm_strided_batched_nn_variants[27] = {};
     std::vector<VkShaderModule*> shaderModuleFields;
     // In this code, assume that NCHW is default format if no postfix is given.
