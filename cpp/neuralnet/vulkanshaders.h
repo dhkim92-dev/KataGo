@@ -883,14 +883,14 @@ struct LocalDimHash {
     };
 
     struct XgemmDirectSpec {
-      uint32_t localSizeX = 16;
-      uint32_t localSizeY = 16;
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
-      int WGD = 32;
-      int MDIMCD = 8;
-      int NDIMCD = 8;
-      int MDIMAD = 16;
-      int NDIMBD = 16;
+      int WGD = 8;
+      int MDIMCD = 1;
+      int NDIMCD = 1;
+      int MDIMAD = 1;
+      int NDIMBD = 1;
       int KWID = 2;
       int PADA = 1;
       int PADB = 1;
@@ -1291,11 +1291,11 @@ struct LocalDimHash {
     };
 
     struct XgemmDirectTuneParams {
-      uint32_t WGD = 32;
-      uint32_t MDIMCD = 8;
-      uint32_t NDIMCD = 16;
-      uint32_t MDIMAD = 8;
-      uint32_t NDIMBD = 8;
+      uint32_t WGD = 8;
+      uint32_t MDIMCD = 1;
+      uint32_t NDIMCD = 1;
+      uint32_t MDIMAD = 1;
+      uint32_t NDIMBD = 1;
       uint32_t KWID = 2;
       uint32_t PADA = 1;
       uint32_t PADB = 1;
@@ -1362,16 +1362,16 @@ struct LocalDimHash {
     };
 
     struct TransformerRMSNormTuneParms {
-      int WG_C_SIZE = 32;
-      int WG_XY_SIZE = 8;
-      int C_PER_THREAD = 1;
+      int WG_C_SIZE = 64;
+      int WG_XY_SIZE = 1;
+      int C_PER_THREAD = 4;
 
       bool isValid() const;
     };
 
     struct TransformerSpatialRmsNormTuneParams {
-      int TILE_SIZE = 128;
-      int APPLY_ELTS_PER_THREAD = 16;
+      int TILE_SIZE = 32;
+      int APPLY_ELTS_PER_THREAD = 1;
 
       bool isValid() const;
     };
@@ -1388,8 +1388,16 @@ struct LocalDimHash {
       bool shouldUseSubgroup = false;
     };
 
-    struct VulkanTuneParams {
-      VulkanParams vulkan;
+    enum class PrecisionProfile {
+      P32S32,
+      P32S16,
+      P16S16,
+    };
+
+    // All specialization parameters for one arithmetic/storage precision pair.
+    // xgemm16 remains here because the existing batched-GEMM dispatch selects it
+    // for P16/S16; P32 profiles retain a valid fallback value for serialization.
+    struct VulkanTuningProfile {
       AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
       GPoolTuneParams gPool;
@@ -1404,17 +1412,12 @@ struct LocalDimHash {
       TransformerRMSNormTuneParms rmsNorm;
       TransformerSpatialRmsNormTuneParams spatialRMSNorm;
 
-      VulkanTuneParams(const VulkanTuneParams& other) = default;
-      VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
-
       bool isValid() const;
-      bool operator==(const VulkanTuneParams& other) const;
-      bool operator!=(const VulkanTuneParams& other) const { return !(*this == other); }
 
-      static void save(const std::string& filename, const VulkanTuneParams& config);
-      static VulkanTuneParams load(const std::string& filename);
+      bool operator==(const VulkanTuningProfile& other) const;
+      bool operator!=(const VulkanTuningProfile& other) const { return !(*this == other); }
 
-      VulkanTuneParams() {
+      VulkanTuningProfile() {
         conv3x3 = ConvTuneParams();
         conv3x3.inTileYSize = 6;
         conv3x3.inTileXSize = 6;
@@ -1462,6 +1465,33 @@ struct LocalDimHash {
 
         xgemmDirect = XgemmDirectTuneParams();
       }
+    };
+
+    // The base profile is the active runtime/tuning workspace. All persisted
+    // values live in the explicitly named precision profiles below.
+    struct VulkanTuneParams : VulkanTuningProfile {
+      VulkanParams vulkan;
+      VulkanTuningProfile p32s32;
+      VulkanTuningProfile p32s16;
+      VulkanTuningProfile p16s16;
+
+      VulkanTuneParams();
+      VulkanTuneParams(const VulkanTuneParams& other) = default;
+      VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
+
+      VulkanTuningProfile& profile(PrecisionProfile precision);
+      const VulkanTuningProfile& profile(PrecisionProfile precision) const;
+      PrecisionProfile configuredProfile() const;
+      void activateProfile(PrecisionProfile precision);
+      void activateConfiguredProfile();
+      void commitActiveProfile(PrecisionProfile precision);
+
+      bool isValid() const;
+      bool operator==(const VulkanTuneParams& other) const;
+      bool operator!=(const VulkanTuneParams& other) const { return !(*this == other); }
+
+      static void save(const std::string& filename, const VulkanTuneParams& config);
+      static VulkanTuneParams load(const std::string& filename);
     };
 
   }

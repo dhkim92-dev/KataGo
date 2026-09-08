@@ -347,7 +347,8 @@ namespace vk_shader {
        tuneParams.vulkan.shouldUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
-       tuneParams.vulkan.shouldUseFP16Storage) {
+       tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseFP16Compute) {
       if((result = createHgemmCooperativeMatrix(hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
     }
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -355,6 +356,7 @@ namespace vk_shader {
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseFP16Compute &&
        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
       if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
     }
@@ -383,7 +385,7 @@ namespace vk_shader {
     if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.p32s32.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -420,7 +422,7 @@ namespace vk_shader {
     if((result = createTransformerSpatialRMSNormReduce(transformerSpatialRMSNormReduce, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSq, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
 
-    if ( qHeadDim != -1 && vHeadDim != -1 ) {
+    if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
       if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }

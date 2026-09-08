@@ -197,7 +197,7 @@ struct ComputeContext {
   std::unordered_map<uint32_t, vk_shader::ComputePipelines *> pipelinesPerDev;
   std::unordered_map<uint32_t, vk_shader::tune::VulkanTuneParams> tuneParamsPerDev;
   std::unordered_map<uint32_t, std::string> tunerFilesPerDev;
-  std::pair<int, int> transformerHeadDims = {-1, -1};
+  std::pair<int, int> transformerHeadDims = {0, 0};
   Logger* logger;
 
   static void findTransformerHeadDims(
@@ -354,6 +354,7 @@ struct ComputeContext {
             supportsFP16Storage && supportsFP16Compute;
           tuneParams.vulkan.shouldUseFP16Storage = benchmarkModelPrecision ? false : useFP16Storage;
           tuneParams.vulkan.shouldUseFP16Compute = benchmarkModelPrecision ? false : useFP16Compute;
+          tuneParams.activateConfiguredProfile();
 
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
           VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
@@ -886,6 +887,7 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.canUseFP16Storage &&
         handle_->tuneParams.vulkan.canUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+        handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         hgemmParams.isValid();
     }
 
@@ -913,6 +915,7 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+        handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         hgemmParams.isValid() &&
         inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
@@ -2163,6 +2166,7 @@ struct TransformerMatMulLayer {
       handle->tuneParams.vulkan.canUseCooperativeMatrix &&
       handle->tuneParams.vulkan.shouldUseCooperativeMatrix &&
       handle->tuneParams.vulkan.shouldUseFP16Storage &&
+      handle->tuneParams.vulkan.shouldUseFP16Compute &&
       handle->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
       hgemmParams.isValid() &&
       inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
@@ -4854,12 +4858,14 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.canUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseFP16Storage &&
+    tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
     usingFP16Storage;
   usingFP16TensorCores =
     usingFP16Storage &&
     tuneParams.vulkan.canUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseCooperativeMatrix &&
+    tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.hgemmCooperativeMatrix.isValid();
   if(usingFP16TensorCoresFor1x1) {
     const int spatialAlignment = std::max(16, tuneParams.hgemmCooperativeMatrixNCHW.MWARP);
@@ -5683,65 +5689,104 @@ static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* 
     auto tuneParamsEntry = context->tuneParamsPerDev.find(gpuIdx);
     if(pipelineEntry == context->pipelinesPerDev.end() || tuneParamsEntry == context->tuneParamsPerDev.end())
       continue;
-    const VulkanTuneParams fp32Params = tuneParamsEntry->second;
+    VulkanTuneParams fp32Params = tuneParamsEntry->second;
     if(!fp32Params.vulkan.canUseFP16Storage || !fp32Params.vulkan.canUseFP16Compute)
       continue;
+    fp32Params.activateProfile(PrecisionProfile::P32S32);
+    fp32Params.vulkan.shouldUseCooperativeMatrix = false;
+    fp32Params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
+    tuneParamsEntry->second = fp32Params;
 
     vk_shader::ComputePipelines* fp32Pipelines = pipelineEntry->second;
-    vk_shader::ComputePipelines* fp16Pipelines = nullptr;
-    bool fp16Installed = false;
     try {
       const ModelPrecisionMeasurement fp32Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
 
-      VulkanTuneParams fp16Params = fp32Params;
-      fp16Params.vulkan.shouldUseFP16Storage = true;
-      fp16Params.vulkan.shouldUseFP16Compute = true;
-      const VulkanDevice* device = context->vulkanContext->findGpuExn(gpuIdx);
-      fp16Pipelines = new vk_shader::ComputePipelines(device->device, context->logger);
-      const VkResult result = fp16Pipelines->createPipelines(
-        fp16Params, context->transformerHeadDims.first, context->transformerHeadDims.second, false
-      );
-      if(result != VK_SUCCESS)
-        throw StringError("Failed to create FP16 Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
+      VulkanTuneParams selectedParams = fp32Params;
+      vk_shader::ComputePipelines* selectedPipelines = fp32Pipelines;
+      double selectedSecondsPerCall = fp32Measurement.secondsPerCall;
+      const auto tryProfile = [&](PrecisionProfile profile, bool useCooperativeMatrix, bool useCooperativeMatrixNCHW, const char* profileName) {
+        vk_shader::ComputePipelines* candidatePipelines = nullptr;
+        try {
+          VulkanTuneParams candidateParams = fp32Params;
+          candidateParams.activateProfile(profile);
+          candidateParams.vulkan.shouldUseCooperativeMatrix = useCooperativeMatrix;
+          candidateParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW =
+            useCooperativeMatrix && useCooperativeMatrixNCHW;
+          const VulkanDevice* device = context->vulkanContext->findGpuExn(gpuIdx);
+          candidatePipelines = new vk_shader::ComputePipelines(device->device, context->logger);
+          const VkResult result = candidatePipelines->createPipelines(
+            candidateParams, context->transformerHeadDims.first, context->transformerHeadDims.second, false
+          );
+          if(result != VK_SUCCESS)
+            throw StringError("Failed to create " + string(profileName) + " Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
 
-      pipelineEntry->second = fp16Pipelines;
-      tuneParamsEntry->second = fp16Params;
-      fp16Installed = true;
-      const ModelPrecisionMeasurement fp16Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
-      const double fp16ErrorProp = VulkanTuner::computeErrorProp(fp32Measurement.outputs, fp16Measurement.outputs);
-      const bool useFP16 = VulkanTuner::shouldUseFP16ForModel(
-        fp32Measurement.secondsPerCall, fp16Measurement.secondsPerCall, fp16ErrorProp
-      );
+          pipelineEntry->second = candidatePipelines;
+          tuneParamsEntry->second = candidateParams;
+          const ModelPrecisionMeasurement candidateMeasurement = measureModelPrecision(context, loadedModel, gpuIdx);
+          const double errorProp = VulkanTuner::computeErrorProp(fp32Measurement.outputs, candidateMeasurement.outputs);
+          const bool usable = VulkanTuner::shouldUseFP16ForModel(
+            fp32Measurement.secondsPerCall, candidateMeasurement.secondsPerCall, errorProp
+          );
+          const bool selected = usable && candidateMeasurement.secondsPerCall < selectedSecondsPerCall;
 
-      if(context->logger != nullptr) {
-        context->logger->write(
-          "Vulkan full-model FP16 comparison: fp32_seconds_per_call=" +
-          Global::strprintf("%.6g", fp32Measurement.secondsPerCall) +
-          ", fp16_seconds_per_call=" + Global::strprintf("%.6g", fp16Measurement.secondsPerCall) +
-          ", error_prop=" + Global::strprintf("%.6g", fp16ErrorProp) +
-          ", selected=" + (useFP16 ? "fp16" : "fp32")
-        );
+          if(context->logger != nullptr) {
+            context->logger->write(
+              "Vulkan full-model precision comparison: profile=" + string(profileName) +
+              ", fp32_seconds_per_call=" + Global::strprintf("%.6g", fp32Measurement.secondsPerCall) +
+              ", profile_seconds_per_call=" + Global::strprintf("%.6g", candidateMeasurement.secondsPerCall) +
+              ", error_prop=" + Global::strprintf("%.6g", errorProp) +
+              ", selected=" + (selected ? "yes" : "no")
+            );
+          }
+
+          if(selected) {
+            if(selectedPipelines != fp32Pipelines)
+              delete selectedPipelines;
+            selectedPipelines = candidatePipelines;
+            selectedParams = candidateParams;
+            selectedSecondsPerCall = candidateMeasurement.secondsPerCall;
+            candidatePipelines = nullptr;
+          }
+          pipelineEntry->second = selectedPipelines;
+          tuneParamsEntry->second = selectedParams;
+          delete candidatePipelines;
+        }
+        catch(const std::exception& e) {
+          pipelineEntry->second = selectedPipelines;
+          tuneParamsEntry->second = selectedParams;
+          delete candidatePipelines;
+          if(context->logger != nullptr)
+            context->logger->write("Vulkan full-model " + string(profileName) + " comparison failed: " + e.what());
+        }
+      };
+
+      tryProfile(PrecisionProfile::P32S16, false, false, "p32s16");
+      if(fp32Params.vulkan.canUseFP16Compute) {
+        tryProfile(PrecisionProfile::P16S16, false, false, "p16s16");
+        if(fp32Params.vulkan.canUseCooperativeMatrix) {
+          tryProfile(PrecisionProfile::P16S16, true, false, "p16s16+cooperative");
+          tryProfile(PrecisionProfile::P16S16, true, true, "p16s16+cooperative-1x1");
+        }
       }
 
-      VulkanTuneParams::save(fileEntry.second, useFP16 ? fp16Params : fp32Params);
-      if(useFP16) {
-        delete fp32Pipelines;
+      try {
+        VulkanTuneParams::save(fileEntry.second, selectedParams);
       }
-      else {
+      catch(...) {
+        if(selectedPipelines != fp32Pipelines)
+          delete selectedPipelines;
         pipelineEntry->second = fp32Pipelines;
         tuneParamsEntry->second = fp32Params;
-        delete fp16Pipelines;
+        throw;
       }
-      fp16Installed = false;
+      if(selectedPipelines != fp32Pipelines)
+        delete fp32Pipelines;
     }
     catch(const std::exception& e) {
-      if(fp16Installed) {
-        pipelineEntry->second = fp32Pipelines;
-        tuneParamsEntry->second = fp32Params;
-      }
-      delete fp16Pipelines;
+      pipelineEntry->second = fp32Pipelines;
+      tuneParamsEntry->second = fp32Params;
       if(context->logger != nullptr)
-        context->logger->write("Vulkan full-model FP16 comparison failed; keeping FP32: " + std::string(e.what()));
+        context->logger->write("Vulkan full-model precision comparison failed; keeping p32s32: " + std::string(e.what()));
     }
   }
 }
