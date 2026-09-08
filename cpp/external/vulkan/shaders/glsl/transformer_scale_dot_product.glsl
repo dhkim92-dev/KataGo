@@ -34,8 +34,10 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     float scale; // 1/sqrt(headDim)
 };
 
-shared float kTile[ATTN_BLOCK_KV * ATTN_HEAD_DIM];
-shared float vTile[ATTN_BLOCK_KV * ATTN_V_HEAD_DIM];
+// Store tiles as [dimension][key position]. This preserves coalesced global
+// loads while making cooperative shared-memory stores linear in t.
+shared float kTile[ATTN_HEAD_DIM * ATTN_BLOCK_KV];
+shared float vTile[ATTN_V_HEAD_DIM * ATTN_BLOCK_KV];
 shared float kMaskTile[ATTN_BLOCK_KV];
 
 layout(local_size_x_id=0, local_size_y_id = 1, local_size_z_id = 2) in;
@@ -85,9 +87,9 @@ void main() {
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
-        kTile[tileKPos * ATTN_HEAD_DIM + tileD] = LOAD(K, (kvBase * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
+        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(K, (kvBase * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
       } else {
-        kTile[tileKPos * ATTN_HEAD_DIM + tileD] = 0.0f;
+        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
       }
     }
 
@@ -98,9 +100,9 @@ void main() {
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
-        vTile[tileKPos * ATTN_V_HEAD_DIM + tileD] = LOAD(V, (kvBase * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
+        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(V, (kvBase * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
       } else {
-        vTile[tileKPos * ATTN_V_HEAD_DIM + tileD] = 0.0f;
+        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
       }
     }
 
@@ -129,7 +131,7 @@ void main() {
           // Dot product Q . K
           float _dot = 0.0f;
           for(int d = 0; d < ATTN_HEAD_DIM; d++) {
-            _dot += q[qi * ATTN_HEAD_DIM + d] * kTile[tileK * ATTN_HEAD_DIM + d];
+            _dot += q[qi * ATTN_HEAD_DIM + d] * kTile[d * ATTN_BLOCK_KV + tileK];
           }
           _dot *= scale;
 
@@ -145,7 +147,7 @@ void main() {
           runningMax[qi] = newMax;
 
           for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
-            acc[qi * ATTN_V_HEAD_DIM + d] += expCur * vTile[tileK * ATTN_V_HEAD_DIM + d];
+            acc[qi * ATTN_V_HEAD_DIM + d] += expCur * vTile[d * ATTN_BLOCK_KV + tileK];
           }
         }
       }
