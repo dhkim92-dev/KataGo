@@ -1133,6 +1133,9 @@ namespace {
       for(VulkanBuffer* buffer: resources.tuningBuffers)
         if(buffer != nullptr)
           vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.uploadStagingBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
       if(resources.pointwiseAccumulatorInitialBuffer != nullptr)
         vk_helper::releaseVulkanBuffer(device, resources.pointwiseAccumulatorInitialBuffer);
       if(resources.attentionReadbackBuffer != nullptr)
@@ -1344,6 +1347,28 @@ namespace {
       vector<float> gemmInput, gemmFilter;
       vector<vector<float>> hostFloatBuffers;
       hostFloatBuffers.reserve(descriptorCount);
+      struct PendingUpload {
+        VulkanBuffer* stagingBuffer;
+        VulkanBuffer* destinationBuffer;
+        VkDeviceSize size;
+      };
+      vector<PendingUpload> pendingUploads;
+      size_t stagingBufferIndex = 0;
+      const auto queueUpload = [&](const void* data, VkDeviceSize size, VulkanBuffer* destination, const string& description) {
+        if(stagingBufferIndex == resources.uploadStagingBuffers.size())
+          resources.uploadStagingBuffers.push_back(nullptr);
+        VulkanBuffer*& stagingBuffer = resources.uploadStagingBuffers[stagingBufferIndex++];
+        if(!ensureStagingBuffer(stagingBuffer, size, result, error, description))
+          return false;
+        memcpy(stagingBuffer->allocationInfo.pMappedData, data, static_cast<size_t>(size));
+        result = vmaFlushAllocation(device->allocator, stagingBuffer->allocation, 0, size);
+        if(result != VK_SUCCESS) {
+          error = "could not prepare " + description + ": " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        pendingUploads.push_back({stagingBuffer, destination, size});
+        return true;
+      };
       size_t tuningBufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
@@ -1412,11 +1437,8 @@ namespace {
           const bool attentionOutput = plan.kernelName == "transformerAttention" && outputBindingNeedsReset;
           const size_t initializedIndex = tuningBufferIndex - 1;
           if(!attentionOutput && (isGemm || inPlaceOutput || outputBindingNeedsReset || !resources.tuningBufferInitialized[initializedIndex])) {
-            vk_helper::copyHostToDeviceBuffer(device, initialData, buffer, initialBytes, true, &result);
-            if(result != VK_SUCCESS) {
-              error = "could not initialize tuning buffer: " + vk_helper::vkErrorToString(result);
+            if(!queueUpload(initialData, initialBytes, buffer, "tuning buffer"))
               return false;
-            }
             resources.tuningBufferInitialized[initializedIndex] = true;
           }
           else if(attentionOutput)
@@ -1432,13 +1454,8 @@ namespace {
             if(!ensureBuffer(pointwiseAccumulatorInitialBuffer, scratchBytes, result, error, "pointwise reset buffer"))
               return false;
             if(!resources.pointwiseAccumulatorInitialized) {
-              vk_helper::copyHostToDeviceBuffer(
-                device, initialData, pointwiseAccumulatorInitialBuffer, initialBytes, true, &result
-              );
-              if(result != VK_SUCCESS) {
-                error = "could not initialize pointwise reset buffer: " + vk_helper::vkErrorToString(result);
+              if(!queueUpload(initialData, initialBytes, pointwiseAccumulatorInitialBuffer, "pointwise reset buffer"))
                 return false;
-              }
               resources.pointwiseAccumulatorInitialized = true;
             }
             pointwiseAccumulatorBytes = initialBytes;
@@ -1966,6 +1983,17 @@ namespace {
         cleanup();
         return false;
       }
+      for(const PendingUpload& upload: pendingUploads) {
+        VkBufferCopy copyRegion = {};
+        copyRegion.size = upload.size;
+        vkCmdCopyBuffer(commandBuffer, upload.stagingBuffer->buffer, upload.destinationBuffer->buffer, 1, &copyRegion);
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, upload.destinationBuffer,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT
+        );
+      }
       if(plan.kernelName == "transformerAttention") {
         VulkanBuffer* outputBuffer = tuningBuffers[outputBinding(pipelines[0])];
         vk_helper::barrierCommandBufferForBuffer(
@@ -2351,6 +2379,7 @@ namespace {
     struct ReusableResources {
       vector<VulkanBuffer*> tuningBuffers;
       vector<bool> tuningBufferInitialized;
+      vector<VulkanBuffer*> uploadStagingBuffers;
       VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
       bool pointwiseAccumulatorInitialized = false;
       VulkanBuffer* attentionReadbackBuffer = nullptr;
@@ -2400,6 +2429,27 @@ namespace {
       for(size_t i = 0; i < count; i++) {
         if(!ensureBuffer(buffers[i], requiredBytes, result, error, description))
           return false;
+      }
+      return true;
+    }
+
+    bool ensureStagingBuffer(
+      VulkanBuffer*& buffer,
+      VkDeviceSize requiredBytes,
+      VkResult& result,
+      string& error,
+      const string& description
+    ) {
+      if(buffer != nullptr && buffer->requestedSize >= requiredBytes)
+        return true;
+      if(buffer != nullptr) {
+        vk_helper::releaseVulkanBuffer(device, buffer);
+        buffer = nullptr;
+      }
+      buffer = vk_helper::createStagingBuffer(device, static_cast<size_t>(requiredBytes), &result);
+      if(result != VK_SUCCESS || buffer == nullptr) {
+        error = "could not allocate reusable " + description + " staging buffer: " + vk_helper::vkErrorToString(result);
+        return false;
       }
       return true;
     }
