@@ -5682,7 +5682,8 @@ static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* 
     auto tuneParamsEntry = context->tuneParamsPerDev.find(gpuIdx);
     if(pipelineEntry == context->pipelinesPerDev.end() || tuneParamsEntry == context->tuneParamsPerDev.end())
       continue;
-    VulkanTuneParams fp32Params = tuneParamsEntry->second;
+    const VulkanTuneParams tunedParams = tuneParamsEntry->second;
+    VulkanTuneParams fp32Params = tunedParams;
     if(!fp32Params.vulkan.canUseFP16Storage || !fp32Params.vulkan.canUseFP16Compute)
       continue;
     fp32Params.vulkan.shouldUseCooperativeMatrix = false;
@@ -5695,7 +5696,7 @@ static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* 
     try {
       const ModelPrecisionMeasurement fp32Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
 
-      VulkanTuneParams fp16Params = fp32Params;
+      VulkanTuneParams fp16Params = tunedParams;
       fp16Params.vulkan.shouldUseFP16Storage = true;
       fp16Params.vulkan.shouldUseFP16Compute = true;
       const VulkanDevice* device = context->vulkanContext->findGpuExn(gpuIdx);

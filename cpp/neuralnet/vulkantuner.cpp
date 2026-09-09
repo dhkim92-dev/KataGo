@@ -1107,6 +1107,20 @@ namespace {
     );
   }
 
+  void logTuningProgress(
+    const TuningContext& context,
+    size_t candidateIndex,
+    size_t totalCandidates,
+    const vector<const Pipeline*>& pipelines,
+    const string& tunerName
+  ) {
+    const string pipelineNames = describeTuningPipelines(pipelines, tunerName);
+    writeTuningLog(
+      context,
+      "Tuning " + pipelineNames + " " + to_string(candidateIndex) + "/" + to_string(totalCandidates) + " ..."
+    );
+  }
+
   class VulkanTimestampTimer {
    public:
     explicit VulkanTimestampTimer(const VulkanDevice* device)
@@ -2915,7 +2929,12 @@ namespace {
     double bestScore = 0.0;
     double bestCallsPerSecond = 0.0;
     vector<float> referenceReadback;
+    size_t lastBestCandidateIndex = 0;
     size_t candidateIndex = 0;
+    auto logProgressIfNeeded = [&](size_t currentCandidateIndex, const vector<const Pipeline*>& targets) {
+      if(currentCandidateIndex % 20 == 0 && currentCandidateIndex >= lastBestCandidateIndex + 10)
+        logTuningProgress(context, currentCandidateIndex, candidateCount, targets, Tuner::name());
+    };
     for(size_t configIndex = 0; configIndex < configs.size(); configIndex++) {
       const VulkanTuneParams& candidate = configs[configIndex];
       const bool isReferenceCandidate = configIndex == 0;
@@ -2931,11 +2950,14 @@ namespace {
         vector<const Pipeline*> targets;
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
-          logTuningFailure(
-            context, currentCandidateIndex, candidateCount,
-            targets, Tuner::name(),
-            "pipeline creation failed: " + vk_helper::vkErrorToString(result)
-          );
+          if(isReferenceCandidate) {
+            logTuningFailure(
+              context, currentCandidateIndex, candidateCount,
+              targets, Tuner::name(),
+              "pipeline creation failed: " + vk_helper::vkErrorToString(result)
+            );
+          }
+          logProgressIfNeeded(currentCandidateIndex, targets);
           for(const Pipeline* pipeline: targets)
             pipelines.destroyPipeline(*const_cast<Pipeline*>(pipeline));
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
@@ -2954,21 +2976,27 @@ namespace {
           referenceReadback.empty() && usesCpuReference(Tuner::name()) ? &cpuReference : nullptr
         );
         if(!measured) {
-          logTuningFailure(
-            context, currentCandidateIndex, candidateCount,
-            targets, Tuner::name(),
-            error.empty() ? "measurement failed" : error
-          );
+          if(isReferenceCandidate) {
+            logTuningFailure(
+              context, currentCandidateIndex, candidateCount,
+              targets, Tuner::name(),
+              error.empty() ? "measurement failed" : error
+            );
+          }
+          logProgressIfNeeded(currentCandidateIndex, targets);
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
             return 0.0;
           continue;
         }
         if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0) {
-          logTuningFailure(
-            context, currentCandidateIndex, candidateCount,
-            targets, Tuner::name(),
-            "measurement returned invalid calls/sec"
-          );
+          if(isReferenceCandidate) {
+            logTuningFailure(
+              context, currentCandidateIndex, candidateCount,
+              targets, Tuner::name(),
+              "measurement returned invalid calls/sec"
+            );
+          }
+          logProgressIfNeeded(currentCandidateIndex, targets);
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
             return 0.0;
           continue;
@@ -2982,20 +3010,24 @@ namespace {
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
         const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
-        logTuningResult(
-          context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
-          score > bestScore
-        );
         if(score > bestScore) {
           bestScore = score;
           bestCallsPerSecond = callsPerSecond;
           currentConfig = candidate;
           found = true;
+          lastBestCandidateIndex = currentCandidateIndex;
+          logTuningResult(
+            context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
+            true
+          );
         }
+        logProgressIfNeeded(currentCandidateIndex, targets);
       }
       catch(const StringError& e) {
         // A failed pipeline specialization is an invalid candidate, not a fatal tuning failure.
-        logTuningFailure(context, currentCandidateIndex, candidateCount, vector<const Pipeline*>(), Tuner::name(), e.what());
+        if(isReferenceCandidate)
+          logTuningFailure(context, currentCandidateIndex, candidateCount, vector<const Pipeline*>(), Tuner::name(), e.what());
+        logProgressIfNeeded(currentCandidateIndex, vector<const Pipeline*>());
         if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
           return 0.0;
       }
