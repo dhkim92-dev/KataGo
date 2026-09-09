@@ -889,7 +889,7 @@ namespace {
     double& errorProp
   ) {
     errorProp = VulkanTuner::computeErrorProp(reference, values);
-    if(!isfinite(errorProp) || errorProp > std::min(0.5, 5.0 * plan.errorTolerance))
+    if(!isfinite(errorProp) || errorProp > plan.hardCutoff)
       errorProp = 1.0;
   }
 
@@ -1138,6 +1138,12 @@ namespace {
       for(VulkanBuffer* buffer: resources.winogradOutputValidationBuffers)
         if(buffer != nullptr)
           vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.winogradInputValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      for(VulkanBuffer* buffer: resources.gpoolValidationBuffers)
+        if(buffer != nullptr)
+          vk_helper::releaseVulkanBuffer(device, buffer);
       for(VulkanBuffer* buffer: resources.attentionValidationBuffers)
         if(buffer != nullptr)
           vk_helper::releaseVulkanBuffer(device, buffer);
@@ -1247,7 +1253,27 @@ namespace {
 
       VkResult result = VK_SUCCESS;
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
-      const size_t xySize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const bool usePaddedNCHWXY =
+        plan.kernelName == "hgemmCooperativeMatrixNCHW" ||
+        (plan.kernelName == "xgemmDirect" &&
+         config.vulkan.canUseCooperativeMatrix && config.hgemmCooperativeMatrixNCHW.isValid());
+      const bool usePaddedGpoolXY =
+        plan.kernelName == "gPool" &&
+        config.vulkan.canUseFP16Storage &&
+        config.vulkan.canUseFP16Compute &&
+        config.vulkan.shouldUseFP16Storage &&
+        config.vulkan.shouldUseFP16Compute &&
+        config.vulkan.canUseCooperativeMatrix &&
+        config.vulkan.shouldUseCooperativeMatrix &&
+        config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+        config.hgemmCooperativeMatrixNCHW.isValid();
+      const size_t xySize = usePaddedNCHWXY || usePaddedGpoolXY
+        ? vk_helper::roundUpToMultiple(logicalXYSize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP)))
+        : logicalXYSize;
+      // Each measure regenerates its inputs; reusable buffers must not retain a
+      // previous tuner's data or layout.
+      fill(resources.tuningBufferInitialized.begin(), resources.tuningBufferInitialized.end(), false);
       const bool addChannelBiasesUsingFP16Storage =
         config.vulkan.canUseFP16Storage &&
         config.vulkan.canUseFP16Compute &&
@@ -1268,6 +1294,20 @@ namespace {
         : xySize;
       const XgemmTuneParams& xgemmParams =
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
+      const bool useHgemmCooperativeMatrixForPadding =
+        config.vulkan.canUseCooperativeMatrix &&
+        config.vulkan.shouldUseCooperativeMatrix &&
+        config.vulkan.canUseFP16Storage &&
+        config.vulkan.canUseFP16Compute &&
+        config.vulkan.shouldUseFP16Storage &&
+        config.vulkan.shouldUseFP16Compute &&
+        config.hgemmCooperativeMatrix.isValid();
+      const int activeMPaddingMult = useHgemmCooperativeMatrixForPadding
+        ? config.hgemmCooperativeMatrix.MWG : xgemmParams.MWG;
+      const int activeNPaddingMult = useHgemmCooperativeMatrixForPadding
+        ? config.hgemmCooperativeMatrix.NWG : xgemmParams.NWG;
+      const int activeKPaddingMult = useHgemmCooperativeMatrixForPadding
+        ? config.hgemmCooperativeMatrix.KWG : xgemmParams.KWG;
       const size_t maxChannels = static_cast<size_t>(std::max({
         1, context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels,
         context.modelInfo.regularNumChannels, context.modelInfo.maxConvChannels1x1,
@@ -1306,8 +1346,10 @@ namespace {
         gemmK = vk_helper::roundUpToMultipleInt(logicalK, cooperative ? config.hgemmCooperativeMatrix.KWG : xgemmParams.KWG);
       }
       const size_t maxTiles = batchSize * ((context.nnXLen + 1) / 2) * ((context.nnYLen + 1) / 2);
-      const size_t paddedTiles = vk_helper::roundUpToMultiple(maxTiles, static_cast<size_t>(xgemmParams.MWG));
-      const size_t paddedChannels = vk_helper::roundUpToMultiple(maxChannels, static_cast<size_t>(std::max(xgemmParams.KWG, xgemmParams.NWG)));
+      const size_t paddedTiles = vk_helper::roundUpToMultiple(maxTiles, static_cast<size_t>(activeMPaddingMult));
+      const size_t paddedChannels = vk_helper::roundUpToMultiple(
+        maxChannels, static_cast<size_t>(std::max(activeKPaddingMult, activeNPaddingMult))
+      );
       const size_t gemmElements = static_cast<size_t>(gemmBatch) * std::max({
         static_cast<size_t>(gemmM) * gemmK, static_cast<size_t>(gemmN) * gemmK, static_cast<size_t>(gemmM) * gemmN
       });
@@ -1328,7 +1370,9 @@ namespace {
       VulkanBuffer*& pointwiseAccumulatorInitialBuffer = resources.pointwiseAccumulatorInitialBuffer;
       VkDeviceSize pointwiseAccumulatorBytes = 0;
       vector<VulkanBuffer*>& pointwiseValidationBuffers = resources.pointwiseValidationBuffers;
+      vector<VulkanBuffer*>& winogradInputValidationBuffers = resources.winogradInputValidationBuffers;
       vector<VulkanBuffer*>& winogradOutputValidationBuffers = resources.winogradOutputValidationBuffers;
+      vector<VulkanBuffer*>& gpoolValidationBuffers = resources.gpoolValidationBuffers;
       vector<VulkanBuffer*>& attentionValidationBuffers = resources.attentionValidationBuffers;
       vector<VulkanBuffer*>& spatialValidationBuffers = resources.spatialValidationBuffers;
       VkDescriptorPool& descriptorPool = resources.descriptorPool;
@@ -1432,8 +1476,27 @@ namespace {
                 (name.find("global_pooling_channels") == 0 && binding == 3) ||
                 (name.find("value_head_pool_channels") == 0 && binding == 2) ||
                 (name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 5);
-              if(mask || maskSum)
-                std::fill(data.begin(), data.end(), mask ? 1.0f : static_cast<float>(xySize));
+              if(name.find("global_pooling_channels") == 0 && binding == 0 && xySize > logicalXYSize) {
+                const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+                for(size_t n = 0; n < batchSize; n++)
+                  for(int c = 0; c < gpoolChannels; c++)
+                    std::fill(
+                      data.begin() + (n * gpoolChannels + c) * xySize + logicalXYSize,
+                      data.begin() + (n * gpoolChannels + c + 1) * xySize,
+                      0.0f
+                    );
+              }
+              if(mask) {
+                std::fill(data.begin(), data.end(), 0.0f);
+                const int maskBatchSize = std::max(1, context.batchSize);
+                for(int n = 0; n < maskBatchSize; n++)
+                  std::fill(data.begin() + static_cast<size_t>(n) * xySize,
+                            data.begin() + static_cast<size_t>(n) * xySize + logicalXYSize, 1.0f);
+              }
+              else if(maskSum)
+                std::fill(data.begin(), data.end(), static_cast<float>(logicalXYSize));
+              else if(name.find("transformer_rms_norm") == 0 && binding == 3)
+                std::fill(data.begin(), data.end(), 0.0f);
             }
           }
           hostFloatBuffers.push_back(data);
@@ -1691,6 +1754,7 @@ namespace {
       };
       if(!isGemm && cpuReference != nullptr) {
         const int numValidationRepeats =
+          plan.kernelName == "gPool" ? 10 :
           plan.kernelName == "transformerAttention" ? 6 :
           plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
           plan.kernelName == "transformerRMSNorm" ||
@@ -1716,6 +1780,14 @@ namespace {
       }
       else if(plan.kernelName.find("OutputTransform") != string::npos) {
         if(!ensureBuffers(winogradOutputValidationBuffers, 10, scratchBytes, result, error, "Winograd output validation buffer"))
+          return false;
+      }
+      else if(plan.kernelName.find("InputTransform") != string::npos) {
+        if(!ensureBuffers(winogradInputValidationBuffers, 10, scratchBytes, result, error, "Winograd input validation buffer"))
+          return false;
+      }
+      else if(plan.kernelName == "gPool") {
+        if(!ensureBuffers(gpoolValidationBuffers, 10, scratchBytes, result, error, "global pooling validation buffer"))
           return false;
       }
       else if(plan.kernelName == "transformerAttention") {
@@ -1779,7 +1851,9 @@ namespace {
         int runChannels
       ) {
         const int batchSize = std::max(1, runBatchSize);
-        const int xySize = std::max(1, context.nnXLen * context.nnYLen);
+        const int logicalPipelineXYSize = std::max(1, context.nnXLen * context.nnYLen);
+        const int pipelineXYSize = plan.kernelName == "gPool"
+          ? static_cast<int>(xySize) : logicalPipelineXYSize;
         const int channels = std::max(1, runChannels);
         const auto dispatch = [&](uint32_t x, uint32_t y = 1, uint32_t z = 1) {
           vkCmdDispatch(targetCommandBuffer, std::max(1u, x), std::max(1u, y), std::max(1u, z));
@@ -1835,15 +1909,15 @@ namespace {
           const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
-          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, xgemmParams.MWG);
-          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, xgemmParams.KWG);
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, activeMPaddingMult);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, activeKPaddingMult);
           vk_shader::push::WinogradInputTransformParams params = {
-            batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,paddedChannels,paddedTiles,xySize
+            batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,paddedChannels,paddedTiles,pipelineXYSize
           };
           push(params);
           dispatch(
             static_cast<uint32_t>((params.ntxtySizePadded + pipeline->localSizeX - 1) / pipeline->localSizeX),
-            static_cast<uint32_t>((channels + pipeline->localSizeY - 1) / pipeline->localSizeY)
+            static_cast<uint32_t>((paddedChannels + pipeline->localSizeY - 1) / pipeline->localSizeY)
           );
         }
         else if(pipeline->name.find("winograd_output_transform") == 0) {
@@ -1852,21 +1926,21 @@ namespace {
           const int outTile = convParams.outTileXSize;
           const int tilesX = (context.nnXLen + outTile - 1) / outTile;
           const int tilesY = (context.nnYLen + outTile - 1) / outTile;
-          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, xgemmParams.MWG);
-          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, xgemmParams.NWG);
+          const int paddedTiles = vk_helper::roundUpToMultipleInt(batchSize * tilesX * tilesY, activeMPaddingMult);
+          const int paddedChannels = vk_helper::roundUpToMultipleInt(channels, activeNPaddingMult);
           vk_shader::push::WinogradOutputTransformParams params = {
-            batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,paddedChannels,paddedTiles,xySize
+            batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,paddedChannels,paddedTiles,pipelineXYSize
           };
           push(params);
           dispatch(
-            static_cast<uint32_t>((tilesX + pipeline->localSizeX - 1) / pipeline->localSizeX),
-            static_cast<uint32_t>((tilesY + pipeline->localSizeY - 1) / pipeline->localSizeY),
+            static_cast<uint32_t>((vk_helper::powerOf2ify(tilesX) + pipeline->localSizeX - 1) / pipeline->localSizeX),
+            static_cast<uint32_t>((vk_helper::powerOf2ify(tilesY) + pipeline->localSizeY - 1) / pipeline->localSizeY),
             static_cast<uint32_t>((batchSize * channels + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
           );
         }
         else if(pipeline->name.find("global_pooling_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,xySize};
+          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize};
           push(params);
           dispatch(
             1,
@@ -1876,7 +1950,7 @@ namespace {
         }
         else if(pipeline->name.find("value_head_pool_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-          vk_shader::push::ValueHeadPoolingChannelsParams params = {batchSize,gpoolChannels,xySize};
+          vk_shader::push::ValueHeadPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize};
           push(params);
           dispatch(
             1,
@@ -1888,13 +1962,13 @@ namespace {
           vk_shader::push::SumChannelsParams params = {
             static_cast<uint32_t>(batchSize),
             1u,
-            static_cast<uint32_t>(xySize)
+            static_cast<uint32_t>(pipelineXYSize)
           };
           push(params);
           dispatch(1, 1, static_cast<uint32_t>((batchSize + pipeline->localSizeZ - 1) / pipeline->localSizeZ));
         }
         else if(pipeline->name.find("add_pointwise") == 0) {
-          vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(batchSize * channels * xySize)};
+          vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(batchSize * channels * pipelineXYSize)};
           push(params);
           dispatch((params.size + config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX - 1) /
                    (config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX));
@@ -1913,46 +1987,46 @@ namespace {
         else if(pipeline->name.find("transformer_scale_dot_product") == 0) {
           const int heads = std::max(1, context.modelInfo.transformerNumHeads);
           const int kvHeads = std::max(1, context.modelInfo.transformerNumKVHeads);
-          vk_shader::push::ScaleDotProductPushParam params = {xySize,heads,kvHeads,1.0f / sqrtf((float)std::max(1, context.modelInfo.transformerHeadDim))};
+          vk_shader::push::ScaleDotProductPushParam params = {pipelineXYSize,heads,kvHeads,1.0f / sqrtf((float)std::max(1, context.modelInfo.transformerHeadDim))};
           push(params);
           if(config.transformer.USE_TILED_ATTN && pipeline->name.find("naive") == string::npos)
-            dispatch((xySize + config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD - 1) /
+            dispatch((pipelineXYSize + config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD - 1) /
                        (config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD), static_cast<uint32_t>(batchSize * heads));
           else
-            dispatch((xySize + pipeline->localSizeX - 1) / pipeline->localSizeX, static_cast<uint32_t>(batchSize * heads));
+            dispatch((pipelineXYSize + pipeline->localSizeX - 1) / pipeline->localSizeX, static_cast<uint32_t>(batchSize * heads));
         }
         else if(pipeline->name.find("transformer_rms_norm") == 0) {
-          vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,xySize,1e-6f};
+          vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,pipelineXYSize,1e-6f};
           push(params);
           dispatch(
-            static_cast<uint32_t>((xySize + config.rmsNorm.WG_XY_SIZE - 1) / config.rmsNorm.WG_XY_SIZE),
+            static_cast<uint32_t>((pipelineXYSize + config.rmsNorm.WG_XY_SIZE - 1) / config.rmsNorm.WG_XY_SIZE),
             static_cast<uint32_t>(batchSize)
           );
         }
         else if(pipeline->name.find("transformer_swiglu") == 0) {
           const int ffnChannels = std::max(channels, context.modelInfo.transformerFFNChannels);
-          vk_shader::push::TransformerSwiGLUPushParams params = {batchSize * ffnChannels * xySize};
+          vk_shader::push::TransformerSwiGLUPushParams params = {batchSize * ffnChannels * pipelineXYSize};
           push(params);
           dispatch((params.size + config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX - 1) /
                    (config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_sum_sq") == 0) {
-          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * xySize);
-          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,xySize,sizing.tilesPerGroupPass1};
+          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * pipelineXYSize);
+          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,pipelineXYSize,sizing.tilesPerGroupPass1};
           push(params);
           dispatch(static_cast<uint32_t>(sizing.numCHWWorkgroups), static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_reduce") == 0) {
-          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * xySize);
+          const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * pipelineXYSize);
           vk_shader::push::TransformerSpatialRMSNormReducePushParams params = {batchSize,sizing.numCHWWorkgroups,sizing.tilesPerGroupPass2};
           push(params);
           dispatch(1, static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_apply") == 0) {
-          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,xySize,1e-6f};
+          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,pipelineXYSize,1e-6f};
           push(params);
           dispatch(
-            static_cast<uint32_t>((channels * xySize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
+            static_cast<uint32_t>((channels * pipelineXYSize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
                                   (config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX)),
             static_cast<uint32_t>(batchSize)
           );
@@ -2102,7 +2176,62 @@ namespace {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
           );
         }
-        else if(timedRepeat < winogradOutputValidationBuffers.size()) {
+        else if(plan.kernelName == "gPool" && timedRepeat < gpoolValidationBuffers.size()) {
+          const Pipeline* gpoolPipeline = pipelines[0];
+          const uint32_t binding = outputBinding(gpoolPipeline);
+          VulkanBuffer* outputBuffer = tuningBuffers[binding];
+          const size_t count = batchSize * std::max(1, context.modelInfo.gpoolNumChannels) * 3;
+          const VkDeviceSize outputBytes = count *
+            (halfBinding(gpoolPipeline, binding) ? sizeof(half_t) : sizeof(float));
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, outputBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+          );
+          VkBufferCopy copyRegion = {};
+          copyRegion.size = outputBytes;
+          vkCmdCopyBuffer(
+            commandBuffer, outputBuffer->buffer, gpoolValidationBuffers[timedRepeat]->buffer, 1, &copyRegion
+          );
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, gpoolValidationBuffers[timedRepeat],
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+          );
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, outputBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
+          );
+        }
+        else if(plan.kernelName.find("InputTransform") != string::npos &&
+                timedRepeat < winogradInputValidationBuffers.size()) {
+          const Pipeline* inputPipeline = pipelines[0];
+          const uint32_t binding = outputBinding(inputPipeline);
+          VulkanBuffer* outputBuffer = tuningBuffers[binding];
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, outputBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+          );
+          VkBufferCopy copyRegion = {};
+          copyRegion.size = scratchBytes;
+          vkCmdCopyBuffer(
+            commandBuffer, outputBuffer->buffer, winogradInputValidationBuffers[timedRepeat]->buffer, 1, &copyRegion
+          );
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, winogradInputValidationBuffers[timedRepeat],
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+          );
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, outputBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
+          );
+        }
+        else if(plan.kernelName.find("OutputTransform") != string::npos &&
+                timedRepeat < winogradOutputValidationBuffers.size()) {
           const uint32_t binding = outputBinding(pipelines[0]);
           VulkanBuffer* outputBuffer = tuningBuffers[binding];
           vk_helper::barrierCommandBufferForBuffer(
@@ -2126,7 +2255,9 @@ namespace {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
           );
         }
-        else if(timedRepeat < pointwiseValidationBuffers.size()) {
+        else if((plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
+                 plan.kernelName == "transformerRMSNorm") &&
+                timedRepeat < pointwiseValidationBuffers.size()) {
           const uint32_t binding = outputBinding(pipelines[0]);
           vk_helper::barrierCommandBufferForBuffer(
             commandBuffer, tuningBuffers[binding],
@@ -2149,7 +2280,7 @@ namespace {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
           );
         }
-        else if(timedRepeat < attentionValidationBuffers.size()) {
+        else if(plan.kernelName == "transformerAttention" && timedRepeat < attentionValidationBuffers.size()) {
           const Pipeline* attentionPipeline = pipelines[0];
           const uint32_t binding = outputBinding(attentionPipeline);
           VulkanBuffer* outputBuffer = tuningBuffers[binding];
@@ -2250,7 +2381,70 @@ namespace {
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
       readback.clear();
-      if(!winogradOutputValidationBuffers.empty()) {
+      if(plan.kernelName == "gPool" && !gpoolValidationBuffers.empty()) {
+        const Pipeline* gpoolPipeline = pipelines[0];
+        const uint32_t binding = outputBinding(gpoolPipeline);
+        const size_t count = batchSize * std::max(1, context.modelInfo.gpoolNumChannels) * 3;
+        const bool useFP16 = halfBinding(gpoolPipeline, binding);
+        for(VulkanBuffer* validationBuffer: gpoolValidationBuffers) {
+          vector<float> output(count);
+          if(useFP16) {
+            vector<half_t> halves(count);
+            vk_helper::copyDeviceBufferToHost(
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+            );
+            for(size_t j = 0; j < count; j++)
+              output[j] = half_float::half_cast<float>(halves[j]);
+          }
+          else {
+            vk_helper::copyDeviceBufferToHost(
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+            );
+          }
+          if(result != VK_SUCCESS) {
+            error = "could not read global pooling validation output: " + vk_helper::vkErrorToString(result);
+            return false;
+          }
+          readback.insert(readback.end(), output.begin(), output.end());
+        }
+        cleanup();
+        return true;
+      }
+      if(plan.kernelName.find("InputTransform") != string::npos && !winogradInputValidationBuffers.empty()) {
+        const Pipeline* inputPipeline = pipelines[0];
+        const uint32_t binding = outputBinding(inputPipeline);
+        const ConvTuneParams& conv = inputPipeline->name.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+        const size_t tiles = batchSize * ((context.nnXLen + conv.outTileXSize - 1) / conv.outTileXSize) *
+          ((context.nnYLen + conv.outTileYSize - 1) / conv.outTileYSize);
+        const size_t count = vk_helper::roundUpToMultiple(tiles, static_cast<size_t>(activeMPaddingMult)) *
+          vk_helper::roundUpToMultiple(maxConvChannels, static_cast<size_t>(activeKPaddingMult)) *
+          conv.inTileXSize * conv.inTileYSize;
+        const bool useFP16 = halfBinding(inputPipeline, binding);
+        for(VulkanBuffer* validationBuffer: winogradInputValidationBuffers) {
+          vector<float> output(count);
+          if(useFP16) {
+            vector<half_t> halves(count);
+            vk_helper::copyDeviceBufferToHost(
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+            );
+            for(size_t j = 0; j < count; j++)
+              output[j] = half_float::half_cast<float>(halves[j]);
+          }
+          else {
+            vk_helper::copyDeviceBufferToHost(
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+            );
+          }
+          if(result != VK_SUCCESS) {
+            error = "could not read Winograd input validation output: " + vk_helper::vkErrorToString(result);
+            return false;
+          }
+          readback.insert(readback.end(), output.begin(), output.end());
+        }
+        cleanup();
+        return true;
+      }
+      if(plan.kernelName.find("OutputTransform") != string::npos && !winogradOutputValidationBuffers.empty()) {
         const Pipeline* outputPipeline = pipelines[0];
         const uint32_t binding = outputBinding(outputPipeline);
         const size_t count = batchSize * maxConvChannels * xySize;
@@ -2278,7 +2472,7 @@ namespace {
         cleanup();
         return true;
       }
-      if(!spatialValidationBuffers.empty()) {
+      if(plan.kernelName == "spatialRMSNorm" && !spatialValidationBuffers.empty()) {
         const Pipeline* applyPipeline = pipelines[2];
         const uint32_t binding = outputBinding(applyPipeline);
         const size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
@@ -2306,7 +2500,8 @@ namespace {
         cleanup();
         return true;
       }
-      if(!pointwiseValidationBuffers.empty()) {
+      if((plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
+          plan.kernelName == "transformerRMSNorm") && !pointwiseValidationBuffers.empty()) {
         const uint32_t binding = outputBinding(pipelines[0]);
         size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
         if(pipelines[0]->name.find("add_channel_bias_nchw") == 0)
@@ -2337,7 +2532,7 @@ namespace {
         cleanup();
         return true;
       }
-      if(!attentionValidationBuffers.empty()) {
+      if(plan.kernelName == "transformerAttention" && !attentionValidationBuffers.empty()) {
         const Pipeline* attentionPipeline = pipelines[0];
         const uint32_t binding = outputBinding(attentionPipeline);
         const bool useFP16 = halfBinding(attentionPipeline, binding);
@@ -2359,9 +2554,9 @@ namespace {
           const ConvTuneParams& conv = name.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
           const size_t tiles = batchSize * ((context.nnXLen + conv.outTileXSize - 1) / conv.outTileXSize) *
             ((context.nnYLen + conv.outTileYSize - 1) / conv.outTileYSize);
-          count = vk_helper::roundUpToMultiple(tiles, static_cast<size_t>(xgemmParams.MWG)) *
+          count = vk_helper::roundUpToMultiple(tiles, static_cast<size_t>(activeMPaddingMult)) *
             vk_helper::roundUpToMultiple(maxConvChannels,
-                                         static_cast<size_t>(xgemmParams.KWG)) * conv.inTileXSize * conv.inTileYSize;
+                                         static_cast<size_t>(activeKPaddingMult)) * conv.inTileXSize * conv.inTileYSize;
         }
         else if(name.find("winograd_output_transform") == 0)
           count = batchSize * maxConvChannels * xySize;
@@ -2424,7 +2619,9 @@ namespace {
       bool pointwiseAccumulatorInitialized = false;
       VulkanBuffer* attentionReadbackBuffer = nullptr;
       vector<VulkanBuffer*> pointwiseValidationBuffers;
+      vector<VulkanBuffer*> winogradInputValidationBuffers;
       vector<VulkanBuffer*> winogradOutputValidationBuffers;
+      vector<VulkanBuffer*> gpoolValidationBuffers;
       vector<VulkanBuffer*> attentionValidationBuffers;
       vector<VulkanBuffer*> spatialValidationBuffers;
       VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -2870,6 +3067,7 @@ namespace {
       slightlyTunedConfig.xgemmDirect.NDIMBD = 8;
       VulkanTuneParams slightlyTunedConfig2 = slightlyTunedConfig;
       slightlyTunedConfig2.xgemmDirect.WGD = 16;
+      configs.insert(configs.begin(), current);
       configs.insert(configs.begin(), slightlyTunedConfig2);
       configs.insert(configs.begin(), slightlyTunedConfig);
       return configs;
@@ -3542,7 +3740,7 @@ namespace {
 
     cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
-    cooperativeConfig.vulkan.shouldUseFP16Compute = false;
+    cooperativeConfig.vulkan.shouldUseFP16Compute = true;
     const double hgemmNCHWCallsPerSecond = canUseNCHW
       ? runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, cooperativeConfig)
       : 0.0;
