@@ -212,7 +212,8 @@ bool XgemmDirectTuneParams::isValid() const {
 bool HGemmCooperativeMatrixTuneParams::isValid() const {
   if(MWARP <= 0 || NWARP <= 0 || KDIM <= 0 || subgroupSize == 0 ||
      MWG <= 0 || NWG <= 0 || KWG <= 0 || MWAVE <= 0 || NWAVE <= 0 ||
-     SA < 0 || SA > 1 || SB < 0 || SB > 1)
+     SA < 0 || SA > 1 || SB < 0 || SB > 1 ||
+     (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
@@ -224,8 +225,8 @@ bool HGemmCooperativeMatrixTuneParams::isValid() const {
     return false;
   return isMultipleOf(MWG, MWAVE) && isMultipleOf(NWG, NWAVE) &&
          isMultipleOf(KWG, KDIM) && isMultipleOf(MWAVE, MWARP) &&
-         isMultipleOf(NWAVE, NWARP) && isMultipleOf(MWG, 4) &&
-         isMultipleOf(NWG, 4) && isMultipleOf(KWG, 4);
+         isMultipleOf(NWAVE, NWARP) && isMultipleOf(MWG, VWM) &&
+         isMultipleOf(NWG, VWN) && isMultipleOf(KWG, VWM);
 }
 
 bool HGemmCooperativeMatrixTuneParams::isSimple() const {
@@ -233,14 +234,14 @@ bool HGemmCooperativeMatrixTuneParams::isSimple() const {
     return false;
   if(NWAVE != NWARP && NWAVE == NWG)
     return false;
-  return SA == SB && MWG == NWG;
+  return SA == SB && VWM == VWN && MWG == NWG;
 }
 
 bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   if(MWARP <= 0 || NWARP <= 0 || KDIM <= 0 || subgroupSize == 0 ||
      MWG <= 0 || NWG <= 0 || KWG <= 0 ||
      MWAVE <= 0 || NWAVE <= 0 || SB < 0 || SB > 1 ||
-     VWM != 4 || VWN != 4)
+     (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
@@ -351,6 +352,8 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrix.NWAVE == other.hgemmCooperativeMatrix.NWAVE &&
          hgemmCooperativeMatrix.SA == other.hgemmCooperativeMatrix.SA &&
          hgemmCooperativeMatrix.SB == other.hgemmCooperativeMatrix.SB &&
+         hgemmCooperativeMatrix.VWM == other.hgemmCooperativeMatrix.VWM &&
+         hgemmCooperativeMatrix.VWN == other.hgemmCooperativeMatrix.VWN &&
          hgemmCooperativeMatrixNCHW.MWARP == other.hgemmCooperativeMatrixNCHW.MWARP &&
          hgemmCooperativeMatrixNCHW.NWARP == other.hgemmCooperativeMatrixNCHW.NWARP &&
          hgemmCooperativeMatrixNCHW.KDIM == other.hgemmCooperativeMatrixNCHW.KDIM &&
@@ -435,11 +438,11 @@ namespace {
     WRITE(name ".MWG", params.MWG); WRITE(name ".NWG", params.NWG); WRITE(name ".KWG", params.KWG); \
     WRITE(name ".MWAVE", params.MWAVE); WRITE(name ".NWAVE", params.NWAVE); \
     WRITE(name ".MWARP", params.MWARP); WRITE(name ".NWARP", params.NWARP); \
+    WRITE(name ".VWM", params.VWM); WRITE(name ".VWN", params.VWN); \
     WRITE(name ".KDIM", params.KDIM); WRITE(name ".subgroupSize", params.subgroupSize)
     WRITE_HGEMM("hgemmCooperativeMatrix", profile.hgemmCooperativeMatrix);
     WRITE("hgemmCooperativeMatrix.SA", profile.hgemmCooperativeMatrix.SA); WRITE("hgemmCooperativeMatrix.SB", profile.hgemmCooperativeMatrix.SB);
     WRITE_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW);
-    WRITE("hgemmCooperativeMatrixNCHW.VWM", profile.hgemmCooperativeMatrixNCHW.VWM); WRITE("hgemmCooperativeMatrixNCHW.VWN", profile.hgemmCooperativeMatrixNCHW.VWN);
     WRITE("hgemmCooperativeMatrixNCHW.SB", profile.hgemmCooperativeMatrixNCHW.SB); WRITE("hgemmCooperativeMatrixNCHW.CType", profile.hgemmCooperativeMatrixNCHW.CType); WRITE("hgemmCooperativeMatrixNCHW.ResultType", profile.hgemmCooperativeMatrixNCHW.ResultType);
 #undef WRITE_HGEMM
 #define WRITE_CONV(name, params) \
@@ -502,7 +505,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 96)
+  if(values.size() != 98)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -518,9 +521,10 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
 #undef READ_XGEMM
 #define READ_HGEMM(name, params) \
     params.MWG = read(name ".MWG"); params.NWG = read(name ".NWG"); params.KWG = read(name ".KWG"); \
-    params.MWAVE = read(name ".MWAVE"); params.NWAVE = read(name ".NWAVE"); params.MWARP = read(name ".MWARP"); params.NWARP = read(name ".NWARP"); params.KDIM = read(name ".KDIM"); params.subgroupSize = read(name ".subgroupSize")
+    params.MWAVE = read(name ".MWAVE"); params.NWAVE = read(name ".NWAVE"); params.MWARP = read(name ".MWARP"); params.NWARP = read(name ".NWARP"); \
+    params.VWM = read(name ".VWM"); params.VWN = read(name ".VWN"); params.KDIM = read(name ".KDIM"); params.subgroupSize = read(name ".subgroupSize")
     READ_HGEMM("hgemmCooperativeMatrix", profile.hgemmCooperativeMatrix); profile.hgemmCooperativeMatrix.SA = read("hgemmCooperativeMatrix.SA"); profile.hgemmCooperativeMatrix.SB = read("hgemmCooperativeMatrix.SB");
-    READ_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW); profile.hgemmCooperativeMatrixNCHW.VWM = read("hgemmCooperativeMatrixNCHW.VWM"); profile.hgemmCooperativeMatrixNCHW.VWN = read("hgemmCooperativeMatrixNCHW.VWN"); profile.hgemmCooperativeMatrixNCHW.SB = read("hgemmCooperativeMatrixNCHW.SB"); profile.hgemmCooperativeMatrixNCHW.CType = read("hgemmCooperativeMatrixNCHW.CType"); profile.hgemmCooperativeMatrixNCHW.ResultType = read("hgemmCooperativeMatrixNCHW.ResultType");
+    READ_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW); profile.hgemmCooperativeMatrixNCHW.SB = read("hgemmCooperativeMatrixNCHW.SB"); profile.hgemmCooperativeMatrixNCHW.CType = read("hgemmCooperativeMatrixNCHW.CType"); profile.hgemmCooperativeMatrixNCHW.ResultType = read("hgemmCooperativeMatrixNCHW.ResultType");
 #undef READ_HGEMM
 #define READ_CONV(name, params) \
     params.inTileXSize = read(name ".inTileXSize"); params.inTileYSize = read(name ".inTileYSize"); params.outTileXSize = read(name ".outTileXSize"); params.outTileYSize = read(name ".outTileYSize"); \
@@ -977,6 +981,8 @@ namespace {
       add("NWAVE", config.hgemmCooperativeMatrix.NWAVE);
       add("SA", config.hgemmCooperativeMatrix.SA);
       add("SB", config.hgemmCooperativeMatrix.SB);
+      add("VWM", config.hgemmCooperativeMatrix.VWM);
+      add("VWN", config.hgemmCooperativeMatrix.VWN);
     }
     else if(tunerName == "hgemmCooperativeMatrixNCHW") {
       add("MWARP", config.hgemmCooperativeMatrixNCHW.MWARP);
@@ -991,6 +997,8 @@ namespace {
       add("CType", config.hgemmCooperativeMatrixNCHW.CType);
       add("ResultType", config.hgemmCooperativeMatrixNCHW.ResultType);
       add("SB", config.hgemmCooperativeMatrixNCHW.SB);
+      add("VWM", config.hgemmCooperativeMatrixNCHW.VWM);
+      add("VWN", config.hgemmCooperativeMatrixNCHW.VWN);
     }
     else if(
       tunerName == "conv3x3InputTransform" || tunerName == "conv3x3OutputTransform" ||
@@ -2885,7 +2893,7 @@ namespace {
              config.vulkan.canUseFP16Compute &&
              config.hgemmCooperativeMatrix.isValid();
     }
-    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams&) {
+    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
       // Match OpenCL's untuned HGemmWmmaParams defaults. MWARP/NWARP/KDIM
       // and subgroupSize remain the hardware-selected Vulkan values.
@@ -2896,6 +2904,8 @@ namespace {
       result.hgemmCooperativeMatrix.NWAVE = 16;
       result.hgemmCooperativeMatrix.SA = 0;
       result.hgemmCooperativeMatrix.SB = 0;
+      result.hgemmCooperativeMatrix.VWM = defaults.hgemmCooperativeMatrix.VWM;
+      result.hgemmCooperativeMatrix.VWN = defaults.hgemmCooperativeMatrix.VWN;
       return result;
     }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
@@ -2905,6 +2915,8 @@ namespace {
       addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; });
       addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWAVE = v; });
       addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWAVE = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWM = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWN = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SA = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SB = v; });
       configs.erase(
@@ -2965,6 +2977,8 @@ namespace {
       addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; });
       addCandidates(configs, vector<int>{8,16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWAVE = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWAVE = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWM = v; });
+      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWN = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.SB = v; });
       configs.erase(
         remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {

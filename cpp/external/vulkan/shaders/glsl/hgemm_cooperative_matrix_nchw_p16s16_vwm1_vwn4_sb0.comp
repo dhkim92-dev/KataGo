@@ -1,0 +1,5 @@
+#version 460
+#define VWM 1
+#define VWN 4
+#define SB 0
+#include "hgemm_cooperative_matrix_nchw.glsl"

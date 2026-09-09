@@ -26,6 +26,16 @@ namespace vk_shader {
       return firstSlot < 0 || secondSlot < 0 ? -1 : precision * 9 + firstSlot * 3 + secondSlot;
     }
 
+    int hgemmVariantIndex(uint32_t vwm, uint32_t vwn) {
+      const int mSlot = vectorWidthSlot(vwm);
+      const int nSlot = vectorWidthSlot(vwn);
+      return mSlot < 0 || nSlot < 0 ? -1 : mSlot * 3 + nSlot;
+    }
+
+    std::string hgemmVariantName(const char* stem, const char* suffix, uint32_t vwm, uint32_t vwn) {
+      return std::string(stem) + "_vwm" + std::to_string(vwm) + "_vwn" + std::to_string(vwn) + suffix;
+    }
+
     const char* xgemmPrecisionName(int precision) {
       return precision == 0 ? "p32s32" : precision == 1 ? "p32s16" : "p16s16";
     }
@@ -64,21 +74,30 @@ namespace vk_shader {
   const unsigned char* spirv_conv2d_p16s16 = _binary_conv2d_p16s16_start;
   size_t spirv_conv2d_p16s16_size = _binary_conv2d_p16s16_size;
 
-  // hgemm_cooperative_matrix_nchw_p16s16_sb{0,1}
-  const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0 = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_start;
-  size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
-  const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1 = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_start;
-  size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size = _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+#define DEFINE_HGEMM_VARIANT(name) \
+  const unsigned char* spirv_##name = _binary_##name##_start; \
+  size_t spirv_##name##_size = _binary_##name##_size;
 
-  // hgemm_cooperative_matrix_f16s16_sa{0,1}_sb{0,1}
-  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0 = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_start;
-  size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
-  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1 = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_start;
-  size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size = _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
-  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0 = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_start;
-  size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
-  const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1 = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_start;
-  size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size = _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
+#define DEFINE_HGEMM_WIDTH_VARIANTS(stem, suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm1_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm1_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm1_vwn4##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm2_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm2_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm2_vwn4##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm4_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm4_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwm4_vwn4##suffix)
+
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb0)
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb1)
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb0)
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb1)
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb0)
+  DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb1)
+
+#undef DEFINE_HGEMM_WIDTH_VARIANTS
+#undef DEFINE_HGEMM_VARIANT
 
   // winograd_input_transform 
   const unsigned char* spirv_winograd_input_transform_fp32 = _binary_winograd_input_transform_fp32_start;
@@ -397,6 +416,16 @@ namespace vk_shader {
       {spirv_##base##_##mp##4_##np##1_p32s32, spirv_##base##_##mp##4_##np##1_p32s32_size, &modules[6]}, \
       {spirv_##base##_##mp##4_##np##2_p32s32, spirv_##base##_##mp##4_##np##2_p32s32_size, &modules[7]}, \
       {spirv_##base##_##mp##4_##np##4_p32s32, spirv_##base##_##mp##4_##np##4_p32s32_size, &modules[8]},
+#define HGEMM_WIDTH_SOURCES(stem, suffix, base) \
+      {spirv_##stem##_vwm1_vwn1##suffix, spirv_##stem##_vwm1_vwn1##suffix##_size, &shaderModule_##base##_variants[0]}, \
+      {spirv_##stem##_vwm1_vwn2##suffix, spirv_##stem##_vwm1_vwn2##suffix##_size, &shaderModule_##base##_variants[1]}, \
+      {spirv_##stem##_vwm1_vwn4##suffix, spirv_##stem##_vwm1_vwn4##suffix##_size, &shaderModule_##base##_variants[2]}, \
+      {spirv_##stem##_vwm2_vwn1##suffix, spirv_##stem##_vwm2_vwn1##suffix##_size, &shaderModule_##base##_variants[3]}, \
+      {spirv_##stem##_vwm2_vwn2##suffix, spirv_##stem##_vwm2_vwn2##suffix##_size, &shaderModule_##base##_variants[4]}, \
+      {spirv_##stem##_vwm2_vwn4##suffix, spirv_##stem##_vwm2_vwn4##suffix##_size, &shaderModule_##base##_variants[5]}, \
+      {spirv_##stem##_vwm4_vwn1##suffix, spirv_##stem##_vwm4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
+      {spirv_##stem##_vwm4_vwn2##suffix, spirv_##stem##_vwm4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
+      {spirv_##stem##_vwm4_vwn4##suffix, spirv_##stem##_vwm4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -432,12 +461,12 @@ namespace vk_shader {
       {spirv_extract_channel0_nchw_p32s16, spirv_extract_channel0_nchw_p32s16_size, &shaderModule_extract_channel0_nchw_p32s16},
       {spirv_global_pooling_channels_fp32, spirv_global_pooling_channels_fp32_size, &shaderModule_global_pooling_channels_fp32},
       {spirv_global_pooling_channels_p32s16, spirv_global_pooling_channels_p32s16_size, &shaderModule_global_pooling_channels_p32s16},
-      {spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0, spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size, &shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0},
-      {spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1, spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size, &shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1},
-      {spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0, spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size, &shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0},
-      {spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1, spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size, &shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1},
-      {spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0, spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size, &shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0},
-      {spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1, spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size, &shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1},
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_f16s16, _sa0_sb0, hgemm_cooperative_matrix_f16s16_sa0_sb0)
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_f16s16, _sa0_sb1, hgemm_cooperative_matrix_f16s16_sa0_sb1)
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_f16s16, _sa1_sb0, hgemm_cooperative_matrix_f16s16_sa1_sb0)
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_f16s16, _sa1_sb1, hgemm_cooperative_matrix_f16s16_sa1_sb1)
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_p16s16, _sb0, hgemm_cooperative_matrix_nchw_p16s16_sb0)
+      HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_p16s16, _sb1, hgemm_cooperative_matrix_nchw_p16s16_sb1)
       {spirv_sum_channels_fp32, spirv_sum_channels_fp32_size, &shaderModule_sum_channels_fp32},
       {spirv_sum_channels_p32s16, spirv_sum_channels_p32s16_size, &shaderModule_sum_channels_p32s16},
       {spirv_transformer_apply_rope_fp32, spirv_transformer_apply_rope_fp32_size, &shaderModule_transformer_apply_rope_fp32},
@@ -481,6 +510,7 @@ namespace vk_shader {
     };
 #undef XGEMM_DIRECT_WIDTH_SOURCES
 #undef XGEMM_WIDTH_SOURCES
+#undef HGEMM_WIDTH_SOURCES
     shaderModuleFields.clear();
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
@@ -932,32 +962,37 @@ namespace vk_shader {
     spec.NWAVE = tuneParams.NWAVE;
     SpecializationData specData(spec);
 
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
-    const char* name = nullptr;
+    VkShaderModule* shaderModules = nullptr;
+    const char* shaderSuffix = nullptr;
+    const char* shaderStem = "hgemm_cooperative_matrix_f16s16";
     // SA/SB are compile-time choices, so select the matching SPIR-V module.
     // Do not silently map an invalid combination to the SA1/SB1 binary.
     switch((tuneParams.SA << 1) | tuneParams.SB) {
       case 0:
-        name = "hgemm_cooperative_matrix_f16s16_sa0_sb0";
-        shaderModule = shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0;
+        shaderSuffix = "_sa0_sb0";
+        shaderModules = shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0_variants;
         break;
       case 1:
-        name = "hgemm_cooperative_matrix_f16s16_sa0_sb1";
-        shaderModule = shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1;
+        shaderSuffix = "_sa0_sb1";
+        shaderModules = shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1_variants;
         break;
       case 2:
-        name = "hgemm_cooperative_matrix_f16s16_sa1_sb0";
-        shaderModule = shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0;
+        shaderSuffix = "_sa1_sb0";
+        shaderModules = shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0_variants;
         break;
       case 3:
-        name = "hgemm_cooperative_matrix_f16s16_sa1_sb1";
-        shaderModule = shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1;
+        shaderSuffix = "_sa1_sb1";
+        shaderModules = shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1_variants;
         break;
       default:
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    const int variant = hgemmVariantIndex(tuneParams.VWM, tuneParams.VWN);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    const std::string name = hgemmVariantName(shaderStem, shaderSuffix, tuneParams.VWM, tuneParams.VWN);
     return createPipeline(
-      name, shaderModule, 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
+      name, shaderModules[variant], 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
       &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ
     );
   }
@@ -982,21 +1017,24 @@ namespace vk_shader {
     spec.ResultType = tuneParams.ResultType;
     SpecializationData specData(spec);
 
-    if(tuneParams.SB == 1)
-      return createPipeline(
-        "hgemm_cooperative_matrix_nchw_p16s16_sb1",
-        shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1,
-        3,
-        sizeof(HGemmCooperativeMatrixNCHWParams),
-        pipeline,
-        &specData.info,
-        spec.localSizeX,
-        spec.localSizeY,
-        spec.localSizeZ
-      );
+    const int variant = hgemmVariantIndex(tuneParams.VWM, tuneParams.VWN);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    const char* shaderSuffix = nullptr;
+    const char* shaderStem = "hgemm_cooperative_matrix_nchw_p16s16";
+    VkShaderModule* shaderModules = nullptr;
+    if(tuneParams.SB == 1) {
+      shaderSuffix = "_sb1";
+      shaderModules = shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1_variants;
+    }
+    else {
+      shaderSuffix = "_sb0";
+      shaderModules = shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0_variants;
+    }
+    const std::string name = hgemmVariantName(shaderStem, shaderSuffix, tuneParams.VWM, tuneParams.VWN);
     return createPipeline(
-      "hgemm_cooperative_matrix_nchw_p16s16_sb0",
-      shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0,
+      name,
+      shaderModules[variant],
       3,
       sizeof(HGemmCooperativeMatrixNCHWParams),
       pipeline,

@@ -135,6 +135,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaults.xgemm.VWN == 4);
   testAssert(defaults.xgemm16.VWM == 4);
   testAssert(defaults.xgemm16.VWN == 4);
+  testAssert(defaults.hgemmCooperativeMatrix.VWM == 4);
+  testAssert(defaults.hgemmCooperativeMatrix.VWN == 4);
+  testAssert(defaults.hgemmCooperativeMatrixNCHW.VWM == 4);
+  testAssert(defaults.hgemmCooperativeMatrixNCHW.VWN == 4);
   testAssert(defaults.spatialRMSNorm.TILE_SIZE == 32);
   testAssert(defaults.spatialRMSNorm.APPLY_ELTS_PER_THREAD == 1);
   testAssert(defaults.rmsNorm.WG_C_SIZE == 64);
@@ -157,7 +161,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
   testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
-  testAssert(defaultLines.size() == 97);
+  testAssert(defaultLines.size() == 99);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -229,6 +233,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.spatialRMSNorm.APPLY_ELTS_PER_THREAD = 4;
   params.hgemmCooperativeMatrixNCHW.NWG = 32;
   params.hgemmCooperativeMatrixNCHW.KWG = 32;
+  params.hgemmCooperativeMatrix.VWM = 2;
+  params.hgemmCooperativeMatrix.VWN = 1;
+  params.hgemmCooperativeMatrixNCHW.VWM = 1;
+  params.hgemmCooperativeMatrixNCHW.VWN = 2;
   params.vulkan.canUseFP16Storage = true;
   params.vulkan.canUseFP16Compute = true;
   params.vulkan.canUseCooperativeMatrix = true;
@@ -266,6 +274,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemm.VWM = 3;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.hgemmCooperativeMatrix.VWM = 8;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.VWND = 3;

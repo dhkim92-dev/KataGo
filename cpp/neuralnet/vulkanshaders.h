@@ -31,31 +31,31 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_p16s16_end;
   extern const size_t _binary_conv2d_p16s16_size;
 
-  // hgemm_cooperative_matrix_nchw_p16s16_sb{0,1}.comp
-  extern const unsigned char _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
+#define DECLARE_HGEMM_VARIANT(name) \
+  extern const unsigned char _binary_##name##_start[]; \
+  extern const unsigned char* _binary_##name##_end; \
+  extern const size_t _binary_##name##_size;
 
-  extern const unsigned char _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+#define DECLARE_HGEMM_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn4##suffix)
 
-  // hgemm_cooperative_matrix_f16s16_sa{0,1}_sb{0,1}.comp
-  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb1)
 
-  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
-
-  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
-
-  extern const unsigned char _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_start[];
-  extern const unsigned char* _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_end;
-  extern const size_t _binary_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
+#undef DECLARE_HGEMM_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_VARIANT
 
   // winograd_input_transform.glsl
   extern const unsigned char _binary_winograd_input_transform_fp32_start[];
@@ -436,23 +436,30 @@ namespace vk_shader {
   extern const unsigned char* spirv_conv2d_p16s16;
   extern size_t spirv_conv2d_p16s16_size;
 
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0;
-  extern size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb0_size;
+#define DECLARE_HGEMM_SPIRV_VARIANT(name) \
+  extern const unsigned char* spirv_##name; \
+  extern size_t spirv_##name##_size;
 
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1;
-  extern size_t spirv_hgemm_cooperative_matrix_nchw_p16s16_sb1_size;
+#define DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn4##suffix)
 
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0;
-  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb0_size;
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb1)
 
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1;
-  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa0_sb1_size;
-
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0;
-  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb0_size;
-
-  extern const unsigned char* spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1;
-  extern size_t spirv_hgemm_cooperative_matrix_f16s16_sa1_sb1_size;
+#undef DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_SPIRV_VARIANT
 
   extern const unsigned char* spirv_winograd_input_transform_fp32;
   extern size_t spirv_winograd_input_transform_fp32_size;
@@ -1301,6 +1308,8 @@ struct LocalDimHash {
       int NWAVE = 32;
       int SA = 0;
       int SB = 0;
+      int VWM = 4;
+      int VWN = 4;
 
       bool isValid() const;
       bool isSimple() const;
@@ -1309,8 +1318,7 @@ struct LocalDimHash {
     /**
      * Runtime tuning parameters for hgemm_cooperative_matrix_nchw. SB selects the shader binary
      * (shared-memory or direct-filter load); MWG through NWAVE are passed as
-     * specialization constants when a pipeline is created. VWM/VWN are fixed
-     * to the OpenCL port's Vulkan-compatible values.
+     * specialization constants when a pipeline is created.
      */
     struct HGemmCooperativeMatrixNCHWTuneParams {
       // These values come from VkCooperativeMatrixPropertiesKHR and are not
@@ -1327,7 +1335,6 @@ struct LocalDimHash {
       int CType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
       int ResultType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
       int SB = 0;
-      // OpenCL vectorization is fixed at four for the Vulkan port.
       int VWM = 4;
       int VWN = 4;
 
@@ -1504,12 +1511,15 @@ struct LocalDimHash {
     VkShaderModule shaderModule_extract_channel0_nchw_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_global_pooling_channels_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1 = VK_NULL_HANDLE;
+#define DECLARE_HGEMM_SHADER_MODULES(base) \
+    VkShaderModule shaderModule_##base##_variants[9] = {};
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa0_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa0_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa1_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa1_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_p16s16_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_p16s16_sb1)
+#undef DECLARE_HGEMM_SHADER_MODULES
     VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
