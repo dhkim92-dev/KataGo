@@ -1087,7 +1087,7 @@ namespace vk_shader {
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    const int precision = vulkanParams.canUseFP16Storage && vulkanParams.shouldUseFP16Storage
+    const int precision = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage
       ? (vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Compute ? 2 : 1) : 0;
     const int variant = xgemmVariantIndex(tuneParams.VWMD, tuneParams.VWND, precision);
     if(variant < 0)
