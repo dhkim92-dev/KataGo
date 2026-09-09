@@ -110,6 +110,13 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
+  testAssert(hardwareParams.canUseFP16Storage);
+  testAssert(hardwareParams.canUseFP16Compute);
+  testAssert(hardwareParams.canUseCooperativeMatrix);
+  testAssert(hardwareParams.canUseSubgroup);
+  testAssert(!hardwareParams.shouldUseFP16Storage);
+  testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
   defaults.vulkan.canUseFP16Compute = true;
   defaults.vulkan.canUseCooperativeMatrix = true;
@@ -173,6 +180,20 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("pointwise.ELTS_PER_THREAD=") < lineIndex("addChannelBiases.XY_ELTS_PER_THREAD="));
   testAssert(lineIndex("addChannelBiases.XY_ELTS_PER_THREAD=") < lineIndex("spatialRMSNorm.TILE_SIZE="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
+  const string staleDefaultsFilename = "tests/scratch/vulkantuner-stale-defaults.txt";
+  VulkanTuneParams staleDefaults = defaults;
+  staleDefaults.vulkan.canUseFP16Storage = false;
+  staleDefaults.vulkan.canUseFP16Compute = false;
+  staleDefaults.vulkan.canUseCooperativeMatrix = false;
+  staleDefaults.vulkan.canUseSubgroup = false;
+  VulkanTuneParams::save(staleDefaultsFilename, staleDefaults);
+  const VulkanTuneParams recreatedDefaults = VulkanTuner::loadOrCreate(
+    staleDefaultsFilename, "", "", 19, 19, modelInfo, deviceInfo, nullptr
+  );
+  testAssert(recreatedDefaults.vulkan.canUseFP16Storage);
+  testAssert(recreatedDefaults.vulkan.canUseFP16Compute);
+  testAssert(recreatedDefaults.vulkan.canUseCooperativeMatrix);
+  testAssert(recreatedDefaults.vulkan.canUseSubgroup);
 
   VulkanTuneParams params;
   params.conv3x3.inTileXSize = 4;
@@ -206,10 +227,14 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.rmsNorm.C_PER_THREAD = 2;
   params.spatialRMSNorm.TILE_SIZE = 64;
   params.spatialRMSNorm.APPLY_ELTS_PER_THREAD = 4;
+  params.hgemmCooperativeMatrixNCHW.NWG = 32;
+  params.hgemmCooperativeMatrixNCHW.KWG = 32;
   params.vulkan.canUseFP16Storage = true;
   params.vulkan.canUseFP16Compute = true;
+  params.vulkan.canUseCooperativeMatrix = true;
   params.vulkan.shouldUseFP16Storage = true;
   params.vulkan.shouldUseFP16Compute = true;
+  params.vulkan.shouldUseCooperativeMatrix = true;
   params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;

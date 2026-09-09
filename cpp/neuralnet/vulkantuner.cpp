@@ -65,6 +65,19 @@ bool VulkanTuner::shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, 
     fp32Seconds > 0.0 && fp16Seconds > 0.0 && fp16ErrorProp < 1.0 && fp16Seconds < fp32Seconds;
 }
 
+VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) {
+  VulkanParams params;
+  params.canUseFP16Storage =
+    deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
+    deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
+  params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
+  params.canUseCooperativeMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+  params.canUseSubgroup =
+    (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+    deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+  return params;
+}
+
 namespace {
   const string VERSION_LINE = Global::strprintf("VERSION=%d", VulkanTuner::TUNER_VERSION);
 
@@ -117,19 +130,6 @@ namespace {
     if(value > 1)
       throw IOError("VulkanTuneParams::load: invalid boolean for " + name + " in " + filename);
     return value == 1;
-  }
-
-  VulkanParams makeVulkanParams(const VulkanDeviceInfo& deviceInfo) {
-    VulkanParams params;
-    params.canUseFP16Storage =
-      deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
-      deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
-    params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-    params.canUseCooperativeMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
-    params.canUseSubgroup =
-      (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
-      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
-    return params;
   }
 
 }  // namespace
@@ -3497,9 +3497,10 @@ namespace {
     VulkanTuneParams& config,
     double xgemmDirectBaselineCallsPerSecond,
     double xgemmBaselineCallsPerSecond,
+    bool canUseHgemmCooperativeMatrix,
     bool canUseNCHW
   ) {
-    if(!config.vulkan.canUseCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
+    if(!canUseHgemmCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
        !config.vulkan.canUseFP16Compute)
       return;
 
@@ -3583,6 +3584,11 @@ void VulkanTuner::tune(
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
+  const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(device->info);
+  tunedConfig.vulkan.canUseFP16Storage = hardwareParams.canUseFP16Storage;
+  tunedConfig.vulkan.canUseFP16Compute = hardwareParams.canUseFP16Compute;
+  tunedConfig.vulkan.canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
+  tunedConfig.vulkan.canUseSubgroup = hardwareParams.canUseSubgroup;
   VulkanTimestampTimer timer(device);
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer};
   if(logger != nullptr) {
@@ -3593,11 +3599,11 @@ void VulkanTuner::tune(
       ", cooperativeMatrix=" + string(tunedConfig.vulkan.canUseCooperativeMatrix ? "true" : "false")
     );
   }
-  if(tunedConfig.vulkan.canUseCooperativeMatrix &&
-     !HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix))
-    tunedConfig.vulkan.canUseCooperativeMatrix = false;
-  const bool canUseHgemmCooperativeMatrixNCHW =
+  const bool canUseHgemmCooperativeMatrix =
     tunedConfig.vulkan.canUseCooperativeMatrix &&
+    HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix);
+  const bool canUseHgemmCooperativeMatrixNCHW =
+    canUseHgemmCooperativeMatrix &&
     HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(
       device, tunedConfig.hgemmCooperativeMatrixNCHW
     );
@@ -3613,7 +3619,7 @@ void VulkanTuner::tune(
   tunedConfig.xgemm16 = tunedConfig.xgemm;
   tuneCooperativeMatrices(
     context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond,
-    canUseHgemmCooperativeMatrixNCHW
+    canUseHgemmCooperativeMatrix, canUseHgemmCooperativeMatrixNCHW
   );
   tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
@@ -3643,6 +3649,12 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
 
   try {
     VulkanTuneParams loaded = VulkanTuneParams::load(filename);
+    const VulkanParams available = VulkanTuner::getHardwareParams(deviceInfo);
+    if(loaded.vulkan.canUseFP16Storage != available.canUseFP16Storage ||
+       loaded.vulkan.canUseFP16Compute != available.canUseFP16Compute ||
+       loaded.vulkan.canUseCooperativeMatrix != available.canUseCooperativeMatrix ||
+       loaded.vulkan.canUseSubgroup != available.canUseSubgroup)
+      throw IOError("Vulkan tuning capabilities changed for " + filename);
     if(logger != nullptr)
       logger->write("Loaded Vulkan tuning parameters from: " + filename);
     return loaded;
@@ -3650,7 +3662,7 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
   }
 
   VulkanTuneParams params;
-  params.vulkan = makeVulkanParams(deviceInfo);
+  params.vulkan = VulkanTuner::getHardwareParams(deviceInfo);
   VulkanTuneParams::save(filename, params);
   if(logger != nullptr)
     logger->write("Saved default Vulkan tuning parameters to: " + filename);
@@ -3677,10 +3689,10 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   try {
     VulkanTuneParams loaded = VulkanTuneParams::load(filename);
     if(device != nullptr) {
-      const VulkanParams available = makeVulkanParams(device->info);
+      const VulkanParams available = VulkanTuner::getHardwareParams(device->info);
       if(loaded.vulkan.canUseFP16Storage != available.canUseFP16Storage ||
          loaded.vulkan.canUseFP16Compute != available.canUseFP16Compute ||
-         (loaded.vulkan.canUseCooperativeMatrix && !available.canUseCooperativeMatrix) ||
+         loaded.vulkan.canUseCooperativeMatrix != available.canUseCooperativeMatrix ||
          loaded.vulkan.canUseSubgroup != available.canUseSubgroup) {
         throw IOError("Vulkan tuning capabilities changed for " + filename);
       }
@@ -3694,7 +3706,7 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   if(device == nullptr)
     throw StringError("VulkanTuner::loadOrAutoTune: device is null");
   VulkanTuneParams params;
-  params.vulkan = makeVulkanParams(device->info);
+  params.vulkan = VulkanTuner::getHardwareParams(device->info);
   tune(device, DEFAULT_BATCH_SIZE, nnXLen, nnYLen, modelInfo, false, logger, params);
   VulkanTuneParams::save(filename, params);
   if(didAutoTune != nullptr)

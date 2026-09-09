@@ -1361,6 +1361,8 @@ struct LocalDimHash {
     };
 
     struct VulkanParams {
+      // canUse* records hardware capability only. Performance and requested
+      // execution mode are represented by shouldUse*.
       bool canUseFP16Storage = false;
       bool canUseFP16Compute = false;
       bool canUseCooperativeMatrix = false;
