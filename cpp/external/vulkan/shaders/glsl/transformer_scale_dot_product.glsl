@@ -81,8 +81,8 @@ void main() {
     for(int t = localIdx; t < ATTN_BLOCK_KV * ATTN_HEAD_DIM; t += ATTN_BLOCK_Q) {
       // The global buffers are laid out as [head, dim, sequence]. Map the
       // linear load so neighboring invocations read neighboring sequence
-      // positions for the same dimension. The shared tile remains laid out
-      // as [sequence, dim] for the dot-product loop below.
+      // positions for the same dimension. The shared tile is laid out as
+      // [dimension, sequence] so each invocation stores a linear element.
       int tileD = t / ATTN_BLOCK_KV;
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
