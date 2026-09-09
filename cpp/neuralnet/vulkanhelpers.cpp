@@ -368,6 +368,53 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     writeFeatureSupport("  Maintenance4 Support: " + std::string(deviceInfo.maintenance4Features.maintenance4 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Subgroup Size Control Support: " + std::string(deviceInfo.subgroupSizeControlFeatures.subgroupSizeControl == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Compute Full Subgroups Support: " + std::string(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE ? "Yes" : "No"));
+    if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE) {
+      const auto componentTypeName = [](VkComponentTypeKHR type) {
+        switch(type) {
+        case VK_COMPONENT_TYPE_FLOAT16_KHR: return std::string("FLOAT16");
+        case VK_COMPONENT_TYPE_FLOAT32_KHR: return std::string("FLOAT32");
+        case VK_COMPONENT_TYPE_FLOAT64_KHR: return std::string("FLOAT64");
+        case VK_COMPONENT_TYPE_SINT8_KHR: return std::string("SINT8");
+        case VK_COMPONENT_TYPE_SINT16_KHR: return std::string("SINT16");
+        case VK_COMPONENT_TYPE_SINT32_KHR: return std::string("SINT32");
+        case VK_COMPONENT_TYPE_SINT64_KHR: return std::string("SINT64");
+        case VK_COMPONENT_TYPE_UINT8_KHR: return std::string("UINT8");
+        case VK_COMPONENT_TYPE_UINT16_KHR: return std::string("UINT16");
+        case VK_COMPONENT_TYPE_UINT32_KHR: return std::string("UINT32");
+        case VK_COMPONENT_TYPE_UINT64_KHR: return std::string("UINT64");
+        default: return "UNKNOWN(" + std::to_string(static_cast<int>(type)) + ")";
+        }
+      };
+      uint32_t propertyCount = 0;
+      VkResult propertyResult = deviceInfo.cooperativeMatrixPropertiesFn == nullptr
+        ? VK_ERROR_EXTENSION_NOT_PRESENT
+        : deviceInfo.cooperativeMatrixPropertiesFn(physicalDevice, &propertyCount, nullptr);
+      if(propertyResult == VK_SUCCESS && propertyCount > 0) {
+        std::vector<VkCooperativeMatrixPropertiesKHR> cooperativeProperties(propertyCount);
+        for(VkCooperativeMatrixPropertiesKHR& property: cooperativeProperties) {
+          property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+          property.pNext = nullptr;
+        }
+        propertyResult = deviceInfo.cooperativeMatrixPropertiesFn(
+          physicalDevice, &propertyCount, cooperativeProperties.data()
+        );
+        if(propertyResult == VK_SUCCESS || propertyResult == VK_INCOMPLETE) {
+          for(uint32_t propertyIndex = 0; propertyIndex < propertyCount; propertyIndex++) {
+            const VkCooperativeMatrixPropertiesKHR& property = cooperativeProperties[propertyIndex];
+            writeFeatureSupport(
+              "  Cooperative Matrix Property[" + std::to_string(propertyIndex) + "]: " +
+              "M=" + std::to_string(property.MSize) +
+              " N=" + std::to_string(property.NSize) +
+              " K=" + std::to_string(property.KSize) +
+              " AType=" + componentTypeName(property.AType) +
+              " BType=" + componentTypeName(property.BType) +
+              " CType=" + componentTypeName(property.CType) +
+              " ResultType=" + componentTypeName(property.ResultType)
+            );
+          }
+        }
+      }
+    }
 
 
     // Get memory properties2

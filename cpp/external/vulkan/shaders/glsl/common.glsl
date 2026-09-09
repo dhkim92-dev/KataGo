@@ -155,6 +155,7 @@
     #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
   #endif
   #define realstore float16_t
+  #define realstore2 f16vec2
   #define realstore4 f16vec4
   #if PRECISION == 16
     #define LOAD(__buf,__x) ((__buf)[(__x)])
@@ -165,6 +166,7 @@
   #endif
 #elif PRECISION_STORAGE == 32
   #define realstore float
+  #define realstore2 vec2
   #define realstore4 vec4
   #if PRECISION == 16
     #define LOAD(__buf,__x) float16_t((__buf)[(__x)])

@@ -10,6 +10,7 @@
 
 #include <vector>
 #include <cstddef>
+#include <map>
 #include <string>
 #include "../neuralnet/activations.h"
 #include "../neuralnet/vulkanhelpers.h"
@@ -109,50 +110,58 @@ extern "C" {
   extern const unsigned char* _binary_add_pointwise_p16s16_end;
   extern const size_t _binary_add_pointwise_p16s16_size;
 
-  // xgemm_batched_fp32.glsl
-  extern const unsigned char _binary_xgemm_batched_fp32_start[];
-  extern const unsigned char* _binary_xgemm_batched_fp32_end;
-  extern const size_t _binary_xgemm_batched_fp32_size;
+#define DECLARE_XGEMM_VARIANT(name) \
+  extern const unsigned char _binary_##name##_start[]; \
+  extern const unsigned char* _binary_##name##_end; \
+  extern const size_t _binary_##name##_size;
 
-  // xgemm_batched_p32s16.glsl
-  extern const unsigned char _binary_xgemm_batched_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_batched_p32s16_end;
-  extern const size_t _binary_xgemm_batched_p32s16_size;
+#define DECLARE_XGEMM_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
 
-  // xgemm_batched_p16s16.glsl
-  extern const unsigned char _binary_xgemm_batched_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_batched_p16s16_end;
-  extern const size_t _binary_xgemm_batched_p16s16_size;
+#define DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32)
 
-  // xgemm_direct_batched_tt_fp32_fp32.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_fp32_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_fp32_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_fp32_size;
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
+  DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
 
-  // xgemm_direct_batched_tt_p32s16.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_p32s16_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_p32s16_size;
-
-  // xgemm_direct_batched_tt_p16s16.glsl
-  extern const unsigned char _binary_xgemm_direct_batched_tt_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_direct_batched_tt_p16s16_end;
-  extern const size_t _binary_xgemm_direct_batched_tt_p16s16_size;
-
-  // xgemm_strided_batched_nn_fp32.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_fp32_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_fp32_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_fp32_size;
-
-  // xgemm_strided_batched_nn_p32s16.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_p32s16_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_p32s16_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_p32s16_size;
-
-  // xgemm_strided_batched_nn_p16s16.glsl
-  extern const unsigned char _binary_xgemm_strided_batched_nn_p16s16_start[];
-  extern const unsigned char* _binary_xgemm_strided_batched_nn_p16s16_end;
-  extern const size_t _binary_xgemm_strided_batched_nn_p16s16_size;
+#undef DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS
+#undef DECLARE_XGEMM_WIDTH_VARIANTS
+#undef DECLARE_XGEMM_VARIANT
 
   // bn_mask_identity_fp32.glsl
   extern const unsigned char _binary_bn_mask_identity_fp32_start[];
@@ -505,35 +514,6 @@ namespace vk_shader {
 
   extern const unsigned char* spirv_add_pointwise_p16s16;
   extern size_t spirv_add_pointwise_p16s16_size;
-
-  extern const unsigned char* spirv_xgemm_batched_fp32;
-  extern size_t spirv_xgemm_batched_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_batched_p32s16;
-  extern size_t spirv_xgemm_batched_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_batched_p16s16;
-  extern size_t spirv_xgemm_batched_p16s16_size;
-
-  // xgemm_direct_batched_tt_fp32_fp32 - batched xgemm direct fp32
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_fp32;
-  extern size_t spirv_xgemm_direct_batched_tt_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_p32s16;
-  extern size_t spirv_xgemm_direct_batched_tt_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_direct_batched_tt_p16s16;
-  extern size_t spirv_xgemm_direct_batched_tt_p16s16_size;
-
-  // strided batched matmul fp32 - for 1x1 conv
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_fp32;;
-  extern size_t spirv_xgemm_strided_batched_nn_fp32_size;
-
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_p32s16;
-  extern size_t spirv_xgemm_strided_batched_nn_p32s16_size;
-
-  extern const unsigned char* spirv_xgemm_strided_batched_nn_p16s16;
-  extern size_t spirv_xgemm_strided_batched_nn_p16s16_size;
 
   // Future support, NCHW matmul Fp32
   // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;
@@ -1285,6 +1265,8 @@ struct LocalDimHash {
       uint32_t KWG=32;
       uint32_t MDIMA=8;
       uint32_t NDIMB=8;
+      uint32_t VWM=4;
+      uint32_t VWN=4;
 
       bool isValid() const;
       bool isSimple() const;
@@ -1299,6 +1281,8 @@ struct LocalDimHash {
       uint32_t KWID = 2;
       uint32_t PADA = 1;
       uint32_t PADB = 1;
+      uint32_t VWMD = 4;
+      uint32_t VWND = 4;
 
       bool isValid() const;
     };
@@ -1388,15 +1372,9 @@ struct LocalDimHash {
       bool shouldUseSubgroup = false;
     };
 
-    enum class PrecisionProfile {
-      P32S32,
-      P32S16,
-      P16S16,
-    };
-
-    // All specialization parameters for one arithmetic/storage precision pair.
-    // xgemm16 remains here because the existing batched-GEMM dispatch selects it
-    // for P16/S16; P32 profiles retain a valid fallback value for serialization.
+    // All non-GEMM specialization parameters are stored once for the final
+    // selected precision. xgemm and xgemm16 remain independent because the
+    // batched-GEMM pipeline selects between them at runtime.
     struct VulkanTuningProfile {
       AddChannelBiasesNCHWTuneParams addChannelBiases;
       AddPointWiseTuneParams pointwise;
@@ -1467,24 +1445,11 @@ struct LocalDimHash {
       }
     };
 
-    // The base profile is the active runtime/tuning workspace. All persisted
-    // values live in the explicitly named precision profiles below.
     struct VulkanTuneParams : VulkanTuningProfile {
       VulkanParams vulkan;
-      VulkanTuningProfile p32s32;
-      VulkanTuningProfile p32s16;
-      VulkanTuningProfile p16s16;
-
-      VulkanTuneParams();
+      VulkanTuneParams() = default;
       VulkanTuneParams(const VulkanTuneParams& other) = default;
       VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
-
-      VulkanTuningProfile& profile(PrecisionProfile precision);
-      const VulkanTuningProfile& profile(PrecisionProfile precision) const;
-      PrecisionProfile configuredProfile() const;
-      void activateProfile(PrecisionProfile precision);
-      void activateConfiguredProfile();
-      void commitActiveProfile(PrecisionProfile precision);
 
       bool isValid() const;
       bool operator==(const VulkanTuneParams& other) const;
@@ -1502,6 +1467,89 @@ struct LocalDimHash {
     Logger* logger;
     bool printPipelineCreation = false;
 
+    // Shader modules are shared by all specialization variants of a SPIR-V binary.
+    VkShaderModule shaderModule_add_channel_bias_nc_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa0_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_f16s16_sa1_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nchw_p16s16_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p32s16 = VK_NULL_HANDLE;
+    // Width-specific source variants; direct-batched-TT contains p32s32 only.
+    VkShaderModule shaderModule_xgemm_batched_variants[27] = {};
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[9] = {};
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_variants[27] = {};
+    std::vector<VkShaderModule*> shaderModuleFields;
     // In this code, assume that NCHW is default format if no postfix is given.
 
     // Conv2D pipelines
@@ -1619,8 +1667,7 @@ struct LocalDimHash {
     void destroyPipeline(Pipeline& pipeline);
     VkResult createPipeline(
       std::string pipelineName,
-      const unsigned char* spirvBytes,
-      size_t spirvSize,
+      VkShaderModule shaderModule,
       size_t bindingSize,
       uint32_t pushConstantSize,
       Pipeline &outPipeline,
@@ -1631,6 +1678,8 @@ struct LocalDimHash {
     );
 
   private :
+    VkResult createShaderModules();
+    void destroyShaderModules();
     void destroyPipelines();
   };
 }

@@ -10,15 +10,15 @@ layout(constant_id = 10) const int _PADB = 1;
 #include "common.glsl"
 
 layout(set = 0, binding = 0) readonly buffer Agm {
-    realstore4 agm[];
+    realstore agm[];
 };
 
 layout(set = 0, binding = 1) readonly buffer Bgm {
-    realstore4 bgm[];
+    realstore bgm[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer Cgm {
-    realstore4 cgm[];
+    realstore cgm[];
 };
 
 shared real alm[_WGD * (_WGD + _PADA)];
