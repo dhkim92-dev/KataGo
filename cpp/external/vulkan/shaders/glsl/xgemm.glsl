@@ -247,9 +247,6 @@ void XgemmBody(
     barrier();
   }
 
-  memoryBarrierBuffer();
-  barrier();
-
   // Stores an MWG * NWG tile of results
   const int cld = kSizeM;
   #pragma unroll

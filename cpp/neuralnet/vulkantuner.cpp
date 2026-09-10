@@ -3841,7 +3841,7 @@ namespace {
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.MWG = v; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm.NWG = v; });
       addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.KWG = v; });
-      addCandidates(configs, full ? vector<int>{1,2,8} : vector<int>{2}, [](VulkanTuneParams& p, int v) { p.xgemm.KWI = v; });
+      addCandidates(configs, full ? vector<int>{1,2,8} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { p.xgemm.KWI = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.NDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm.MDIMA = v; });
@@ -3869,15 +3869,9 @@ namespace {
       slightlyTunedConfig2.xgemm.MWG = 16;
       slightlyTunedConfig2.xgemm.NWG = 16;
       slightlyTunedConfig2.xgemm.KWG = 16;
-      VulkanTuneParams nonReferenceCurrent = current;
-      if(!full) {
-        nonReferenceCurrent.xgemm.KWI = 2;
-        slightlyTunedConfig.xgemm.KWI = 2;
-        slightlyTunedConfig2.xgemm.KWI = 2;
-      }
       configs.insert(configs.begin(), slightlyTunedConfig2);
       configs.insert(configs.begin(), slightlyTunedConfig);
-      configs.insert(configs.begin(), nonReferenceCurrent);
+      configs.insert(configs.begin(), current);
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -3922,7 +3916,7 @@ namespace {
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.MWG = v; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.xgemm16.NWG = v; });
       addCandidates(configs, full ? vector<int>{8,16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.KWG = v; });
-      addCandidates(configs, full ? vector<int>{1,2,8} : vector<int>{2}, [](VulkanTuneParams& p, int v) { p.xgemm16.KWI = v; });
+      addCandidates(configs, full ? vector<int>{1,2,8} : vector<int>{1,2}, [](VulkanTuneParams& p, int v) { p.xgemm16.KWI = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.MDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.NDIMC = v; });
       addCandidates(configs, vector<int>{8,16,32}, [](VulkanTuneParams& p, int v) { p.xgemm16.MDIMA = v; });
@@ -3950,15 +3944,9 @@ namespace {
       slightlyTunedConfig2.xgemm16.MWG = 16;
       slightlyTunedConfig2.xgemm16.NWG = 16;
       slightlyTunedConfig2.xgemm16.KWG = 16;
-      VulkanTuneParams nonReferenceCurrent = current;
-      if(!full) {
-        nonReferenceCurrent.xgemm16.KWI = 2;
-        slightlyTunedConfig.xgemm16.KWI = 2;
-        slightlyTunedConfig2.xgemm16.KWI = 2;
-      }
       configs.insert(configs.begin(), slightlyTunedConfig2);
       configs.insert(configs.begin(), slightlyTunedConfig);
-      configs.insert(configs.begin(), nonReferenceCurrent);
+      configs.insert(configs.begin(), current);
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
