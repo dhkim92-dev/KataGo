@@ -1299,10 +1299,13 @@ namespace {
       VkResult result = VK_SUCCESS;
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const bool useNCHWCooperativeMatrix =
+        config.vulkan.canUseCooperativeMatrix &&
+        config.vulkan.shouldUseCooperativeMatrix &&
+        config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+        config.hgemmCooperativeMatrixNCHW.isValid();
       const bool usePaddedNCHWXY =
-        plan.kernelName == "hgemmCooperativeMatrixNCHW" ||
-        (plan.kernelName == "xgemmDirect" &&
-         config.vulkan.canUseCooperativeMatrix && config.hgemmCooperativeMatrixNCHW.isValid());
+        plan.kernelName == "hgemmCooperativeMatrixNCHW" || useNCHWCooperativeMatrix;
       const bool usePaddedGpoolXY =
         plan.kernelName == "gPool" &&
         config.vulkan.canUseFP16Storage &&
