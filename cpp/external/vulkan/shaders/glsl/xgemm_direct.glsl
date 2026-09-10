@@ -6,12 +6,6 @@
 */
 #include "common.glsl"
 
-#if PRECISION == 16
-  #define real2d f16vec2
-#else
-  #define real2d vec2
-#endif
-
 #ifndef WGD 
 #define WGD _WGD 
 #endif 
@@ -52,6 +46,8 @@
 #define PADB _PADB
 #endif
 
+#include "xgemm_direct_types.glsl"
+
 
 // Helper parameters based on the above tuning parameters
 #define MWID (WGD/MDIMCD)                // Work per work-item (M-dimension)
@@ -63,80 +59,13 @@
 #define KWBD (WGD/KDIMBD)                // Amount of loads-per-thread for matrix B (K-dimension)
 #define NWBD (WGD/NDIMBD)                // Amount of loads-per-thread for matrix B (N-dimension)
 
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-    #define LOADGLOBAL(__buf,__x) real((__buf)[(__x)])
-    #define LOADLOCAL(__buf,__x) real((__buf)[(__x)])
-    #define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
-    #define STORELOCAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
-    #define SetToZeroStore(a) (a) = realstore(ZERO)
-#else
-    #define LOADGLOBAL(__buf,__x) ((__buf)[(__x)])
-    #define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
-    #define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
-    #define STORELOCAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
-    #define SetToZeroStore(a) SetToZero(a)
-#endif
-
+#define LOADLOCAL(__buf,__x) ((__buf)[(__x)])
+#define STORELOCAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
 #define SetToZero(a) a = ZERO
 
-// Load a single element from the scalar backing buffer. This is used for
-// loading individual elements on scalar and edge paths.
-#if PRECISION_STORAGE == 16 && PRECISION == 32
-    #define LOADSINGLEGLOBAL(__buf,__x) real((__buf)[(__x)])
-    #define LOADSINGLELOCAL(__buf,__x) real((__buf)[(__x)])
-    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
-#else
-    #define LOADSINGLEGLOBAL(__buf,__x) ((__buf)[(__x)])
-    #define LOADSINGLELOCAL(__buf,__x) ((__buf)[(__x)])
-    #define STORESINGLEGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = (__val))
-#endif
-
-#if VWMD == 1
-  #define realMD real
-  #define realstoreMD realstore
-#elif VWMD == 2
-  #define realMD real2d
-  #define realstoreMD realstore2
-#elif VWMD == 4
-  #define realMD real4
-  #define realstoreMD realstore4
-#else
-  #error "VWMD must be 1, 2, or 4"
-#endif
-
-#if VWND == 1
-  #define realND real
-  #define realstoreND realstore
-#elif VWND == 2
-  #define realND real2d
-  #define realstoreND realstore2
-#elif VWND == 4
-  #define realND real4
-  #define realstoreND realstore4
-#else
-  #error "VWND must be 1, 2, or 4"
-#endif
-
-#if VWMD == 1
-  #define LOADGLOBALM(__buf,__x) real((__buf)[(__x)])
-#elif VWMD == 2
-  #define LOADGLOBALM(__buf,__x) realMD(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
-#elif VWMD == 4
-  #define LOADGLOBALM(__buf,__x) realMD(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
-#endif
-
-#if VWND == 1
-  #define LOADGLOBALN(__buf,__x) real((__buf)[(__x)])
-#elif VWND == 2
-  #define LOADGLOBALN(__buf,__x) realND(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
-#elif VWND == 4
-  #define LOADGLOBALN(__buf,__x) realND(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
-#endif
-
-#define LOADLOCALM(__buf,__x) ((__buf)[(__x)])
-#define STOREGLOBALM(__buf,__x,__val) ((__buf)[(__x)] = (__val))
-#define LOADLOCALN(__buf,__x) ((__buf)[(__x)])
-#define STOREGLOBALN(__buf,__x,__val) ((__buf)[(__x)] = (__val))
+#define LOADGLOBAL(__buf,__x) real((__buf)[(__x)])
+#define STOREGLOBAL(__buf,__x,__val) ((__buf)[(__x)] = realstore(__val))
+#define STORESINGLEGLOBAL(__buf,__x,__val) STOREGLOBAL(__buf,__x,__val)
 
 #define Multiply(c, a, b) (c) = (a) * (b)
 #define MultiplyAdd(c, a, b) (c) += (a) * (b)
@@ -147,11 +76,8 @@ real GlobalToPrivateDirectA(
     const int a_transpose,
     const int a_conjugate
 ) {
-  // in opencl, agms means global memory for matrix A(not vectorized buffer)
-  // Vulkan uses a scalar backing array; vector loads are expanded below.
   const int a_index = (a_transpose == 1) ? (idm + _mi)*a_ld + idk : idk*a_ld + (idm + _mi);
-  // real result = LOADGLOBAL(agms,a_index + a_offset);
-  real result = LOADSINGLEGLOBAL(agm,a_index + a_offset);
+  real result = LOADSINGLEM(agm,a_index + a_offset);
   return result;
 }
 
@@ -163,7 +89,7 @@ real GlobalToPrivateDirectB(
   const int b_conjugate
 ) {
   const int b_index = (b_transpose == 1) ? (idn + _ni)*b_ld + idk : idk*b_ld + (idn + _ni);
-  real result = LOADSINGLEGLOBAL(bgm,b_index + b_offset);
+  real result = LOADSINGLEN(bgm,b_index + b_offset);
   return result;
 }
 
@@ -179,7 +105,7 @@ real GlobalToPrivateCheckedA(
   real result;
   if (idm + _mi < kSizeM) {
     const int a_index = (a_transpose == 1) ? (idm + _mi)*a_ld + idk : idk*a_ld + (idm + _mi);
-    result = LOADSINGLEGLOBAL(agm,a_index + a_offset);
+    result = LOADSINGLEM(agm,a_index + a_offset);
   }
   else {
     SetToZero(result);
@@ -197,7 +123,7 @@ real GlobalToPrivateCheckedB(
   real result;
   if (idn + _ni < kSizeN) {
     const int b_index = (b_transpose == 1) ? (idn + _ni)*b_ld + idk : idk*b_ld + (idn + _ni);
-    result = LOADSINGLEGLOBAL(bgm,b_index + b_offset);
+    result = LOADSINGLEN(bgm,b_index + b_offset);
   }
   else {
     SetToZero(result);
@@ -297,7 +223,7 @@ void GlobalToLocalDirectA(const int a_ld, const int a_offset, const int kwg,
       int idk = (a_transpose==1) ? kg + GroupId0()*WGD : kg + kwg;
 
       // Loads the data from global memory into the local memory
-      const realMD avec = LOADGLOBALM(agm,idk*a_ld + idm*VWMD + a_offset);
+      const realMD avec = LOADM(agm,idk*(a_ld/VWMD) + idm + (a_offset/VWMD));
 #if VWMD == 1
       STORELOCAL(alm, kg*(WGD + PADA) + mg, avec);
 #elif VWMD == 2
@@ -341,7 +267,7 @@ void GlobalToLocalDirectB(
       int idk = (b_transpose==1) ? kg + GroupId1()*WGD : kg + kwg;
 
       // Loads the data from global memory into the local memory
-      const realND bvec = LOADGLOBALN(bgm,idk*b_ld + idn*VWND + b_offset);
+      const realND bvec = LOADN(bgm,idk*(b_ld/VWND) + idn + (b_offset/VWND));
 #if VWND == 1
       STORELOCAL(blm, kg*(WGD + PADB) + ng, bvec);
 #elif VWND == 2
@@ -388,7 +314,7 @@ void GlobalToLocalScalarA(
 
       // Loads the data from global memory into the local memory
       // real result = LOADGLOBAL(agms,idk*a_ld + idm + a_offset);
-      real result = LOADSINGLEGLOBAL(agm,idk*a_ld + idm + a_offset);
+      real result = LOADSINGLEM(agm,idk*a_ld + idm + a_offset);
       STORELOCAL(alm, kg*(WGD + PADA) + mg, result);
     }
   }
@@ -421,7 +347,7 @@ void GlobalToLocalScalarB(
 
       // Loads the data from global memory into the local memory
       // real result = LOADGLOBAL(bgms,idk*b_ld + idn + b_offset);
-      real result = LOADSINGLEGLOBAL(bgm,idk*b_ld + idn + b_offset);
+      real result = LOADSINGLEN(bgm,idk*b_ld + idn + b_offset);
       STORELOCAL(blm, kg*(WGD + PADB) + ng, result);
     }
   }
@@ -464,11 +390,11 @@ void GlobalToLocalCheckedA(
       if (condition) {
         // real result = LOADGLOBAL(agms,idk*a_ld + idm + a_offset);
         // if (a_conjugate) { COMPLEX_CONJUGATE(result); }
-        real result = LOADSINGLEGLOBAL(agm,idk*a_ld + idm + a_offset);
+        real result = LOADSINGLEM(agm,idk*a_ld + idm + a_offset);
         STORELOCAL(alm, kg*(WGD + PADA) + mg, result);
       }
       else {
-        SetToZeroStore(alm[kg*(WGD + PADA) + mg]);
+        SetToZero(alm[kg*(WGD + PADA) + mg]);
       }
     }
   }
@@ -505,11 +431,11 @@ void GlobalToLocalCheckedB(
                                       (idn < kSizeN) && (idk < kSizeK);
       if (condition) {
         // real result = LOADGLOBAL(bgms,idk*b_ld + idn + b_offset);
-        real result = LOADSINGLEGLOBAL(bgm,idk*b_ld + idn + b_offset);
+        real result = LOADSINGLEN(bgm,idk*b_ld + idn + b_offset);
         STORELOCAL(blm, kg*(WGD + PADB) + ng, result);
       }
       else {
-        SetToZeroStore(blm[kg*(WGD + PADB) + ng]);
+        SetToZero(blm[kg*(WGD + PADB) + ng]);
       }
     }
   }
@@ -538,7 +464,7 @@ void XgemmDirect(
   real cpd[NWID * MWID];
 
   // Initializes the accumulation registers
-  #pragma unroll
+  // #pragma unroll
   for (int _mi = 0; _mi < MWID; _mi += 1) {
     #pragma unroll
     for (int _ni = 0; _ni < NWID; _ni += 1) {

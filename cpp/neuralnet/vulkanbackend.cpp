@@ -283,20 +283,20 @@ struct ComputeContext {
         std::vector<const char*> requiredExtensions = {
         };
 
-        const bool supportsFP16Storage =
-          deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
-          deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
-        const bool supportsFP16Compute = isDeviceSupportFp16(deviceInfo);
+        const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
+        const bool supportsFP16Storage = hardwareParams.canUseFP16Storage;
+        const bool supportsFP16Compute = hardwareParams.canUseFP16Compute;
 
         if ( usingFP16Mode == enabled_t::True && (!supportsFP16Storage || !supportsFP16Compute) ) {
           throw StringError("Requested FP16 mode but device " + deviceInfo.deviceName + " does not support FP16 storage and compute");
         }
 
-        if ( usingFP16Mode != enabled_t::False && supportsFP16Compute ) {
+        // The tuner probes hardware FP16 capability independently of whether
+        // this run will use FP16. Actual use is controlled by shouldUseFP16*.
+        if ( supportsFP16Compute ) {
           requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
         }
         if (
-          usingFP16Mode != enabled_t::False &&
           supportsFP16Storage &&
           VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
           VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
@@ -405,11 +405,6 @@ struct ComputeContext {
   ComputeContext() = delete;
   ComputeContext(const ComputeContext&) = delete;
   ComputeContext& operator=(const ComputeContext&) = delete;
-
-  bool isDeviceSupportFp16(const VulkanDeviceInfo& deviceInfo) {
-    //Check for fp16 feature
-    return deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-  }
 
   bool isDeviceSupportNHWC(const VulkanDeviceInfo& deviceInfo) {
     // return deviceInfo.properties.apiVersion >= VK_API_VERSION_1_1 &&
@@ -5687,7 +5682,8 @@ static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* 
     auto tuneParamsEntry = context->tuneParamsPerDev.find(gpuIdx);
     if(pipelineEntry == context->pipelinesPerDev.end() || tuneParamsEntry == context->tuneParamsPerDev.end())
       continue;
-    VulkanTuneParams fp32Params = tuneParamsEntry->second;
+    const VulkanTuneParams tunedParams = tuneParamsEntry->second;
+    VulkanTuneParams fp32Params = tunedParams;
     if(!fp32Params.vulkan.canUseFP16Storage || !fp32Params.vulkan.canUseFP16Compute)
       continue;
     fp32Params.vulkan.shouldUseCooperativeMatrix = false;
@@ -5700,7 +5696,7 @@ static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* 
     try {
       const ModelPrecisionMeasurement fp32Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
 
-      VulkanTuneParams fp16Params = fp32Params;
+      VulkanTuneParams fp16Params = tunedParams;
       fp16Params.vulkan.shouldUseFP16Storage = true;
       fp16Params.vulkan.shouldUseFP16Compute = true;
       const VulkanDevice* device = context->vulkanContext->findGpuExn(gpuIdx);

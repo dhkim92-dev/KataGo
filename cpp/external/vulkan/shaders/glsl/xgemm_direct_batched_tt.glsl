@@ -10,21 +10,22 @@ layout(constant_id = 10) const int _PADB = 1;
 
 
 #include "common.glsl"
+#include "xgemm_direct_types.glsl"
 
 layout(set = 0, binding = 0) readonly buffer Agm {
-    realstore agm[];
+    realstoreMD agm[];
 };
 
 layout(set = 0, binding = 1) readonly buffer Bgm {
-    realstore bgm[];
+    realstoreND bgm[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer Cgm {
     realstore cgm[];
 };
 
-shared realstore alm[_WGD * (_WGD + _PADA)];
-shared realstore blm[_WGD * (_WGD + _PADB)];
+shared real alm[_WGD * (_WGD + _PADA)];
+shared real blm[_WGD * (_WGD + _PADB)];
 
 layout(push_constant) uniform PushConsts {
   int kSizeM;

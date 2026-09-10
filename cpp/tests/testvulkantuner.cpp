@@ -14,6 +14,31 @@
 using namespace std;
 
 namespace {
+  VKAPI_ATTR VkResult VKAPI_CALL fakeCooperativeMatrixProperties(
+    VkPhysicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    if(properties == nullptr) {
+      *propertyCount = 1;
+      return VK_SUCCESS;
+    }
+    if(*propertyCount == 0)
+      return VK_INCOMPLETE;
+    properties[0] = {};
+    properties[0].sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    properties[0].MSize = 16;
+    properties[0].NSize = 16;
+    properties[0].KSize = 16;
+    properties[0].AType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].CType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].ResultType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].scope = VK_SCOPE_SUBGROUP_KHR;
+    *propertyCount = 1;
+    return VK_SUCCESS;
+  }
+
   bool loadThrows(const string& filename) {
     try {
       (void)VulkanTuneParams::load(filename);
@@ -108,8 +133,16 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.storage16BitFeatures.storageBuffer16BitAccess = VK_TRUE;
   deviceInfo.shaderFloat16Int8Features.shaderFloat16 = VK_TRUE;
   deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
+  deviceInfo.cooperativeMatrixPropertiesFn = fakeCooperativeMatrixProperties;
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
+  testAssert(hardwareParams.canUseFP16Storage);
+  testAssert(hardwareParams.canUseFP16Compute);
+  testAssert(hardwareParams.canUseCooperativeMatrix);
+  testAssert(hardwareParams.canUseSubgroup);
+  testAssert(!hardwareParams.shouldUseFP16Storage);
+  testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
   defaults.vulkan.canUseFP16Compute = true;
   defaults.vulkan.canUseCooperativeMatrix = true;
@@ -126,8 +159,14 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaults.xgemmDirect.VWND == 4);
   testAssert(defaults.xgemm.VWM == 4);
   testAssert(defaults.xgemm.VWN == 4);
+  testAssert(defaults.xgemm.KWI == 1);
   testAssert(defaults.xgemm16.VWM == 4);
   testAssert(defaults.xgemm16.VWN == 4);
+  testAssert(defaults.xgemm16.KWI == 1);
+  testAssert(defaults.hgemmCooperativeMatrix.VWM == 4);
+  testAssert(defaults.hgemmCooperativeMatrix.VWN == 4);
+  testAssert(defaults.hgemmCooperativeMatrixNCHW.VWM == 4);
+  testAssert(defaults.hgemmCooperativeMatrixNCHW.VWN == 4);
   testAssert(defaults.spatialRMSNorm.TILE_SIZE == 32);
   testAssert(defaults.spatialRMSNorm.APPLY_ELTS_PER_THREAD == 1);
   testAssert(defaults.rmsNorm.WG_C_SIZE == 64);
@@ -150,7 +189,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
   testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
-  testAssert(defaultLines.size() == 97);
+  testAssert(defaultLines.size() == 101);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -173,6 +212,20 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("pointwise.ELTS_PER_THREAD=") < lineIndex("addChannelBiases.XY_ELTS_PER_THREAD="));
   testAssert(lineIndex("addChannelBiases.XY_ELTS_PER_THREAD=") < lineIndex("spatialRMSNorm.TILE_SIZE="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
+  const string staleDefaultsFilename = "tests/scratch/vulkantuner-stale-defaults.txt";
+  VulkanTuneParams staleDefaults = defaults;
+  staleDefaults.vulkan.canUseFP16Storage = false;
+  staleDefaults.vulkan.canUseFP16Compute = false;
+  staleDefaults.vulkan.canUseCooperativeMatrix = false;
+  staleDefaults.vulkan.canUseSubgroup = false;
+  VulkanTuneParams::save(staleDefaultsFilename, staleDefaults);
+  const VulkanTuneParams recreatedDefaults = VulkanTuner::loadOrCreate(
+    staleDefaultsFilename, "", "", 19, 19, modelInfo, deviceInfo, nullptr
+  );
+  testAssert(recreatedDefaults.vulkan.canUseFP16Storage);
+  testAssert(recreatedDefaults.vulkan.canUseFP16Compute);
+  testAssert(recreatedDefaults.vulkan.canUseCooperativeMatrix);
+  testAssert(recreatedDefaults.vulkan.canUseSubgroup);
 
   VulkanTuneParams params;
   params.conv3x3.inTileXSize = 4;
@@ -206,10 +259,18 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.rmsNorm.C_PER_THREAD = 2;
   params.spatialRMSNorm.TILE_SIZE = 64;
   params.spatialRMSNorm.APPLY_ELTS_PER_THREAD = 4;
+  params.hgemmCooperativeMatrixNCHW.NWG = 32;
+  params.hgemmCooperativeMatrixNCHW.KWG = 32;
+  params.hgemmCooperativeMatrix.VWM = 2;
+  params.hgemmCooperativeMatrix.VWN = 1;
+  params.hgemmCooperativeMatrixNCHW.VWM = 1;
+  params.hgemmCooperativeMatrixNCHW.VWN = 2;
   params.vulkan.canUseFP16Storage = true;
   params.vulkan.canUseFP16Compute = true;
+  params.vulkan.canUseCooperativeMatrix = true;
   params.vulkan.shouldUseFP16Storage = true;
   params.vulkan.shouldUseFP16Compute = true;
+  params.vulkan.shouldUseCooperativeMatrix = true;
   params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
@@ -241,6 +302,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemm.VWM = 3;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.hgemmCooperativeMatrix.VWM = 8;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.VWND = 3;

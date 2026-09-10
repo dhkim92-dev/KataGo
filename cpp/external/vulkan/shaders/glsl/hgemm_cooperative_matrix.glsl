@@ -6,9 +6,33 @@
 
 // Vulkan cooperative-matrix port of the OpenCL WMMA kernel. Matrices use the same layout as
 // the OpenCL kernel: A[k*M+m] and C[n*M+m] are column-major, while B[k*N+n] is
-// row-major.  The four-lane vectorization is fixed by the port.
+// row-major.
+#ifndef VWM
 #define VWM 4
+#endif
+#ifndef VWN
 #define VWN 4
+#endif
+
+#if VWM == 1
+#define realstoreM float16_t
+#elif VWM == 2
+#define realstoreM f16vec2
+#elif VWM == 4
+#define realstoreM f16vec4
+#else
+#error "VWM must be 1, 2, or 4"
+#endif
+
+#if VWN == 1
+#define realstoreN float16_t
+#elif VWN == 2
+#define realstoreN f16vec2
+#elif VWN == 4
+#define realstoreN f16vec4
+#else
+#error "VWN must be 1, 2, or 4"
+#endif
 
 #ifndef SA
 #define SA 0
@@ -34,15 +58,15 @@ layout(constant_id = 10) const int NWAVE = 32;
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 layout(set = 0, binding = 0) readonly buffer MatA {
-  f16vec4 agm[];
+  realstoreM agm[];
 };
 
 layout(set = 0, binding = 1) readonly buffer MatB {
-  f16vec4 bgm[];
+  realstoreN bgm[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer MatC {
-  f16vec4 cgm[];
+  realstoreM cgm[];
 };
 
 layout(push_constant) uniform HGemmCooperativeMatrixParams {
@@ -52,10 +76,10 @@ layout(push_constant) uniform HGemmCooperativeMatrixParams {
 };
 
 #if SA == 1
-shared f16vec4 alm[(MWG * KWG) / VWM];
+shared realstoreM alm[(MWG * KWG) / VWM];
 #endif
 #if SB == 1
-shared f16vec4 blm[(NWG * KWG) / VWN];
+shared realstoreN blm[(NWG * KWG) / VWN];
 #endif
 
 void loadSharedTiles(int kwg, int baseA, int baseB) {

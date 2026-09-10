@@ -100,14 +100,11 @@ int MainCmds::tuner(const vector<string>& args) {
       }
 
       vector<const char*> requiredExtensions;
-      const bool canUseFP16Storage =
-        deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
-        deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
-      const bool canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-      const bool canUseCooperativeMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
-      const bool canUseSubgroup =
-        (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
-        deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+      const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
+      const bool canUseFP16Storage = hardwareParams.canUseFP16Storage;
+      const bool canUseFP16Compute = hardwareParams.canUseFP16Compute;
+      const bool canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
+      const bool canUseSubgroup = hardwareParams.canUseSubgroup;
 
       if(canUseFP16Compute)
         requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);

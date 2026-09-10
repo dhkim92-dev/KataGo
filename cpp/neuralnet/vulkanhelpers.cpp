@@ -830,8 +830,8 @@ void vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
   submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submitInfo.commandBufferCount = 1;
   submitInfo.pCommandBuffers = &commandBuffer;
-  vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE);
-  vkQueueWaitIdle(device->queue);
+  CHECK_VK_MSG("vk_helper::submitSingleTimeCommandBufferAndWaitIdle",vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE));
+  CHECK_VK_MSG("vk_helper::waitIdle",vkQueueWaitIdle(device->queue));
   vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
 }
 
