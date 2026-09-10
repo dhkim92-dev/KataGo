@@ -1505,6 +1505,8 @@ namespace {
               const bool winogradOutputTransform =
                 (plan.kernelName == "conv3x3OutputTransform" || plan.kernelName == "conv5x5OutputTransform") &&
                 name.find("winograd_output_transform") == 0;
+              const bool globalPoolingInput =
+                plan.kernelName == "gPool" && name.find("global_pooling_channels") == 0 && binding == 0;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1521,6 +1523,14 @@ namespace {
                       data[(tileElement * paddedChannels + channel) * paddedTiles + tile] =
                         static_cast<float>(rand.nextDouble());
               }
+              else if(globalPoolingInput) {
+                const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+                for(size_t n = 0; n < batchSize; n++)
+                  for(int c = 0; c < gpoolChannels; c++)
+                    for(size_t xy = 0; xy < logicalXYSize; xy++)
+                      data[(n * gpoolChannels + c) * xySize + xy] =
+                        static_cast<float>(rand.nextDouble());
+              }
               else if(!winogradInputTransform && !winogradOutputTransform) {
                 for(float& value: data)
                   value = static_cast<float>(rand.nextDouble());
@@ -1534,16 +1544,6 @@ namespace {
                   (name.find("global_pooling_channels") == 0 && binding == 3) ||
                   (name.find("value_head_pool_channels") == 0 && binding == 2) ||
                   (name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 5);
-                if(name.find("global_pooling_channels") == 0 && binding == 0 && xySize > logicalXYSize) {
-                  const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-                  for(size_t n = 0; n < batchSize; n++)
-                    for(int c = 0; c < gpoolChannels; c++)
-                      std::fill(
-                        data.begin() + (n * gpoolChannels + c) * xySize + logicalXYSize,
-                        data.begin() + (n * gpoolChannels + c + 1) * xySize,
-                        0.0f
-                      );
-                }
                 if(mask) {
                   std::fill(data.begin(), data.end(), 0.0f);
                   const int maskBatchSize = std::max(1, context.batchSize);
@@ -1551,8 +1551,10 @@ namespace {
                     std::fill(data.begin() + static_cast<size_t>(n) * xySize,
                               data.begin() + static_cast<size_t>(n) * xySize + logicalXYSize, 1.0f);
                 }
-                else if(maskSum)
-                  std::fill(data.begin(), data.end(), static_cast<float>(logicalXYSize));
+                else if(maskSum) {
+                  std::fill(data.begin(), data.end(), 0.0f);
+                  std::fill(data.begin(), data.begin() + batchSize, static_cast<float>(logicalXYSize));
+                }
                 else if(name.find("transformer_rms_norm") == 0 && binding == 3)
                   std::fill(data.begin(), data.end(), 0.0f);
               }
