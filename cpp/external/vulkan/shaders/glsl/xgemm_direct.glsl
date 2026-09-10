@@ -538,7 +538,7 @@ void XgemmDirect(
   real cpd[NWID * MWID];
 
   // Initializes the accumulation registers
-  #pragma unroll
+  // #pragma unroll
   for (int _mi = 0; _mi < MWID; _mi += 1) {
     #pragma unroll
     for (int _ni = 0; _ni < NWID; _ni += 1) {

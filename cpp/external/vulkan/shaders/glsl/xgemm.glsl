@@ -35,96 +35,52 @@
 #define KWB (KWG/KDIMB)               // Amount of loads-per-thread for matrix B (K-dimension)
 #define NWB (NWG/NDIMB)               // Amount of loads-per-thread for matrix B (N-dimension)
 
-#if PRECISION == 16
-  #define real2 f16vec2
-#else
-  #define real2 vec2
+#ifndef realM
+  #if PRECISION == 16
+    #define real2 f16vec2
+  #else
+    #define real2 vec2
+  #endif
+
+  #if VWM == 1
+    #define realM real
+    #define realstoreM realstore
+  #elif VWM == 2
+    #define realM real2
+    #define realstoreM realstore2
+  #elif VWM == 4
+    #define realM real4
+    #define realstoreM realstore4
+  #else
+    #error "VWM must be 1, 2, or 4"
+  #endif
+
+  #if VWN == 1
+    #define realN real
+    #define realstoreN realstore
+  #elif VWN == 2
+    #define realN real2
+    #define realstoreN realstore2
+  #elif VWN == 4
+    #define realN real4
+    #define realstoreN realstore4
+  #else
+    #error "VWN must be 1, 2, or 4"
+  #endif
 #endif
 
-#if VWM == 1
-  #define realM real
-  #define realstoreM realstore
-#elif VWM == 2
-  #define realM real2
-  #define realstoreM realstore2
-#elif VWM == 4
-  #define realM real4
-  #define realstoreM realstore4
-#else
-  #error "VWM must be 1, 2, or 4"
-#endif
+// The buffers passed to XgemmBody are vector arrays. Their indices are therefore
+// vector-element indices, matching OpenCL's realstoreM/realstoreN pointer types.
+#define LOADGLOBALM(__buf, __x) realM((__buf)[(__x)])
+#define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = realstoreM(__y))
+#define LOADLOCALM(__buf, __x) realM((__buf)[(__x)])
+#define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = realstoreM(__y))
+#define LOADGLOBALN(__buf, __x) realN((__buf)[(__x)])
+#define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = realstoreN(__y))
+#define LOADLOCALN(__buf, __x) realN((__buf)[(__x)])
+#define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = realstoreN(__y))
 
-#if VWN == 1
-  #define realN real
-  #define realstoreN realstore
-#elif VWN == 2
-  #define realN real2
-  #define realstoreN realstore2
-#elif VWN == 4
-  #define realN real4
-  #define realstoreN realstore4
-#else
-  #error "VWN must be 1, 2, or 4"
-#endif
-
-#define LOAD4(__buf, __x) real4((__buf)[(__x)], (__buf)[(__x)+1], \
-                                (__buf)[(__x)+2], (__buf)[(__x)+3])
-
-#if VWM == 1
-  #define LOADGLOBALM(__buf, __x) real((__buf)[(__x)])
-  #define STOREGLOBALM(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
-  #define LOADLOCALM(__buf, __x) real((__buf)[(__x)])
-  #define STORELOCALM(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
-#elif VWM == 2
-  #define LOADGLOBALM(__buf, __x) realM(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
-  #define STOREGLOBALM(__buf, __x, __y) do { \
-    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
-  } while (false)
-  #define LOADLOCALM(__buf, __x) realM(real((__buf)[(__x)*2]), real((__buf)[(__x)*2+1]))
-  #define STORELOCALM(__buf, __x, __y) do { \
-    (__buf)[(__x)*2] = realstore((__y).x); (__buf)[(__x)*2+1] = realstore((__y).y); \
-  } while (false)
-#elif VWM == 4
-  #define LOADGLOBALM(__buf, __x) realM(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
-  #define STOREGLOBALM(__buf, __x, __y) do { \
-    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
-    (__buf)[(__x)+2] = realstore((__y).z); (__buf)[(__x)+3] = realstore((__y).w); \
-  } while (false)
-  #define LOADLOCALM(__buf, __x) realM(real((__buf)[(__x)*4]), real((__buf)[(__x)*4+1]), real((__buf)[(__x)*4+2]), real((__buf)[(__x)*4+3]))
-  #define STORELOCALM(__buf, __x, __y) do { \
-    (__buf)[(__x)*4] = realstore((__y).x); (__buf)[(__x)*4+1] = realstore((__y).y); \
-    (__buf)[(__x)*4+2] = realstore((__y).z); (__buf)[(__x)*4+3] = realstore((__y).w); \
-  } while (false)
-#endif
-
-#if VWN == 1
-  #define LOADGLOBALN(__buf, __x) real((__buf)[(__x)])
-  #define STOREGLOBALN(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
-  #define LOADLOCALN(__buf, __x) real((__buf)[(__x)])
-  #define STORELOCALN(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
-#elif VWN == 2
-  #define LOADGLOBALN(__buf, __x) realN(real((__buf)[(__x)]), real((__buf)[(__x)+1]))
-  #define STOREGLOBALN(__buf, __x, __y) do { \
-    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
-  } while (false)
-  #define LOADLOCALN(__buf, __x) realN(real((__buf)[(__x)*2]), real((__buf)[(__x)*2+1]))
-  #define STORELOCALN(__buf, __x, __y) do { \
-    (__buf)[(__x)*2] = realstore((__y).x); (__buf)[(__x)*2+1] = realstore((__y).y); \
-  } while (false)
-#elif VWN == 4
-  #define LOADGLOBALN(__buf, __x) realN(real((__buf)[(__x)]), real((__buf)[(__x)+1]), real((__buf)[(__x)+2]), real((__buf)[(__x)+3]))
-  #define STOREGLOBALN(__buf, __x, __y) do { \
-    (__buf)[(__x)] = realstore((__y).x); (__buf)[(__x)+1] = realstore((__y).y); \
-    (__buf)[(__x)+2] = realstore((__y).z); (__buf)[(__x)+3] = realstore((__y).w); \
-  } while (false)
-  #define LOADLOCALN(__buf, __x) realN(real((__buf)[(__x)*4]), real((__buf)[(__x)*4+1]), real((__buf)[(__x)*4+2]), real((__buf)[(__x)*4+3]))
-  #define STORELOCALN(__buf, __x, __y) do { \
-    (__buf)[(__x)*4] = realstore((__y).x); (__buf)[(__x)*4+1] = realstore((__y).y); \
-    (__buf)[(__x)*4+2] = realstore((__y).z); (__buf)[(__x)*4+3] = realstore((__y).w); \
-  } while (false)
-#endif
-
-// Return a single real value from the scalar backing buffer.
+// Scalar accesses are kept for the scalar/edge helpers used by other XGemm paths.
 #define LOADGLOBAL(__buf, __x) real((__buf)[(__x)])
 #define STOREGLOBAL(__buf, __x, __y) ((__buf)[(__x)] = realstore(__y))
 
@@ -139,16 +95,20 @@ void GlobalToLocalA(const int kSizeM, const int tid, const int kwg, const int ba
   for (int _mia = 0; _mia < MWA/VWM; _mia += 1) {
     #pragma unroll
     for (int _kia = 0; _kia < KWA; _kia += 1) {
-      // Computes the indices based on strided/non-strided access
-      int mg = _mia + la0*(MWA/VWM);
+      // Computes the indices based on strided/non-strided access.
+      #if STRM == 0
+        int mg = _mia + la0*(MWA/VWM);
+      #else
+        int mg = la0 + _mia*MDIMA;
+      #endif
       // Computes the indices for the global memory
       int kg = _kia + la1*KWA;
       int idm = mg + GroupId0() * (MWG/VWM);
       int idk = kg + kwg;
 
       // Loads the data from global memory (not transposed) into the local memory
-    STORELOCALM(alm, kg*(MWG/VWM) + mg,
-                LOADGLOBALM(agm, baseA + idk*kSizeM + idm*VWM));
+      STORELOCALM(alm, kg*(MWG/VWM) + mg,
+                  LOADGLOBALM(agm, baseA + idk*(kSizeM/VWM) + idm));
     }
   }
 }
@@ -161,14 +121,18 @@ void GlobalToLocalB(const int kSizeN, const int tid, const int kwg, const int ba
     #pragma unroll
     for (int _nib = 0; _nib < NWB/VWN; _nib += 1) {
 
-      int ng = _nib + lb0*(NWB/VWN);
+      #if STRN == 0
+        int ng = _nib + lb0*(NWB/VWN);
+      #else
+        int ng = lb0 + _nib*NDIMB;
+      #endif
 
       int kg = _kib + lb1*KWB;
       int idn = ng + GroupId1() * (NWG/VWN);
       int idk = kg + kwg;
 
       STORELOCALN(blm, kg*(NWG/VWN) + ng,
-                  LOADGLOBALN(bgm, baseB + idk*kSizeN + idn*VWN));
+                  LOADGLOBALN(bgm, baseB + idk*(kSizeN/VWN) + idn));
     }
   }
 }
@@ -211,7 +175,7 @@ void StoreResults(realM _c_value, int _mi, int _ni, int _kSizeM, int _baseC) {
   int ng = _ni + LocalId1()*NWI;
   int idm = mg + GroupId0() * (MWG/VWM);
   int idn = ng + GroupId1() * NWG;
-  int index = _baseC + idn*_kSizeM + idm*VWM;
+  int index = _baseC + idn*_kSizeM + idm;
   realM xval = _c_value;
   STOREGLOBALM(cgm, index, xval);
 }
@@ -234,9 +198,9 @@ void XgemmBody(
   realM cpm[NWI*(MWI/VWM)]; // NWI * MWI
   volatile int tid = LocalId0() + MDIMC*LocalId1();
 
-  const int baseA = a_offset;
-  const int baseB = b_offset;
-  const int baseC = c_offset;
+  const int baseA = a_offset / VWM;
+  const int baseB = b_offset / VWN;
+  const int baseC = c_offset / VWM;
 
   #pragma unroll
   for (int _mi = 0; _mi < MWI/VWM; _mi += 1) {
@@ -306,7 +270,7 @@ void XgemmBody(
   for (int _ni = 0; _ni < NWI; _ni += 1) {
     #pragma unroll
     for (int _mi = 0; _mi < MWI/VWM; _mi += 1) {
-      StoreResults(cpm[_ni * (MWI/VWM) + _mi], _mi, _ni, cld, baseC);
+      StoreResults(cpm[_ni * (MWI/VWM) + _mi], _mi, _ni, cld / VWM, baseC);
     }
   }
 }

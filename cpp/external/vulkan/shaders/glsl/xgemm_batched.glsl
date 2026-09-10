@@ -46,6 +46,32 @@ layout(constant_id = 9) const int _NDIMB = 16; // Re-shaped tile dimension of ma
 
 #include "common.glsl"
 
+#if PRECISION == 16
+  #define real2 f16vec2
+#else
+  #define real2 vec2
+#endif
+#if VWM == 1
+  #define realM real
+  #define realstoreM realstore
+#elif VWM == 2
+  #define realM real2
+  #define realstoreM realstore2
+#elif VWM == 4
+  #define realM real4
+  #define realstoreM realstore4
+#endif
+#if VWN == 1
+  #define realN real
+  #define realstoreN realstore
+#elif VWN == 2
+  #define realN real2
+  #define realstoreN realstore2
+#elif VWN == 4
+  #define realN real4
+  #define realstoreN realstore4
+#endif
+
 layout(push_constant) uniform BatchedXGEMMParams {
     int kSizeM;
     int kSizeN;
@@ -59,19 +85,19 @@ layout(push_constant) uniform BatchedXGEMMParams {
 };
 
 layout(set = 0, binding = 0) readonly buffer MatA {
-  realstore agm[];
+  realstoreM agm[];
 };
 
 layout(set = 0, binding = 1) readonly buffer MatB {
-  realstore bgm[];
+  realstoreN bgm[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer MatC {
-  realstore cgm[];
+  realstoreM cgm[];
 };
 
-shared realstore alm[_MWG * _KWG];
-shared realstore blm[_NWG * _KWG];
+shared realstoreM alm[(_MWG * _KWG) / VWM];
+shared realstoreN blm[(_NWG * _KWG) / VWN];
 
 #define STRM 0
 #define STRN 0
