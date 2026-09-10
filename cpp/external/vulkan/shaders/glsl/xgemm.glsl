@@ -23,7 +23,7 @@
   #define KREG 1
 #endif
 #ifndef KWI
-  #define KWI  1 // unroll factor for K dimension
+  #define KWI _KWI // unroll factor for K dimension
 #endif
 
 #define MWI (MWG/MDIMC)               // Work per work-item (M-dimension)

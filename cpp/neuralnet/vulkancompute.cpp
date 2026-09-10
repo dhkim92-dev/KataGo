@@ -362,19 +362,18 @@ void xgemmBatched(
     tuneParams.vulkan.shouldUseFP16Compute ? tuneParams.xgemm16 : tuneParams.xgemm;
   const uint32_t MWG = xgemmParams.MWG;
   const uint32_t NWG = xgemmParams.NWG;
-  const uint32_t localSizeX = pipeline->localSizeX;
-  const uint32_t localSizeY = pipeline->localSizeY;
-  const uint32_t localSizeZ = pipeline->localSizeZ;
-  uint32_t wgCountX = (M * localSizeX / MWG) / localSizeX;
-  uint32_t wgCountY = (N * localSizeY / NWG) / localSizeY;
-  uint32_t wgCountZ = numBatchElts / localSizeZ;
+  // OpenCL launches global sizes {M*MDIMC/MWG, N*NDIMC/NWG, batch}
+  // with local sizes {MDIMC, NDIMC, 1}; Vulkan takes the resulting
+  // workgroup counts directly.
+  uint32_t wgCountX = M / MWG;
+  uint32_t wgCountY = N / NWG;
+  uint32_t wgCountZ = numBatchElts;
   wgCountX = (wgCountX == 0) ? 1 : wgCountX;
   wgCountY = (wgCountY == 0) ? 1 : wgCountY;
   wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
   
   // std::printf(
-  //   "BatchedXGemm_KM_KN_NM: localSizes = %u,%u,%u globalSizes = %u,%u,%u groupCounts = %u,%u,%u\n",
-  //   (unsigned)localSizeX, (unsigned)localSizeY, (unsigned)localSizeZ,
+  //   "BatchedXGemm_KM_KN_NM: groupCounts = %u,%u,%u\n",
   //   (unsigned)wgCountX, (unsigned)wgCountY, (unsigned)wgCountZ
   // );
   vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);

@@ -1091,6 +1091,7 @@ namespace vk_shader {
     spec.MWG = selectedTuneParams.MWG;
     spec.NWG = selectedTuneParams.NWG;
     spec.KWG = selectedTuneParams.KWG;
+    spec.KWI = selectedTuneParams.KWI;
     spec.MDIMC = selectedTuneParams.MDIMC;
     spec.NDIMC = selectedTuneParams.NDIMC;
     spec.MDIMA = selectedTuneParams.MDIMA;

@@ -32,7 +32,6 @@
 #define SA 1
 #define SB 1
 #define GEMMK 0
-#define KWI 1
 // layout(constant_id = 0) const uint LOCAL_SIZE_X = 8;
 // layout(constant_id = 1) const uint LOCAL_SIZE_Y = 8;
 // layout(constant_id = 2) const uint LOCAL_SIZE_Z = 1;
@@ -43,6 +42,7 @@ layout(constant_id = 6) const int _MDIMC = 16; //
 layout(constant_id = 7) const int _NDIMC = 16; //
 layout(constant_id = 8) const int _MDIMA = 16; // Re-shaped tile dimension of matrix A = KDIMA x MDIMA
 layout(constant_id = 9) const int _NDIMB = 16; // Re-shaped tile dimension of matrix B =
+layout(constant_id = 10) const int _KWI = 1; // Unroll factor for the K dimension
 
 #include "common.glsl"
 

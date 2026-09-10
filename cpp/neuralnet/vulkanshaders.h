@@ -857,6 +857,7 @@ struct LocalDimHash {
     };
 
     struct XGEMMBatchedSpec {
+      // Field order matches xgemm_batched.glsl specialization IDs 0 through 10.
       uint32_t localSizeX = 16;
       uint32_t localSizeY = 16;
       uint32_t localSizeZ = 1;
@@ -867,6 +868,7 @@ struct LocalDimHash {
       uint32_t NDIMC=16;
       uint32_t MDIMA=16;
       uint32_t NDIMB=16;
+      uint32_t KWI=1;
     };
 
     struct XgemmDirectSpec {
@@ -1270,6 +1272,7 @@ struct LocalDimHash {
       uint32_t MWG=32;
       uint32_t NWG=32;
       uint32_t KWG=32;
+      uint32_t KWI=1;
       uint32_t MDIMA=8;
       uint32_t NDIMB=8;
       uint32_t VWM=4;
