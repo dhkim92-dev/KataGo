@@ -1487,8 +1487,14 @@ namespace {
           Rand rand("VulkanTunerInput:" + to_string(binding));
           if(binding != outputBinding(pipeline)) {
             if(isGemm && binding < 2) {
-              for(float& value: data)
-                value = static_cast<float>(rand.nextDouble() - 0.5) / sqrtf(static_cast<float>(logicalK));
+              const int width = binding == 0 ? gemmM : gemmN;
+              const int logicalWidth = binding == 0 ? logicalM : logicalN;
+              const int batches = directGemm && binding == 1 ? 1 : gemmBatch;
+              for(int n = 0; n < batches; n++)
+                for(int k = 0; k < logicalK; k++)
+                  for(int x = 0; x < logicalWidth; x++)
+                    data[(static_cast<size_t>(n) * gemmK + k) * width + x] =
+                      static_cast<float>(rand.nextDouble() - 0.5) / sqrtf(static_cast<float>(logicalK));
               if(cpuReference != nullptr) {
                 if(binding == 0) gemmInput = data;
                 else gemmFilter = data;
