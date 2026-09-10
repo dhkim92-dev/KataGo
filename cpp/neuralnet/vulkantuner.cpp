@@ -1511,6 +1511,8 @@ namespace {
                 plan.kernelName == "pointwise" && name.find("add_pointwise") == 0 && binding == 1;
               const bool swigluInput =
                 plan.kernelName == "pointwise" && name.find("transformer_swiglu") == 0 && binding < 2;
+              const bool addChannelBiasesInput =
+                plan.kernelName == "addChannelBiases" && name.find("add_channel_bias_nchw") == 0 && binding == 1;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1541,6 +1543,11 @@ namespace {
                   : static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels));
                 const size_t validElements = batchSize * channels * logicalXYSize;
                 for(size_t i = 0; i < validElements; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(addChannelBiasesInput) {
+                const size_t validBiases = batchSize * static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
+                for(size_t i = 0; i < validBiases; i++)
                   data[i] = static_cast<float>(rand.nextDouble());
               }
               else if(!winogradInputTransform && !winogradOutputTransform) {
