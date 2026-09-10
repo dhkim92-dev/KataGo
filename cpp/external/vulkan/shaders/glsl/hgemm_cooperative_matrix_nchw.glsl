@@ -5,7 +5,6 @@
 #extension GL_EXT_shader_16bit_storage : require
 
 #define COMPONENT_TYPE_FLOAT16 0
-#define COMPONENT_TYPE_FLOAT32 1
 
 #ifndef VWM
 #define VWM 4
@@ -56,9 +55,8 @@ layout(constant_id = 7) const int NWG = 32;
 layout(constant_id = 8) const int KWG = 32;
 layout(constant_id = 9) const int MWAVE = 32;
 layout(constant_id = 10) const int NWAVE = 32;
-// Cooperative-matrix accumulator and result component types.  The valid
-// floating-point combinations are FP16/FP16 and FP32/FP32; A and B remain
-// FP16 for this hgemm kernel.
+// Cooperative-matrix accumulator and result component types. This kernel
+// supports only the FP16/FP16/FP16/FP16 combination.
 layout(constant_id = 11) const int CType = COMPONENT_TYPE_FLOAT16;
 layout(constant_id = 12) const int ResultType = COMPONENT_TYPE_FLOAT16;
 
@@ -134,26 +132,20 @@ void main() {
   // Every workgroup computes one MWG x NWG tile. Only a MWAVE x NWAVE
   // collection of fragments is resident at once; aWaveId/bWaveId reuse it
   // over the remainder of the workgroup tile.
-  // A and B are always FP16.  Keep both accumulator variants in the module;
-  // the specialization constants below select the matching operation and
-  // store path when the pipeline is created.
+  // A, B, C, and Result are all FP16 for this kernel.
   coopmat<float16_t, gl_ScopeSubgroup, MSize, KDIM, gl_MatrixUseA> matA[MWI];
   coopmat<float16_t, gl_ScopeSubgroup, KDIM, NSize, gl_MatrixUseB> matB;
   coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> accFP16[NWI][MWI];
-  coopmat<float, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> accFP32[NWI][MWI];
 
   const bool useFP16Accumulator =
     CType == COMPONENT_TYPE_FLOAT16 && ResultType == COMPONENT_TYPE_FLOAT16;
-  const bool useFP32Accumulator =
-    CType == COMPONENT_TYPE_FLOAT32 && ResultType == COMPONENT_TYPE_FLOAT32;
 
-  if(!useFP16Accumulator && !useFP32Accumulator)
+  if(!useFP16Accumulator)
     return;
 
   for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
     for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
       accFP16[bWaveId][aWaveId] = coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(0.0hf);
-      accFP32[bWaveId][aWaveId] = coopmat<float, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(0.0f);
     }
   }
 
@@ -213,10 +205,7 @@ void main() {
         for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
           const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
           if(groupMBase + aLocalOffset < hwSize) {
-            if(useFP16Accumulator)
-              accFP16[bWaveId][aWaveId] = coopMatMulAdd(matA[aWaveId], matB, accFP16[bWaveId][aWaveId]);
-            else
-              accFP32[bWaveId][aWaveId] = coopMatMulAdd(matA[aWaveId], matB, accFP32[bWaveId][aWaveId]);
+            accFP16[bWaveId][aWaveId] = coopMatMulAdd(matA[aWaveId], matB, accFP16[bWaveId][aWaveId]);
           }
         }
       }
@@ -235,21 +224,12 @@ void main() {
         batchOutputBase + (groupNBase + bLocalOffset) * hwSize + groupMBase + aLocalOffset;
 
       if(groupMBase + aLocalOffset < hwSize) {
-        if(useFP16Accumulator) {
-          coopMatStore(
-            accFP16[bWaveId][aWaveId], d_output,
-            cGlobalOffset / VWM,
-            hwSize / VWM,
-            gl_CooperativeMatrixLayoutColumnMajor
-          );
-        } else {
-          coopMatStore(
-            accFP32[bWaveId][aWaveId], d_output,
-            cGlobalOffset / VWM,
-            hwSize / VWM,
-            gl_CooperativeMatrixLayoutColumnMajor
-          );
-        }
+        coopMatStore(
+          accFP16[bWaveId][aWaveId], d_output,
+          cGlobalOffset / VWM,
+          hwSize / VWM,
+          gl_CooperativeMatrixLayoutColumnMajor
+        );
       }
     }
   }

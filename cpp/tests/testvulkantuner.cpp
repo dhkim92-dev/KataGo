@@ -14,6 +14,31 @@
 using namespace std;
 
 namespace {
+  VKAPI_ATTR VkResult VKAPI_CALL fakeCooperativeMatrixProperties(
+    VkPhysicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    if(properties == nullptr) {
+      *propertyCount = 1;
+      return VK_SUCCESS;
+    }
+    if(*propertyCount == 0)
+      return VK_INCOMPLETE;
+    properties[0] = {};
+    properties[0].sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    properties[0].MSize = 16;
+    properties[0].NSize = 16;
+    properties[0].KSize = 16;
+    properties[0].AType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].CType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].ResultType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    properties[0].scope = VK_SCOPE_SUBGROUP_KHR;
+    *propertyCount = 1;
+    return VK_SUCCESS;
+  }
+
   bool loadThrows(const string& filename) {
     try {
       (void)VulkanTuneParams::load(filename);
@@ -108,6 +133,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.storage16BitFeatures.storageBuffer16BitAccess = VK_TRUE;
   deviceInfo.shaderFloat16Int8Features.shaderFloat16 = VK_TRUE;
   deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
+  deviceInfo.cooperativeMatrixPropertiesFn = fakeCooperativeMatrixProperties;
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
   const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);

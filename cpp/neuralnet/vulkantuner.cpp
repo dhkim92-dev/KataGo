@@ -65,13 +65,50 @@ bool VulkanTuner::shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, 
     fp32Seconds > 0.0 && fp16Seconds > 0.0 && fp16ErrorProp < 1.0 && fp16Seconds < fp32Seconds;
 }
 
+namespace {
+  bool supportsFP16CooperativeMatrix(const VulkanDeviceInfo& deviceInfo) {
+    if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
+       deviceInfo.cooperativeMatrixPropertiesFn == nullptr)
+      return false;
+
+    uint32_t propertyCount = 0;
+    VkResult result = deviceInfo.cooperativeMatrixPropertiesFn(
+      deviceInfo.physicalDevice, &propertyCount, nullptr
+    );
+    if(result != VK_SUCCESS || propertyCount == 0)
+      return false;
+
+    vector<VkCooperativeMatrixPropertiesKHR> properties(propertyCount);
+    for(VkCooperativeMatrixPropertiesKHR& property: properties) {
+      property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+      property.pNext = nullptr;
+    }
+    result = deviceInfo.cooperativeMatrixPropertiesFn(
+      deviceInfo.physicalDevice, &propertyCount, properties.data()
+    );
+    if(result != VK_SUCCESS && result != VK_INCOMPLETE)
+      return false;
+
+    for(uint32_t i = 0; i < propertyCount; i++) {
+      const VkCooperativeMatrixPropertiesKHR& property = properties[i];
+      if(property.scope == VK_SCOPE_SUBGROUP_KHR &&
+         property.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+         property.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+         property.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+         property.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR)
+        return true;
+    }
+    return false;
+  }
+}
+
 VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) {
   VulkanParams params;
   params.canUseFP16Storage =
     deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
     deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
   params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-  params.canUseCooperativeMatrix = deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE;
+  params.canUseCooperativeMatrix = supportsFP16CooperativeMatrix(deviceInfo);
   params.canUseSubgroup =
     (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
@@ -248,11 +285,8 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
     return false;
-  if((CType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16 &&
-      CType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT32) ||
-     (ResultType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16 &&
-      ResultType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT32) ||
-     CType != ResultType)
+  if(CType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16 ||
+     ResultType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16)
     return false;
   if(!isMultipleOf(MWARP, 4) || !isMultipleOf(NWARP, 4))
     return false;
@@ -655,19 +689,14 @@ namespace {
       if(property.scope != VK_SCOPE_SUBGROUP_KHR ||
          property.AType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
          property.BType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         (property.CType != VK_COMPONENT_TYPE_FLOAT16_KHR &&
-          property.CType != VK_COMPONENT_TYPE_FLOAT32_KHR) ||
-         property.CType != property.ResultType)
+         property.CType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
+         property.ResultType != VK_COMPONENT_TYPE_FLOAT16_KHR)
         continue;
       params.MWARP = static_cast<int>(property.MSize);
       params.NWARP = static_cast<int>(property.NSize);
       params.KDIM = static_cast<int>(property.KSize);
-      params.CType = property.CType == VK_COMPONENT_TYPE_FLOAT16_KHR
-        ? spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16
-        : spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT32;
-      params.ResultType = property.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR
-        ? spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16
-        : spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT32;
+      params.CType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      params.ResultType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
       params.subgroupSize = device->info.subgroupProperties.subgroupSize;
       if(!params.isValid()) {
         params.MWG = params.MWARP * 2;

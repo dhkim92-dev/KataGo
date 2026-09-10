@@ -907,7 +907,6 @@ struct LocalDimHash {
      */
     struct HGemmCooperativeMatrixNCHWSpec {
       static constexpr int COMPONENT_TYPE_FLOAT16 = 0;
-      static constexpr int COMPONENT_TYPE_FLOAT32 = 1;
 
       uint32_t localSizeX = 32;
       uint32_t localSizeY = 1;
