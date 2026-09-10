@@ -1507,6 +1507,10 @@ namespace {
                 name.find("winograd_output_transform") == 0;
               const bool globalPoolingInput =
                 plan.kernelName == "gPool" && name.find("global_pooling_channels") == 0 && binding == 0;
+              const bool addPointwiseInput =
+                plan.kernelName == "pointwise" && name.find("add_pointwise") == 0 && binding == 1;
+              const bool swigluInput =
+                plan.kernelName == "pointwise" && name.find("transformer_swiglu") == 0 && binding < 2;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1530,6 +1534,14 @@ namespace {
                     for(size_t xy = 0; xy < logicalXYSize; xy++)
                       data[(n * gpoolChannels + c) * xySize + xy] =
                         static_cast<float>(rand.nextDouble());
+              }
+              else if(addPointwiseInput || swigluInput) {
+                const size_t channels = addPointwiseInput
+                  ? static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels))
+                  : static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels));
+                const size_t validElements = batchSize * channels * logicalXYSize;
+                for(size_t i = 0; i < validElements; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
               }
               else if(!winogradInputTransform && !winogradOutputTransform) {
                 for(float& value: data)
