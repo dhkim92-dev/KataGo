@@ -1326,8 +1326,10 @@ namespace {
       const bool isGemm = !plan.gemmCases.empty();
       const bool directGemm = plan.kernelName == "xgemmDirect" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const bool cooperative = plan.kernelName == "hgemmCooperativeMatrix" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
-      const int tilesX = (context.nnXLen + config.conv3x3.outTileXSize - 1) / config.conv3x3.outTileXSize;
-      const int tilesY = (context.nnYLen + config.conv3x3.outTileYSize - 1) / config.conv3x3.outTileYSize;
+      const ConvTuneParams& transformConvParams =
+        plan.kernelName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+      const int tilesX = (context.nnXLen + transformConvParams.outTileXSize - 1) / transformConvParams.outTileXSize;
+      const int tilesY = (context.nnYLen + transformConvParams.outTileYSize - 1) / transformConvParams.outTileYSize;
       const int logicalM = directGemm ? static_cast<int>(logicalXYSize) : static_cast<int>(batchSize) * tilesX * tilesY;
       const int logicalN = isGemm ? std::max(1, std::accumulate(
         plan.gemmCases.begin(), plan.gemmCases.end(), 0,
@@ -1498,7 +1500,11 @@ namespace {
             else {
               const string& name = pipeline->name;
               const bool winogradInputTransform =
-                plan.kernelName == "conv3x3InputTransform" && name.find("winograd_input_transform") == 0;
+                (plan.kernelName == "conv3x3InputTransform" || plan.kernelName == "conv5x5InputTransform") &&
+                name.find("winograd_input_transform") == 0;
+              const bool winogradOutputTransform =
+                (plan.kernelName == "conv3x3OutputTransform" || plan.kernelName == "conv5x5OutputTransform") &&
+                name.find("winograd_output_transform") == 0;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1507,7 +1513,15 @@ namespace {
                       data[(n * inputChannels + c) * logicalXYSize + xy] =
                         static_cast<float>(rand.nextDouble());
               }
-              else if(!winogradInputTransform) {
+              else if(winogradOutputTransform && binding == 0) {
+                const size_t tileElements = static_cast<size_t>(transformConvParams.inTileXSize) * transformConvParams.inTileYSize;
+                for(size_t tileElement = 0; tileElement < tileElements; tileElement++)
+                  for(size_t channel = 0; channel < maxConvChannels; channel++)
+                    for(size_t tile = 0; tile < maxTiles; tile++)
+                      data[(tileElement * paddedChannels + channel) * paddedTiles + tile] =
+                        static_cast<float>(rand.nextDouble());
+              }
+              else if(!winogradInputTransform && !winogradOutputTransform) {
                 for(float& value: data)
                   value = static_cast<float>(rand.nextDouble());
                 // Masks and their sums describe a fully valid board.
