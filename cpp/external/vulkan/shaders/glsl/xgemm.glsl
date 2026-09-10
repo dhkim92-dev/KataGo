@@ -152,8 +152,20 @@ realN LocalToPrivateB(const int _ni, const int kg) {
 * avec : vector to be multiplied
 * bval : scalar value to multiply
 */
+#define MUL_ADD_SCALAR(a, b, c) fma((a), (b), (c))
+
 realM MultiplyAddVector(realM cvec, realM avec, real bval) {
-  return fma(avec, realM(bval), cvec);
+#if VWM == 1
+  return MUL_ADD_SCALAR(avec, bval, cvec);
+#elif VWM == 2
+  return realM(MUL_ADD_SCALAR(avec.x, bval, cvec.x),
+               MUL_ADD_SCALAR(avec.y, bval, cvec.y));
+#elif VWM == 4
+  return realM(MUL_ADD_SCALAR(avec.x, bval, cvec.x),
+               MUL_ADD_SCALAR(avec.y, bval, cvec.y),
+               MUL_ADD_SCALAR(avec.z, bval, cvec.z),
+               MUL_ADD_SCALAR(avec.w, bval, cvec.w));
+#endif
 }
 
 void StoreResults(realM _c_value, int _mi, int _ni, int _kSizeM, int _baseC) {
