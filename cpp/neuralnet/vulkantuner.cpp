@@ -1513,6 +1513,9 @@ namespace {
                 plan.kernelName == "pointwise" && name.find("transformer_swiglu") == 0 && binding < 2;
               const bool addChannelBiasesInput =
                 plan.kernelName == "addChannelBiases" && name.find("add_channel_bias_nchw") == 0 && binding == 1;
+              const bool transformerAttentionInput =
+                plan.kernelName == "transformerAttention" &&
+                name.find("transformer_scale_dot_product") == 0 && binding < 3;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1548,6 +1551,17 @@ namespace {
               else if(addChannelBiasesInput) {
                 const size_t validBiases = batchSize * static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
                 for(size_t i = 0; i < validBiases; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(transformerAttentionInput) {
+                const size_t heads = static_cast<size_t>(std::max(1, context.modelInfo.transformerNumHeads));
+                const size_t kvHeads = static_cast<size_t>(std::max(1, context.modelInfo.transformerNumKVHeads));
+                const size_t headDim = static_cast<size_t>(std::max(1, context.modelInfo.transformerHeadDim));
+                const size_t vHeadDim = static_cast<size_t>(std::max(1, context.modelInfo.transformerVHeadDim));
+                const size_t channels = binding == 0 ? heads : kvHeads;
+                const size_t dimension = binding == 2 ? vHeadDim : headDim;
+                const size_t validElements = batchSize * channels * dimension * logicalXYSize;
+                for(size_t i = 0; i < validElements; i++)
                   data[i] = static_cast<float>(rand.nextDouble());
               }
               else if(!winogradInputTransform && !winogradOutputTransform) {
