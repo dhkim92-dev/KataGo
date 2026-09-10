@@ -1520,6 +1520,16 @@ namespace {
                 plan.kernelName == "transformerRMSNorm" && name.find("transformer_rms_norm") == 0 && binding == 0;
               const bool transformerRMSNormGamma =
                 plan.kernelName == "transformerRMSNorm" && name.find("transformer_rms_norm") == 0 && binding == 2;
+              const bool spatialRMSNormInput =
+                plan.kernelName == "spatialRMSNorm" && binding == 0 &&
+                (name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
+                 name.find("transformer_spatial_rms_norm_apply") == 0);
+              const bool spatialRMSNormGamma =
+                plan.kernelName == "spatialRMSNorm" &&
+                name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 2;
+              const bool spatialRMSNormBeta =
+                plan.kernelName == "spatialRMSNorm" &&
+                name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 3;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1575,6 +1585,17 @@ namespace {
                   data[i] = static_cast<float>(rand.nextDouble());
               }
               else if(transformerRMSNormGamma) {
+                const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
+                for(size_t i = 0; i < channels; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(spatialRMSNormInput) {
+                const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
+                const size_t validElements = batchSize * channels * logicalXYSize;
+                for(size_t i = 0; i < validElements; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(spatialRMSNormGamma || spatialRMSNormBeta) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
                 for(size_t i = 0; i < channels; i++)
                   data[i] = static_cast<float>(rand.nextDouble());
