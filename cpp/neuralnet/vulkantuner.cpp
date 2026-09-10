@@ -1496,40 +1496,52 @@ namespace {
               }
             }
             else {
-              for(float& value: data)
-                value = static_cast<float>(rand.nextDouble());
-              // Masks and their sums describe a fully valid board.
               const string& name = pipeline->name;
-              const bool mask =
-                (name.find("global_pooling_channels") == 0 && binding == 2) ||
-                (name.find("transformer_scale_dot_product") == 0 && binding == 4) ||
-                ((name.find("transformer_rms_norm") == 0 || name.find("transformer_spatial_rms_norm_apply") == 0) && binding == 4) ||
-                (name.find("transformer_spatial_rms_norm_sum_sq") == 0 && binding == 1);
-              const bool maskSum =
-                (name.find("global_pooling_channels") == 0 && binding == 3) ||
-                (name.find("value_head_pool_channels") == 0 && binding == 2) ||
-                (name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 5);
-              if(name.find("global_pooling_channels") == 0 && binding == 0 && xySize > logicalXYSize) {
-                const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+              const bool winogradInputTransform =
+                plan.kernelName == "conv3x3InputTransform" && name.find("winograd_input_transform") == 0;
+              if(winogradInputTransform && binding == 0) {
+                const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
-                  for(int c = 0; c < gpoolChannels; c++)
-                    std::fill(
-                      data.begin() + (n * gpoolChannels + c) * xySize + logicalXYSize,
-                      data.begin() + (n * gpoolChannels + c + 1) * xySize,
-                      0.0f
-                    );
+                  for(int c = 0; c < inputChannels; c++)
+                    for(size_t xy = 0; xy < logicalXYSize; xy++)
+                      data[(n * inputChannels + c) * logicalXYSize + xy] =
+                        static_cast<float>(rand.nextDouble());
               }
-              if(mask) {
-                std::fill(data.begin(), data.end(), 0.0f);
-                const int maskBatchSize = std::max(1, context.batchSize);
-                for(int n = 0; n < maskBatchSize; n++)
-                  std::fill(data.begin() + static_cast<size_t>(n) * xySize,
-                            data.begin() + static_cast<size_t>(n) * xySize + logicalXYSize, 1.0f);
+              else if(!winogradInputTransform) {
+                for(float& value: data)
+                  value = static_cast<float>(rand.nextDouble());
+                // Masks and their sums describe a fully valid board.
+                const bool mask =
+                  (name.find("global_pooling_channels") == 0 && binding == 2) ||
+                  (name.find("transformer_scale_dot_product") == 0 && binding == 4) ||
+                  ((name.find("transformer_rms_norm") == 0 || name.find("transformer_spatial_rms_norm_apply") == 0) && binding == 4) ||
+                  (name.find("transformer_spatial_rms_norm_sum_sq") == 0 && binding == 1);
+                const bool maskSum =
+                  (name.find("global_pooling_channels") == 0 && binding == 3) ||
+                  (name.find("value_head_pool_channels") == 0 && binding == 2) ||
+                  (name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 5);
+                if(name.find("global_pooling_channels") == 0 && binding == 0 && xySize > logicalXYSize) {
+                  const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+                  for(size_t n = 0; n < batchSize; n++)
+                    for(int c = 0; c < gpoolChannels; c++)
+                      std::fill(
+                        data.begin() + (n * gpoolChannels + c) * xySize + logicalXYSize,
+                        data.begin() + (n * gpoolChannels + c + 1) * xySize,
+                        0.0f
+                      );
+                }
+                if(mask) {
+                  std::fill(data.begin(), data.end(), 0.0f);
+                  const int maskBatchSize = std::max(1, context.batchSize);
+                  for(int n = 0; n < maskBatchSize; n++)
+                    std::fill(data.begin() + static_cast<size_t>(n) * xySize,
+                              data.begin() + static_cast<size_t>(n) * xySize + logicalXYSize, 1.0f);
+                }
+                else if(maskSum)
+                  std::fill(data.begin(), data.end(), static_cast<float>(logicalXYSize));
+                else if(name.find("transformer_rms_norm") == 0 && binding == 3)
+                  std::fill(data.begin(), data.end(), 0.0f);
               }
-              else if(maskSum)
-                std::fill(data.begin(), data.end(), static_cast<float>(logicalXYSize));
-              else if(name.find("transformer_rms_norm") == 0 && binding == 3)
-                std::fill(data.begin(), data.end(), 0.0f);
             }
           }
           hostFloatBuffers.push_back(data);
