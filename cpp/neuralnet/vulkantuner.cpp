@@ -3273,7 +3273,10 @@ namespace {
       addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.xgemm.VWM = v; });
       addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.xgemm.VWN = v; });
       configs.erase(
-        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.xgemm.isValid(); }),
+        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {
+          return !p.xgemm.isValid() ||
+            (p.vulkan.shouldUseFP16Storage && (p.xgemm.VWM == 2 || p.xgemm.VWN == 2));
+        }),
         configs.end()
       );
       if(!full) {
@@ -3345,7 +3348,10 @@ namespace {
       addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.xgemm16.VWM = v; });
       addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.xgemm16.VWN = v; });
       configs.erase(
-        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.xgemm16.isValid(); }),
+        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {
+          return !p.xgemm16.isValid() ||
+            (p.vulkan.shouldUseFP16Storage && (p.xgemm16.VWM == 2 || p.xgemm16.VWN == 2));
+        }),
         configs.end()
       );
       if(!full) {
