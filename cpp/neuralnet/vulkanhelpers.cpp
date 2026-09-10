@@ -821,18 +821,24 @@ VkCommandBuffer vk_helper::beginSingleTimeCommandBuffer(
   return commandBuffer;
 }
 
-void vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
+VkResult vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
   const VulkanDevice *device,
   VkCommandBuffer commandBuffer
 ) {
-  vkEndCommandBuffer(commandBuffer);
+  VkResult result = vkEndCommandBuffer(commandBuffer);
+  if(result != VK_SUCCESS) {
+    vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
+    return result;
+  }
   VkSubmitInfo submitInfo = {};
   submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submitInfo.commandBufferCount = 1;
   submitInfo.pCommandBuffers = &commandBuffer;
-  CHECK_VK_MSG("vk_helper::submitSingleTimeCommandBufferAndWaitIdle",vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE));
-  CHECK_VK_MSG("vk_helper::waitIdle",vkQueueWaitIdle(device->queue));
+  result = vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE);
+  if(result == VK_SUCCESS)
+    result = vkQueueWaitIdle(device->queue);
   vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
+  return result;
 }
 
 
@@ -982,7 +988,7 @@ VulkanBuffer* vk_helper::createDeviceBufferWithData(
     1,
     &copyRegion
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
+  *result = vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
@@ -991,6 +997,10 @@ VulkanBuffer* vk_helper::createDeviceBufferWithData(
     device,
     stagingBuffer
   );
+  if(*result != VK_SUCCESS) {
+    vk_helper::releaseVulkanBuffer(device, deviceBuffer);
+    return nullptr;
+  }
   return deviceBuffer;
 }
 
@@ -1098,10 +1108,14 @@ void vk_helper::copyDeviceBufferToHost(
     1,
     &copyRegion
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
+  *result = vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
+  if(*result != VK_SUCCESS) {
+    vk_helper::releaseVulkanBuffer(device, readbackBuffer);
+    return;
+  }
 
   // Map readback buffer and copy data to hostPtr
   void* mappedData = nullptr;
@@ -1176,7 +1190,7 @@ void vk_helper::copyHostToDeviceBuffer(
     1,
     &copyRegion
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
+  *result = vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer
   );
@@ -1186,6 +1200,8 @@ void vk_helper::copyHostToDeviceBuffer(
     device,
     stagingBuffer
   );
+  if(*result != VK_SUCCESS)
+    return;
   
   if(waitForIdle) {
     vkDeviceWaitIdle(device->device);

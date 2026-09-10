@@ -730,8 +730,6 @@ namespace {
     return false;
   }
 
-  class VulkanTimestampTimer;
-
   struct TuningContext {
     const VulkanDevice* device;
     int batchSize;
@@ -740,7 +738,6 @@ namespace {
     const VulkanTuner::ModelInfoForTuning& modelInfo;
     bool full;
     Logger* logger;
-    VulkanTimestampTimer* timer;
   };
 
   struct GemmTuneCase {
@@ -1168,22 +1165,6 @@ namespace {
 
     bool isUsable() const {
       return device->info.properties.limits.timestampComputeAndGraphics == VK_TRUE && timestampPeriod > 0.0f;
-    }
-
-    void resetRootResources() {
-      vkDeviceWaitIdle(device->device);
-      if(resources.commandBuffer != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(device->device, device->commandPool, 1, &resources.commandBuffer);
-        resources.commandBuffer = VK_NULL_HANDLE;
-      }
-      if(resources.descriptorPool != VK_NULL_HANDLE)
-        vkResetDescriptorPool(device->device, resources.descriptorPool, 0);
-      if(resources.fence != VK_NULL_HANDLE)
-        vkResetFences(device->device, 1, &resources.fence);
-      if(device->commandPool != VK_NULL_HANDLE)
-        vkResetCommandPool(device->device, device->commandPool, 0);
-      fill(resources.tuningBufferInitialized.begin(), resources.tuningBufferInitialized.end(), false);
-      resources.pointwiseAccumulatorInitialized = false;
     }
 
     bool measure(
@@ -2916,12 +2897,12 @@ namespace {
       (!configs.empty() && !Tuner::isValid(configs.front()) ? 1 : 0);
     const TuningMeasurementPlan plan = makeMeasurementPlan(Tuner::name(), context);
 
-    if(context.timer == nullptr || !context.timer->isUsable()) {
+    VulkanTimestampTimer timer(context.device);
+    if(!timer.isUsable()) {
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
       return 0.0;
     }
-    VulkanTimestampTimer& timer = *context.timer;
 
     vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
     vector<Pipeline*> previousTargets;
@@ -2950,6 +2931,12 @@ namespace {
         vector<const Pipeline*> targets;
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
+          if(result == VK_ERROR_DEVICE_LOST) {
+            const string error = "VK_ERROR_DEVICE_LOST while creating pipeline: " +
+              describeTuningParams(Tuner::name(), candidate);
+            logTuningFailure(context, currentCandidateIndex, candidateCount, targets, Tuner::name(), error);
+            throw StringError(error);
+          }
           if(isReferenceCandidate) {
             logTuningFailure(
               context, currentCandidateIndex, candidateCount,
@@ -2976,6 +2963,11 @@ namespace {
           referenceReadback.empty() && usesCpuReference(Tuner::name()) ? &cpuReference : nullptr
         );
         if(!measured) {
+          if(error.find("VK_ERROR_DEVICE_LOST") != string::npos) {
+            const string deviceLostError = error + ": " + describeTuningParams(Tuner::name(), candidate);
+            logTuningFailure(context, currentCandidateIndex, candidateCount, targets, Tuner::name(), deviceLostError);
+            throw StringError(deviceLostError);
+          }
           if(isReferenceCandidate) {
             logTuningFailure(
               context, currentCandidateIndex, candidateCount,
@@ -3024,6 +3016,8 @@ namespace {
         logProgressIfNeeded(currentCandidateIndex, targets);
       }
       catch(const StringError& e) {
+        if(string(e.what()).find("VK_ERROR_DEVICE_LOST") != string::npos)
+          throw;
         // A failed pipeline specialization is an invalid candidate, not a fatal tuning failure.
         if(isReferenceCandidate)
           logTuningFailure(context, currentCandidateIndex, candidateCount, vector<const Pipeline*>(), Tuner::name(), e.what());
@@ -3833,8 +3827,7 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.canUseFP16Compute = hardwareParams.canUseFP16Compute;
   tunedConfig.vulkan.canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
   tunedConfig.vulkan.canUseSubgroup = hardwareParams.canUseSubgroup;
-  VulkanTimestampTimer timer(device);
-  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer};
+  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger};
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning capabilities: fp16Storage=" + string(tunedConfig.vulkan.canUseFP16Storage ? "true" : "false") +
@@ -3869,7 +3862,6 @@ void VulkanTuner::tune(
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
-  timer.resetRootResources();
   if(logger != nullptr) {
     const double hostSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
     logger->write("Vulkan tuning total host time: " + Global::doubleToString(hostSeconds) + " sec");

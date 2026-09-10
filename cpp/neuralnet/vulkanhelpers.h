@@ -249,7 +249,7 @@ namespace vk_helper {
     const VulkanDevice *device
   );
 
-  void submitSingleTimeCommandBufferAndWaitIdle(
+  VkResult submitSingleTimeCommandBufferAndWaitIdle(
     const VulkanDevice *device,
     VkCommandBuffer commandBuffer
   );
