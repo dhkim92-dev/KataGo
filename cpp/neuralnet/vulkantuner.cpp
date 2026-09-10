@@ -776,6 +776,7 @@ namespace {
     bool full;
     Logger* logger;
     VulkanTimestampTimer* timer;
+    bool printOnlyOnImprovement;
   };
 
   struct GemmTuneCase {
@@ -3579,16 +3580,19 @@ namespace {
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
         const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
-        if(score > bestScore) {
+        const bool isBest = score > bestScore;
+        if(!context.printOnlyOnImprovement || isBest) {
+          logTuningResult(
+            context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
+            isBest
+          );
+        }
+        if(isBest) {
           bestScore = score;
           bestCallsPerSecond = callsPerSecond;
           currentConfig = candidate;
           found = true;
           lastBestCandidateIndex = currentCandidateIndex;
-          logTuningResult(
-            context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
-            true
-          );
         }
         logProgressIfNeeded(currentCandidateIndex, targets);
       }
@@ -4394,7 +4398,8 @@ void VulkanTuner::tune(
   const ModelInfoForTuning& modelInfo,
   bool full,
   Logger* logger,
-  VulkanTuneParams& tunedConfig
+  VulkanTuneParams& tunedConfig,
+  bool printOnlyOnImprovement
 ) {
   const auto hostStart = std::chrono::steady_clock::now();
   if(device == nullptr)
@@ -4410,7 +4415,7 @@ void VulkanTuner::tune(
   VulkanTimestampTimer timer(device, &queueSubmitMutex);
   VulkanDummyThread dummyThread(device, logger, &queueSubmitMutex);
   dummyThread.start();
-  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer};
+  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer, printOnlyOnImprovement};
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning capabilities: fp16Storage=" + string(tunedConfig.vulkan.canUseFP16Storage ? "true" : "false") +

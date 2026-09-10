@@ -65,7 +65,8 @@ namespace VulkanTuner {
     const ModelInfoForTuning& modelInfo,
     bool full,
     Logger* logger,
-    VulkanTuneParams& tunedConfig);
+    VulkanTuneParams& tunedConfig,
+    bool printOnlyOnImprovement = true);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
   std::string
