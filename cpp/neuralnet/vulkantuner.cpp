@@ -3869,9 +3869,15 @@ namespace {
       slightlyTunedConfig2.xgemm.MWG = 16;
       slightlyTunedConfig2.xgemm.NWG = 16;
       slightlyTunedConfig2.xgemm.KWG = 16;
+      VulkanTuneParams nonReferenceCurrent = current;
+      if(!full) {
+        nonReferenceCurrent.xgemm.KWI = 2;
+        slightlyTunedConfig.xgemm.KWI = 2;
+        slightlyTunedConfig2.xgemm.KWI = 2;
+      }
       configs.insert(configs.begin(), slightlyTunedConfig2);
       configs.insert(configs.begin(), slightlyTunedConfig);
-      configs.insert(configs.begin(), current);
+      configs.insert(configs.begin(), nonReferenceCurrent);
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -3944,9 +3950,15 @@ namespace {
       slightlyTunedConfig2.xgemm16.MWG = 16;
       slightlyTunedConfig2.xgemm16.NWG = 16;
       slightlyTunedConfig2.xgemm16.KWG = 16;
+      VulkanTuneParams nonReferenceCurrent = current;
+      if(!full) {
+        nonReferenceCurrent.xgemm16.KWI = 2;
+        slightlyTunedConfig.xgemm16.KWI = 2;
+        slightlyTunedConfig2.xgemm16.KWI = 2;
+      }
       configs.insert(configs.begin(), slightlyTunedConfig2);
       configs.insert(configs.begin(), slightlyTunedConfig);
-      configs.insert(configs.begin(), current);
+      configs.insert(configs.begin(), nonReferenceCurrent);
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
