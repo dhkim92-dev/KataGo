@@ -4,6 +4,8 @@
 #include "../neuralnet/vulkancompute.h"
 
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <map>
 #include <algorithm>
@@ -12,8 +14,10 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #include "../core/fileutils.h"
@@ -1155,8 +1159,8 @@ namespace {
 
   class VulkanTimestampTimer {
    public:
-    explicit VulkanTimestampTimer(const VulkanDevice* device)
-    : device(device), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
+    explicit VulkanTimestampTimer(const VulkanDevice* device, mutex* queueSubmitMutex)
+    : device(device), queueSubmitMutex(queueSubmitMutex), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
 
     ~VulkanTimestampTimer() {
       vkDeviceWaitIdle(device->device);
@@ -2457,6 +2461,7 @@ namespace {
         cleanup();
         return false;
       }
+      lock_guard<mutex> lock(*queueSubmitMutex);
       result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
       if(result != VK_SUCCESS) {
         error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result);
@@ -2960,6 +2965,7 @@ namespace {
         error = "could not reset attention readback fence: " + vk_helper::vkErrorToString(result);
         return false;
       }
+      lock_guard<mutex> lock(*queueSubmitMutex);
       result = vk_helper::submitCommandBuffers(device, {resources.commandBuffer}, resources.fence);
       if(result != VK_SUCCESS) {
         error = "could not submit attention readback command buffer: " + vk_helper::vkErrorToString(result);
@@ -3082,7 +3088,382 @@ namespace {
     }
 
     const VulkanDevice* device;
+    mutex* queueSubmitMutex;
     float timestampPeriod;
+  };
+
+  class VulkanDummyThread {
+   public:
+    VulkanDummyThread(const VulkanDevice* device, Logger* logger, mutex* queueSubmitMutex)
+    : device(device), logger(logger), queueSubmitMutex(queueSubmitMutex) {}
+
+    ~VulkanDummyThread() {
+      stopAndJoin();
+    }
+
+    void start() {
+      worker = thread([this]() { run(); });
+      unique_lock<mutex> lock(stateMutex);
+      stateCondition.wait(lock, [this]() { return initializedOrDead; });
+    }
+
+    void stopAndJoin() {
+      shouldStop.store(true);
+      if(worker.joinable())
+        worker.join();
+    }
+
+   private:
+    void reportFailure(const string& message) const {
+      const string fullMessage = "WARNING: Dummy thread to load the GPU while tuning failed\n" + message;
+      if(logger != nullptr)
+        logger->write(fullMessage);
+      if(logger == nullptr || (!logger->isLoggingToStdout() && !logger->isLoggingToStderr()))
+        cerr << fullMessage << endl;
+    }
+
+    void signalInitializedOrDead() {
+      {
+        lock_guard<mutex> lock(stateMutex);
+        initializedOrDead = true;
+      }
+      stateCondition.notify_one();
+    }
+
+    void run() {
+      if(logger != nullptr)
+        logger->write("Dummy tuning thread starting");
+
+      VkCommandPool commandPool = VK_NULL_HANDLE;
+      VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+      VkFence fence = VK_NULL_HANDLE;
+      VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+      VulkanBuffer* matrixA = nullptr;
+      VulkanBuffer* matrixB = nullptr;
+      VulkanBuffer* matrixC = nullptr;
+      VulkanBuffer* matrixD = nullptr;
+      VulkanBuffer* buffer = nullptr;
+      VulkanBuffer* buffer2 = nullptr;
+      VulkanBuffer* readbackBuffer = nullptr;
+      unique_ptr<vk_shader::ComputePipelines> pipelines;
+
+      const auto cleanup = [&]() {
+        if(commandBuffer != VK_NULL_HANDLE)
+          vkFreeCommandBuffers(device->device, commandPool, 1, &commandBuffer);
+        if(fence != VK_NULL_HANDLE)
+          vkDestroyFence(device->device, fence, nullptr);
+        if(descriptorPool != VK_NULL_HANDLE)
+          vkDestroyDescriptorPool(device->device, descriptorPool, nullptr);
+        if(commandPool != VK_NULL_HANDLE)
+          vkDestroyCommandPool(device->device, commandPool, nullptr);
+        vk_helper::releaseVulkanBuffer(device, matrixA);
+        vk_helper::releaseVulkanBuffer(device, matrixB);
+        vk_helper::releaseVulkanBuffer(device, matrixC);
+        vk_helper::releaseVulkanBuffer(device, matrixD);
+        vk_helper::releaseVulkanBuffer(device, buffer);
+        vk_helper::releaseVulkanBuffer(device, buffer2);
+        vk_helper::releaseVulkanBuffer(device, readbackBuffer);
+      };
+      ScopeGuard cleanupGuard(std::move(cleanup));
+
+      try {
+        const int batchSize = 1;
+        const int mSize = 97;
+        const int kSize = 151;
+        const size_t outputElements = static_cast<size_t>(mSize) * kSize;
+
+        VkResult result = VK_SUCCESS;
+        VkCommandPoolCreateInfo commandPoolInfo = {};
+        commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        commandPoolInfo.queueFamilyIndex = 0;
+        commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        result = vkCreateCommandPool(device->device, &commandPoolInfo, nullptr, &commandPool);
+        if(result != VK_SUCCESS)
+          throw StringError("could not create dummy command pool: " + vk_helper::vkErrorToString(result));
+
+        VkCommandBufferAllocateInfo commandBufferInfo = {};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        commandBufferInfo.commandPool = commandPool;
+        commandBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        commandBufferInfo.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(device->device, &commandBufferInfo, &commandBuffer);
+        if(result != VK_SUCCESS)
+          throw StringError("could not allocate dummy command buffer: " + vk_helper::vkErrorToString(result));
+
+        VkFenceCreateInfo fenceInfo = {};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
+        if(result != VK_SUCCESS)
+          throw StringError("could not create dummy fence: " + vk_helper::vkErrorToString(result));
+
+        const VkDescriptorPoolSize descriptorPoolSize = {
+          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5
+        };
+        descriptorPool = vk_helper::createDescriptorPool(
+          device, {descriptorPoolSize}, 2, &result
+        );
+        if(result != VK_SUCCESS)
+          throw StringError("could not create dummy descriptor pool: " + vk_helper::vkErrorToString(result));
+
+        XgemmDirectTuneParams xgemmParams;
+        AddPointWiseTuneParams pointwiseParams;
+        VulkanParams vulkanParams;
+        pipelines = make_unique<vk_shader::ComputePipelines>(device->device, nullptr);
+        result = pipelines->createXgemmStridedBatched(
+          pipelines->xgemmStridedBatchedFp32, xgemmParams, vulkanParams
+        );
+        if(result != VK_SUCCESS)
+          throw StringError("could not create dummy XGEMM pipeline: " + vk_helper::vkErrorToString(result));
+        result = pipelines->createAddPointWise(
+          pipelines->addPointWise, pointwiseParams, vulkanParams
+        );
+        if(result != VK_SUCCESS)
+          throw StringError("could not create dummy addPointWise pipeline: " + vk_helper::vkErrorToString(result));
+
+        Rand dataRand("dummyThreadData");
+        const auto makeRandomVector = [&](size_t size, double scale) {
+          vector<float> values(size);
+          for(float& value: values)
+            value = static_cast<float>(dataRand.nextDouble(-1.0, 1.0) * scale);
+          return values;
+        };
+        const auto makeZeroVector = [&](size_t size) {
+          return vector<float>(size, 0.0f);
+        };
+        matrixA = vk_helper::createReadOnlyBuffer(
+          device, makeRandomVector(static_cast<size_t>(kSize) * kSize, 1.2 / kSize), false, &result
+        );
+        if(result != VK_SUCCESS || matrixA == nullptr)
+          throw StringError("could not create dummy matrix A: " + vk_helper::vkErrorToString(result));
+        matrixB = vk_helper::createReadOnlyBuffer(
+          device, makeRandomVector(static_cast<size_t>(kSize) * kSize, 1.2 / kSize), false, &result
+        );
+        if(result != VK_SUCCESS || matrixB == nullptr)
+          throw StringError("could not create dummy matrix B: " + vk_helper::vkErrorToString(result));
+        matrixC = vk_helper::createReadOnlyBuffer(
+          device, makeRandomVector(outputElements, 1.0), false, &result
+        );
+        if(result != VK_SUCCESS || matrixC == nullptr)
+          throw StringError("could not create dummy matrix C: " + vk_helper::vkErrorToString(result));
+        matrixD = vk_helper::createReadOnlyBuffer(
+          device, makeRandomVector(outputElements, 1.0), false, &result
+        );
+        if(result != VK_SUCCESS || matrixD == nullptr)
+          throw StringError("could not create dummy matrix D: " + vk_helper::vkErrorToString(result));
+        buffer = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result);
+        if(result != VK_SUCCESS || buffer == nullptr)
+          throw StringError("could not create dummy buffer: " + vk_helper::vkErrorToString(result));
+        buffer2 = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result);
+        if(result != VK_SUCCESS || buffer2 == nullptr)
+          throw StringError("could not create second dummy buffer: " + vk_helper::vkErrorToString(result));
+        readbackBuffer = vk_helper::createReadbackBuffer(
+          device, outputElements * sizeof(float), &result
+        );
+        if(result != VK_SUCCESS || readbackBuffer == nullptr)
+          throw StringError("could not create dummy readback buffer: " + vk_helper::vkErrorToString(result));
+
+        VkDescriptorSet xgemmDescriptorSet = VK_NULL_HANDLE;
+        VkDescriptorSet pointwiseDescriptorSet = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo descriptorSetInfo = {};
+        descriptorSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        descriptorSetInfo.descriptorPool = descriptorPool;
+        descriptorSetInfo.descriptorSetCount = 1;
+        descriptorSetInfo.pSetLayouts = &pipelines->xgemmStridedBatchedFp32.descriptorSetLayout;
+        result = vkAllocateDescriptorSets(device->device, &descriptorSetInfo, &xgemmDescriptorSet);
+        if(result != VK_SUCCESS)
+          throw StringError("could not allocate dummy XGEMM descriptor set: " + vk_helper::vkErrorToString(result));
+        descriptorSetInfo.pSetLayouts = &pipelines->addPointWise.descriptorSetLayout;
+        result = vkAllocateDescriptorSets(device->device, &descriptorSetInfo, &pointwiseDescriptorSet);
+        if(result != VK_SUCCESS)
+          throw StringError("could not allocate dummy pointwise descriptor set: " + vk_helper::vkErrorToString(result));
+
+        const auto updateXgemmDescriptors = [&](VulkanBuffer* input, VulkanBuffer* other, VulkanBuffer* output) {
+          return vk_helper::updateDescriptorSets(device, {
+            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 0, input),
+            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 1, other),
+            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 2, output)
+          });
+        };
+        const auto updatePointwiseDescriptors = [&](VulkanBuffer* input, VulkanBuffer* other) {
+          return vk_helper::updateDescriptorSets(device, {
+            vk_helper::writeDescriptorSetBuffer(pointwiseDescriptorSet, 0, input),
+            vk_helper::writeDescriptorSetBuffer(pointwiseDescriptorSet, 1, other)
+          });
+        };
+        const auto addReadWriteBarrier = [&](VulkanBuffer* target, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
+          vk_helper::barrierCommandBufferForBuffer(
+            commandBuffer, target,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            dstStage, dstAccess
+          );
+        };
+
+        signalInitializedOrDead();
+        Rand rand("dummyThreadLoop");
+        vector<float> output(outputElements, 0.0f);
+        double total = 0.0;
+        bool first = true;
+        while(!shouldStop.load()) {
+          int which = rand.nextInt(0, 6);
+          if(first) {
+            which = 4;
+            first = false;
+          }
+
+          result = vkResetCommandBuffer(commandBuffer, 0);
+          if(result != VK_SUCCESS) {
+            reportFailure("could not reset dummy command buffer: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+          result = vk_helper::beginCommandBuffer(commandBuffer);
+          if(result != VK_SUCCESS) {
+            reportFailure("could not begin dummy command buffer: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+
+          if(which <= 3) {
+            VulkanBuffer* other = (which == 0 || which == 1) ? matrixA : matrixB;
+            result = updateXgemmDescriptors(buffer, other, buffer2);
+            if(result != VK_SUCCESS) {
+              reportFailure("could not update dummy XGEMM descriptors: " + vk_helper::vkErrorToString(result));
+              break;
+            }
+            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            addReadWriteBarrier(other, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            addReadWriteBarrier(buffer2, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+            vkCmdBindPipeline(
+              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+              pipelines->xgemmStridedBatchedFp32.pipeline
+            );
+            vkCmdBindDescriptorSets(
+              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+              pipelines->xgemmStridedBatchedFp32.layout, 0, 1, &xgemmDescriptorSet, 0, nullptr
+            );
+            const vk_shader::push::XgemmStridedBatchedFp32Params params = {
+              static_cast<uint32_t>(mSize), static_cast<uint32_t>(kSize), static_cast<uint32_t>(kSize),
+              static_cast<uint32_t>(mSize), 0,
+              static_cast<uint32_t>(kSize), 0,
+              static_cast<uint32_t>(mSize), 0, 0
+            };
+            vkCmdPushConstants(
+              commandBuffer, pipelines->xgemmStridedBatchedFp32.layout,
+              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params
+            );
+            vkCmdDispatch(
+              commandBuffer,
+              (mSize + xgemmParams.WGD - 1) / xgemmParams.WGD,
+              (kSize + xgemmParams.WGD - 1) / xgemmParams.WGD,
+              batchSize
+            );
+          }
+          else if(which == 4 || which == 5) {
+            VulkanBuffer* other = which == 4 ? matrixC : matrixD;
+            result = updatePointwiseDescriptors(buffer, other);
+            if(result != VK_SUCCESS) {
+              reportFailure("could not update dummy pointwise descriptors: " + vk_helper::vkErrorToString(result));
+              break;
+            }
+            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            addReadWriteBarrier(other, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            vkCmdBindPipeline(
+              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWise.pipeline
+            );
+            vkCmdBindDescriptorSets(
+              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+              pipelines->addPointWise.layout, 0, 1, &pointwiseDescriptorSet, 0, nullptr
+            );
+            const vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(outputElements)};
+            vkCmdPushConstants(
+              commandBuffer, pipelines->addPointWise.layout,
+              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params
+            );
+            vkCmdDispatch(
+              commandBuffer,
+              (params.size + pointwiseParams.ELTS_PER_THREAD * pipelines->addPointWise.localSizeX - 1) /
+                (pointwiseParams.ELTS_PER_THREAD * pipelines->addPointWise.localSizeX),
+              1, 1
+            );
+          }
+          else {
+            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkBufferCopy copyRegion = {};
+            copyRegion.size = outputElements * sizeof(float);
+            vkCmdCopyBuffer(commandBuffer, buffer->buffer, readbackBuffer->buffer, 1, &copyRegion);
+            vk_helper::barrierCommandBufferForBuffer(
+              commandBuffer, readbackBuffer,
+              VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+            );
+          }
+
+          result = vk_helper::endCommandBuffer(commandBuffer);
+          if(result != VK_SUCCESS) {
+            reportFailure("could not end dummy command buffer: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+          result = vkResetFences(device->device, 1, &fence);
+          if(result != VK_SUCCESS) {
+            reportFailure("could not reset dummy fence: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+          {
+            lock_guard<mutex> lock(*queueSubmitMutex);
+            result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
+          }
+          if(result != VK_SUCCESS) {
+            reportFailure("could not submit dummy command buffer: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+          result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
+          if(result != VK_SUCCESS) {
+            reportFailure("could not wait for dummy command buffer: " + vk_helper::vkErrorToString(result));
+            break;
+          }
+
+          if(which <= 3)
+            swap(buffer, buffer2);
+          else if(which > 5) {
+            result = vmaInvalidateAllocation(device->allocator, readbackBuffer->allocation, 0, VK_WHOLE_SIZE);
+            if(result != VK_SUCCESS) {
+              reportFailure("could not invalidate dummy readback buffer: " + vk_helper::vkErrorToString(result));
+              break;
+            }
+            void* mappedData = nullptr;
+            result = vmaMapMemory(device->allocator, readbackBuffer->allocation, &mappedData);
+            if(result != VK_SUCCESS) {
+              reportFailure("could not map dummy readback buffer: " + vk_helper::vkErrorToString(result));
+              break;
+            }
+            memcpy(output.data(), mappedData, output.size() * sizeof(float));
+            vmaUnmapMemory(device->allocator, readbackBuffer->allocation);
+            float subTotal = 0.0f;
+            for(float value: output)
+              subTotal += value;
+            total += static_cast<double>(subTotal);
+          }
+        }
+        if(logger != nullptr)
+          logger->write("Tuning dummy thread numeric total: " + Global::doubleToString(total));
+      }
+      catch(const exception& e) {
+        reportFailure(e.what());
+        signalInitializedOrDead();
+      }
+      catch(...) {
+        reportFailure("unknown error");
+        signalInitializedOrDead();
+      }
+    }
+
+    const VulkanDevice* device;
+    Logger* logger;
+    mutex* queueSubmitMutex;
+    thread worker;
+    atomic<bool> shouldStop{false};
+    bool initializedOrDead = false;
+    mutex stateMutex;
+    condition_variable stateCondition;
   };
 
   template<typename Tuner>
@@ -4025,7 +4406,10 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.canUseFP16Compute = hardwareParams.canUseFP16Compute;
   tunedConfig.vulkan.canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
   tunedConfig.vulkan.canUseSubgroup = hardwareParams.canUseSubgroup;
-  VulkanTimestampTimer timer(device);
+  mutex queueSubmitMutex;
+  VulkanTimestampTimer timer(device, &queueSubmitMutex);
+  VulkanDummyThread dummyThread(device, logger, &queueSubmitMutex);
+  dummyThread.start();
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer};
   if(logger != nullptr) {
     logger->write(
@@ -4061,6 +4445,7 @@ void VulkanTuner::tune(
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
+  dummyThread.stopAndJoin();
   timer.resetRootResources();
   if(logger != nullptr) {
     const double hostSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
