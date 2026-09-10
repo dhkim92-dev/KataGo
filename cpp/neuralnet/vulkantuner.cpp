@@ -1155,70 +1155,11 @@ namespace {
 
   class VulkanTimestampTimer {
    public:
-    explicit VulkanTimestampTimer(const VulkanDevice* device, mutex* queueSubmitMutex)
-    : device(device), queueSubmitMutex(queueSubmitMutex), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
-
-    ~VulkanTimestampTimer() {
-      vkDeviceWaitIdle(device->device);
-      if(resources.commandBuffer != VK_NULL_HANDLE)
-        vkFreeCommandBuffers(device->device, device->commandPool, 1, &resources.commandBuffer);
-      if(resources.fence != VK_NULL_HANDLE)
-        vkDestroyFence(device->device, resources.fence, nullptr);
-      if(resources.queryPool != VK_NULL_HANDLE)
-        vkDestroyQueryPool(device->device, resources.queryPool, nullptr);
-      if(resources.descriptorPool != VK_NULL_HANDLE)
-        vkDestroyDescriptorPool(device->device, resources.descriptorPool, nullptr);
-      for(VulkanBuffer* buffer: resources.tuningBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.uploadStagingBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      if(resources.pointwiseAccumulatorInitialBuffer != nullptr)
-        vk_helper::releaseVulkanBuffer(device, resources.pointwiseAccumulatorInitialBuffer);
-      if(resources.attentionReadbackBuffer != nullptr)
-        vk_helper::releaseVulkanBuffer(device, resources.attentionReadbackBuffer);
-      for(VulkanBuffer* buffer: resources.pointwiseValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.winogradOutputValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.winogradInputValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.gpoolValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.attentionValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.gemmValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-      for(VulkanBuffer* buffer: resources.spatialValidationBuffers)
-        if(buffer != nullptr)
-          vk_helper::releaseVulkanBuffer(device, buffer);
-    }
+    explicit VulkanTimestampTimer(const VulkanDevice* device)
+    : device(device), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
 
     bool isUsable() const {
       return device->info.properties.limits.timestampComputeAndGraphics == VK_TRUE && timestampPeriod > 0.0f;
-    }
-
-    void resetRootResources() {
-      vkDeviceWaitIdle(device->device);
-      if(resources.commandBuffer != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(device->device, device->commandPool, 1, &resources.commandBuffer);
-        resources.commandBuffer = VK_NULL_HANDLE;
-      }
-      if(resources.descriptorPool != VK_NULL_HANDLE)
-        vkResetDescriptorPool(device->device, resources.descriptorPool, 0);
-      if(resources.fence != VK_NULL_HANDLE)
-        vkResetFences(device->device, 1, &resources.fence);
-      if(device->commandPool != VK_NULL_HANDLE)
-        vkResetCommandPool(device->device, device->commandPool, 0);
-      fill(resources.tuningBufferInitialized.begin(), resources.tuningBufferInitialized.end(), false);
-      resources.pointwiseAccumulatorInitialized = false;
     }
 
     bool measure(
@@ -1250,6 +1191,10 @@ namespace {
         return false;
       }
 
+      ReusableResources resources(device);
+      activeResources = &resources;
+      const auto activeResourcesGuard = makeScopeGuard([&]() { activeResources = nullptr; });
+
       VkResult result = VK_SUCCESS;
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
@@ -1273,9 +1218,6 @@ namespace {
       const size_t xySize = usePaddedNCHWXY || usePaddedGpoolXY
         ? vk_helper::roundUpToMultiple(logicalXYSize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP)))
         : logicalXYSize;
-      // Each measure regenerates its inputs; reusable buffers must not retain a
-      // previous tuner's data or layout.
-      fill(resources.tuningBufferInitialized.begin(), resources.tuningBufferInitialized.end(), false);
       const bool addChannelBiasesUsingFP16Storage =
         config.vulkan.canUseFP16Storage &&
         config.vulkan.canUseFP16Compute &&
@@ -1468,8 +1410,9 @@ namespace {
         VulkanBuffer*& stagingBuffer = resources.uploadStagingBuffers[stagingBufferIndex++];
         if(!ensureStagingBuffer(stagingBuffer, size, result, error, description))
           return false;
+        memset(stagingBuffer->allocationInfo.pMappedData, 0, static_cast<size_t>(stagingBuffer->requestedSize));
         memcpy(stagingBuffer->allocationInfo.pMappedData, data, static_cast<size_t>(size));
-        result = vmaFlushAllocation(device->allocator, stagingBuffer->allocation, 0, size);
+        result = vmaFlushAllocation(device->allocator, stagingBuffer->allocation, 0, stagingBuffer->requestedSize);
         if(result != VK_SUCCESS) {
           error = "could not prepare " + description + ": " + vk_helper::vkErrorToString(result);
           return false;
@@ -1642,46 +1585,21 @@ namespace {
           }
           if(tuningBufferIndex == tuningBuffers.size())
             tuningBuffers.push_back(nullptr);
-          if(tuningBufferIndex == resources.tuningBufferInitialized.size())
-            resources.tuningBufferInitialized.push_back(false);
-          const bool bufferNeedsAllocation =
-            tuningBuffers[tuningBufferIndex] == nullptr ||
-            tuningBuffers[tuningBufferIndex]->requestedSize < scratchBytes;
-          if(bufferNeedsAllocation)
-            resources.tuningBufferInitialized[tuningBufferIndex] = false;
           if(!ensureBuffer(tuningBuffers[tuningBufferIndex], scratchBytes, result, error, "tuning buffer"))
             return false;
           VulkanBuffer* buffer = tuningBuffers[tuningBufferIndex++];
-          const bool inPlaceOutput =
-            pipeline->name.find("add_pointwise") == 0 ||
-            pipeline->name.find("add_channel_bias_nchw") == 0;
-          const bool outputBindingNeedsReset = binding == outputBinding(pipeline);
-          const bool attentionOutput = plan.kernelName == "transformerAttention" && outputBindingNeedsReset;
-          const size_t initializedIndex = tuningBufferIndex - 1;
-          if(!attentionOutput && (isGemm || inPlaceOutput || outputBindingNeedsReset || !resources.tuningBufferInitialized[initializedIndex])) {
-            if(!queueUpload(initialData, initialBytes, buffer, "tuning buffer"))
-              return false;
-            resources.tuningBufferInitialized[initializedIndex] = true;
-          }
-          else if(attentionOutput)
-            resources.tuningBufferInitialized[initializedIndex] = true;
+          if(!queueUpload(initialData, initialBytes, buffer, "tuning buffer"))
+            return false;
 
           // In-place add pipelines write binding 0. Keep an immutable copy of
           // their initialized input so every measured invocation has the same
           // input, as in the OpenCL tuner.
           if((pipeline->name.find("add_pointwise") == 0 ||
               pipeline->name.find("add_channel_bias_nchw") == 0) && binding == 0) {
-            if(pointwiseAccumulatorInitialBuffer == nullptr ||
-               pointwiseAccumulatorInitialBuffer->requestedSize < scratchBytes)
-              resources.pointwiseAccumulatorInitialized = false;
             if(!ensureBuffer(pointwiseAccumulatorInitialBuffer, scratchBytes, result, error, "pointwise reset buffer"))
               return false;
-            if(pipeline->name.find("add_channel_bias_nchw") == 0 ||
-               !resources.pointwiseAccumulatorInitialized) {
-              if(!queueUpload(initialData, initialBytes, pointwiseAccumulatorInitialBuffer, "pointwise reset buffer"))
-                return false;
-              resources.pointwiseAccumulatorInitialized = true;
-            }
+            if(!queueUpload(initialData, initialBytes, pointwiseAccumulatorInitialBuffer, "pointwise reset buffer"))
+              return false;
             pointwiseAccumulatorBytes = initialBytes;
           }
         }
@@ -2263,6 +2181,32 @@ namespace {
         cleanup();
         return false;
       }
+      const auto zeroBuffer = [&](VulkanBuffer* buffer) {
+        vkCmdFillBuffer(commandBuffer, buffer->buffer, 0, VK_WHOLE_SIZE, 0);
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, buffer,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT
+        );
+      };
+      for(VulkanBuffer* buffer: tuningBuffers)
+        zeroBuffer(buffer);
+      if(pointwiseAccumulatorInitialBuffer != nullptr)
+        zeroBuffer(pointwiseAccumulatorInitialBuffer);
+      for(VulkanBuffer* buffer: pointwiseValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: winogradInputValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: winogradOutputValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: gpoolValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: attentionValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: gemmValidationBuffers)
+        zeroBuffer(buffer);
+      for(VulkanBuffer* buffer: spatialValidationBuffers)
+        zeroBuffer(buffer);
       for(const PendingUpload& upload: pendingUploads) {
         VkBufferCopy copyRegion = {};
         copyRegion.size = upload.size;
@@ -2560,7 +2504,6 @@ namespace {
         cleanup();
         return false;
       }
-      lock_guard<mutex> lock(*queueSubmitMutex);
       result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
       if(result != VK_SUCCESS) {
         error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result);
@@ -2917,11 +2860,43 @@ namespace {
 
    private:
     struct ReusableResources {
+      explicit ReusableResources(const VulkanDevice* device): device(device) {}
+
+      ~ReusableResources() {
+        if(commandBuffer != VK_NULL_HANDLE)
+          vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
+        if(fence != VK_NULL_HANDLE)
+          vkDestroyFence(device->device, fence, nullptr);
+        if(queryPool != VK_NULL_HANDLE)
+          vkDestroyQueryPool(device->device, queryPool, nullptr);
+        if(descriptorPool != VK_NULL_HANDLE)
+          vkDestroyDescriptorPool(device->device, descriptorPool, nullptr);
+        for(VulkanBuffer* buffer: tuningBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: uploadStagingBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        vk_helper::releaseVulkanBuffer(device, pointwiseAccumulatorInitialBuffer);
+        vk_helper::releaseVulkanBuffer(device, attentionReadbackBuffer);
+        for(VulkanBuffer* buffer: pointwiseValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: winogradOutputValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: winogradInputValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: gpoolValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: attentionValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: gemmValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+        for(VulkanBuffer* buffer: spatialValidationBuffers)
+          vk_helper::releaseVulkanBuffer(device, buffer);
+      }
+
+      const VulkanDevice* device;
       vector<VulkanBuffer*> tuningBuffers;
-      vector<bool> tuningBufferInitialized;
       vector<VulkanBuffer*> uploadStagingBuffers;
       VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
-      bool pointwiseAccumulatorInitialized = false;
       VulkanBuffer* attentionReadbackBuffer = nullptr;
       vector<VulkanBuffer*> pointwiseValidationBuffers;
       vector<VulkanBuffer*> winogradInputValidationBuffers;
@@ -2937,7 +2912,9 @@ namespace {
       uint32_t queryCount = 0;
       VkFence fence = VK_NULL_HANDLE;
       VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    } resources;
+    };
+
+    ReusableResources* activeResources = nullptr;
 
     bool ensureBuffer(
       VulkanBuffer*& buffer,
@@ -3029,55 +3006,60 @@ namespace {
     ) {
       const VkDeviceSize stride = vk_helper::roundUpToMultiple(copyBytes, VkDeviceSize(4));
       const VkDeviceSize totalBytes = stride * validationBuffers.size();
-      if(!ensureReadbackBuffer(resources.attentionReadbackBuffer, totalBytes, result, error, "attention readback buffer"))
+      if(!ensureReadbackBuffer(activeResources->attentionReadbackBuffer, totalBytes, result, error, "attention readback buffer"))
         return false;
 
-      result = vkResetCommandBuffer(resources.commandBuffer, 0);
+      result = vkResetCommandBuffer(activeResources->commandBuffer, 0);
       if(result != VK_SUCCESS) {
         error = "could not reset attention readback command buffer: " + vk_helper::vkErrorToString(result);
         return false;
       }
-      result = vk_helper::beginCommandBuffer(resources.commandBuffer);
+      result = vk_helper::beginCommandBuffer(activeResources->commandBuffer);
       if(result != VK_SUCCESS) {
         error = "could not begin attention readback command buffer: " + vk_helper::vkErrorToString(result);
         return false;
       }
+      vkCmdFillBuffer(activeResources->commandBuffer, activeResources->attentionReadbackBuffer->buffer, 0, VK_WHOLE_SIZE, 0);
+      vk_helper::barrierCommandBufferForBuffer(
+        activeResources->commandBuffer, activeResources->attentionReadbackBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT
+      );
       for(size_t i = 0; i < validationBuffers.size(); i++) {
         VkBufferCopy copyRegion = {};
         copyRegion.size = copyBytes;
         copyRegion.dstOffset = stride * i;
         vkCmdCopyBuffer(
-          resources.commandBuffer,
+          activeResources->commandBuffer,
           validationBuffers[i]->buffer,
-          resources.attentionReadbackBuffer->buffer,
+          activeResources->attentionReadbackBuffer->buffer,
           1,
           &copyRegion
         );
       }
-      result = vk_helper::endCommandBuffer(resources.commandBuffer);
+      result = vk_helper::endCommandBuffer(activeResources->commandBuffer);
       if(result != VK_SUCCESS) {
         error = "could not end attention readback command buffer: " + vk_helper::vkErrorToString(result);
         return false;
       }
-      result = vkResetFences(device->device, 1, &resources.fence);
+      result = vkResetFences(device->device, 1, &activeResources->fence);
       if(result != VK_SUCCESS) {
         error = "could not reset attention readback fence: " + vk_helper::vkErrorToString(result);
         return false;
       }
-      lock_guard<mutex> lock(*queueSubmitMutex);
-      result = vk_helper::submitCommandBuffers(device, {resources.commandBuffer}, resources.fence);
+      result = vk_helper::submitCommandBuffers(device, {activeResources->commandBuffer}, activeResources->fence);
       if(result != VK_SUCCESS) {
         error = "could not submit attention readback command buffer: " + vk_helper::vkErrorToString(result);
         return false;
       }
-      result = vkWaitForFences(device->device, 1, &resources.fence, VK_TRUE, UINT64_MAX);
+      result = vkWaitForFences(device->device, 1, &activeResources->fence, VK_TRUE, UINT64_MAX);
       if(result != VK_SUCCESS) {
         error = "could not wait for attention readback: " + vk_helper::vkErrorToString(result);
         return false;
       }
 
       void* mappedData = nullptr;
-      result = vmaMapMemory(device->allocator, resources.attentionReadbackBuffer->allocation, &mappedData);
+      result = vmaMapMemory(device->allocator, activeResources->attentionReadbackBuffer->allocation, &mappedData);
       if(result != VK_SUCCESS) {
         error = "could not map attention readback buffer: " + vk_helper::vkErrorToString(result);
         return false;
@@ -3097,7 +3079,7 @@ namespace {
           readback.insert(readback.end(), floats, floats + outputElements);
         }
       }
-      vmaUnmapMemory(device->allocator, resources.attentionReadbackBuffer->allocation);
+      vmaUnmapMemory(device->allocator, activeResources->attentionReadbackBuffer->allocation);
       return true;
     }
 
@@ -3107,9 +3089,9 @@ namespace {
       VkResult& result,
       string& error
     ) {
-      if(resources.descriptorPool == VK_NULL_HANDLE || resources.descriptorCount < descriptorCount || resources.maxSets < maxSets) {
-        if(resources.descriptorPool != VK_NULL_HANDLE)
-          vkDestroyDescriptorPool(device->device, resources.descriptorPool, nullptr);
+      if(activeResources->descriptorPool == VK_NULL_HANDLE || activeResources->descriptorCount < descriptorCount || activeResources->maxSets < maxSets) {
+        if(activeResources->descriptorPool != VK_NULL_HANDLE)
+          vkDestroyDescriptorPool(device->device, activeResources->descriptorPool, nullptr);
         VkDescriptorPoolSize poolSize = {};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         poolSize.descriptorCount = descriptorCount;
@@ -3118,17 +3100,17 @@ namespace {
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
         poolInfo.maxSets = maxSets;
-        result = vkCreateDescriptorPool(device->device, &poolInfo, nullptr, &resources.descriptorPool);
+        result = vkCreateDescriptorPool(device->device, &poolInfo, nullptr, &activeResources->descriptorPool);
         if(result != VK_SUCCESS) {
           error = "could not create tuning descriptor pool: " + vk_helper::vkErrorToString(result);
-          resources.descriptorPool = VK_NULL_HANDLE;
+          activeResources->descriptorPool = VK_NULL_HANDLE;
           return false;
         }
-        resources.descriptorCount = descriptorCount;
-        resources.maxSets = maxSets;
+        activeResources->descriptorCount = descriptorCount;
+        activeResources->maxSets = maxSets;
         return true;
       }
-      result = vkResetDescriptorPool(device->device, resources.descriptorPool, 0);
+      result = vkResetDescriptorPool(device->device, activeResources->descriptorPool, 0);
       if(result != VK_SUCCESS) {
         error = "could not reset tuning descriptor pool: " + vk_helper::vkErrorToString(result);
         return false;
@@ -3141,44 +3123,44 @@ namespace {
       VkResult& result,
       string& error
     ) {
-      if(resources.queryPool != VK_NULL_HANDLE && resources.queryCount >= queryCount)
+      if(activeResources->queryPool != VK_NULL_HANDLE && activeResources->queryCount >= queryCount)
         return true;
-      if(resources.queryPool != VK_NULL_HANDLE)
-        vkDestroyQueryPool(device->device, resources.queryPool, nullptr);
+      if(activeResources->queryPool != VK_NULL_HANDLE)
+        vkDestroyQueryPool(device->device, activeResources->queryPool, nullptr);
       VkQueryPoolCreateInfo queryPoolInfo = {};
       queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
       queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
       queryPoolInfo.queryCount = queryCount;
-      result = vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &resources.queryPool);
+      result = vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &activeResources->queryPool);
       if(result != VK_SUCCESS) {
         error = "could not create tuning query pool: " + vk_helper::vkErrorToString(result);
-        resources.queryPool = VK_NULL_HANDLE;
-        resources.queryCount = 0;
+        activeResources->queryPool = VK_NULL_HANDLE;
+        activeResources->queryCount = 0;
         return false;
       }
-      resources.queryCount = queryCount;
+      activeResources->queryCount = queryCount;
       return true;
     }
 
     bool ensureCommandResources(VkResult& result, string& error) {
-      if(resources.fence == VK_NULL_HANDLE) {
+      if(activeResources->fence == VK_NULL_HANDLE) {
         VkFenceCreateInfo fenceInfo = {};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        result = vkCreateFence(device->device, &fenceInfo, nullptr, &resources.fence);
+        result = vkCreateFence(device->device, &fenceInfo, nullptr, &activeResources->fence);
         if(result != VK_SUCCESS) {
           error = "could not create tuning fence: " + vk_helper::vkErrorToString(result);
           return false;
         }
       }
-      if(resources.commandBuffer == VK_NULL_HANDLE) {
-        resources.commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
+      if(activeResources->commandBuffer == VK_NULL_HANDLE) {
+        activeResources->commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
         if(result != VK_SUCCESS) {
           error = "could not allocate tuning command buffer: " + vk_helper::vkErrorToString(result);
-          resources.commandBuffer = VK_NULL_HANDLE;
+          activeResources->commandBuffer = VK_NULL_HANDLE;
           return false;
         }
       }
-      result = vkResetCommandBuffer(resources.commandBuffer, 0);
+      result = vkResetCommandBuffer(activeResources->commandBuffer, 0);
       if(result != VK_SUCCESS) {
         error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
         return false;
@@ -3187,14 +3169,13 @@ namespace {
     }
 
     const VulkanDevice* device;
-    mutex* queueSubmitMutex;
     float timestampPeriod;
   };
 
   class VulkanDummyThread {
    public:
-    VulkanDummyThread(const VulkanDevice* device, Logger* logger, mutex* queueSubmitMutex)
-    : device(device), logger(logger), queueSubmitMutex(queueSubmitMutex) {}
+    VulkanDummyThread(const VulkanDevice* device, Logger* logger)
+    : device(device), logger(logger) {}
 
     ~VulkanDummyThread() {
       stopAndJoin();
@@ -3232,6 +3213,12 @@ namespace {
     void run() {
       if(logger != nullptr)
         logger->write("Dummy tuning thread starting");
+
+      if(device->dummyQueue == VK_NULL_HANDLE) {
+        reportFailure("no dedicated Vulkan queue is available");
+        signalInitializedOrDead();
+        return;
+      }
 
       VkCommandPool commandPool = VK_NULL_HANDLE;
       VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -3506,10 +3493,11 @@ namespace {
             reportFailure("could not reset dummy fence: " + vk_helper::vkErrorToString(result));
             break;
           }
-          {
-            lock_guard<mutex> lock(*queueSubmitMutex);
-            result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
-          }
+          VkSubmitInfo submitInfo = {};
+          submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+          submitInfo.commandBufferCount = 1;
+          submitInfo.pCommandBuffers = &commandBuffer;
+          result = vkQueueSubmit(device->dummyQueue, 1, &submitInfo, fence);
           if(result != VK_SUCCESS) {
             reportFailure("could not submit dummy command buffer: " + vk_helper::vkErrorToString(result));
             break;
@@ -3557,7 +3545,6 @@ namespace {
 
     const VulkanDevice* device;
     Logger* logger;
-    mutex* queueSubmitMutex;
     thread worker;
     atomic<bool> shouldStop{false};
     bool initializedOrDead = false;
@@ -4527,9 +4514,8 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.canUseFP16Compute = hardwareParams.canUseFP16Compute;
   tunedConfig.vulkan.canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
   tunedConfig.vulkan.canUseSubgroup = hardwareParams.canUseSubgroup;
-  mutex queueSubmitMutex;
-  VulkanTimestampTimer timer(device, &queueSubmitMutex);
-  VulkanDummyThread dummyThread(device, logger, &queueSubmitMutex);
+  VulkanTimestampTimer timer(device);
+  VulkanDummyThread dummyThread(device, logger);
   dummyThread.start();
   TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer, printOnlyOnImprovement};
   if(logger != nullptr) {
@@ -4577,7 +4563,6 @@ void VulkanTuner::tune(
     );
   }
   dummyThread.stopAndJoin();
-  timer.resetRootResources();
   if(logger != nullptr) {
     const double hostSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
     logger->write("Vulkan tuning total host time: " + Global::doubleToString(hostSeconds) + " sec");

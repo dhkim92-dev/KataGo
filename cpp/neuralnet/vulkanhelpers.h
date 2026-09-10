@@ -42,6 +42,7 @@ struct VulkanDevice {
   VulkanDeviceInfo info;
   VkDevice device;
   VkQueue queue;
+  VkQueue dummyQueue = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool;
   VkCommandPool commandPool;
   VmaAllocator allocator;

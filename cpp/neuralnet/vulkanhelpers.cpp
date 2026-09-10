@@ -471,12 +471,19 @@ VulkanDevice* vk_helper::createVulkanDevice(
     }
   }
 
-  float queuePriority = 1.0f;
+  const float queuePriorities[2] = {1.0f, 1.0f};
+  uint32_t queueFamilyPropertyCount = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyPropertyCount, nullptr);
+  std::vector<VkQueueFamilyProperties> queueFamilyProperties(queueFamilyPropertyCount);
+  vkGetPhysicalDeviceQueueFamilyProperties(
+    physicalDevice, &queueFamilyPropertyCount, queueFamilyProperties.data()
+  );
+  const uint32_t queueCount = !queueFamilyProperties.empty() && queueFamilyProperties[0].queueCount >= 2 ? 2 : 1;
   VkDeviceQueueCreateInfo queueCI = {};
   queueCI.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
   queueCI.queueFamilyIndex = 0; // TODO: select proper queue family index, this code assumes index 0 supports compute
-  queueCI.queueCount = 1;
-  queueCI.pQueuePriorities = &queuePriority;
+  queueCI.queueCount = queueCount;
+  queueCI.pQueuePriorities = queuePriorities;
 
   VkPhysicalDeviceFeatures2 requestedFeatures = {};
   requestedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -557,6 +564,8 @@ VulkanDevice* vk_helper::createVulkanDevice(
   vulkanDevice->info = deviceInfo;
   vulkanDevice->device = device;
   vulkanDevice->queue = queue;
+  if(queueCount >= 2)
+    vkGetDeviceQueue(device, queueCI.queueFamilyIndex, 1, &vulkanDevice->dummyQueue);
 
   VmaAllocator allocator = VK_NULL_HANDLE;
 
