@@ -23,7 +23,6 @@ namespace VulkanTuner {
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);
   bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
-  bool shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, double fp16ErrorProp);
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
 
   struct ModelInfoForTuning {

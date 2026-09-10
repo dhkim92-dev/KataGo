@@ -29,7 +29,6 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 struct ComputeContext;
-static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* loadedModel);
 using namespace vk_shader::push;
 
 static int checkedTotalElts(int64_t a, int64_t b, int64_t c, const char* whatKernel) {
@@ -196,7 +195,6 @@ struct ComputeContext {
   VulkanContext* vulkanContext;
   std::unordered_map<uint32_t, vk_shader::ComputePipelines *> pipelinesPerDev;
   std::unordered_map<uint32_t, vk_shader::tune::VulkanTuneParams> tuneParamsPerDev;
-  std::unordered_map<uint32_t, std::string> tunerFilesPerDev;
   std::pair<int, int> transformerHeadDims = {0, 0};
   Logger* logger;
 
@@ -243,8 +241,7 @@ struct ComputeContext {
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
     const VulkanTuner::ModelInfoForTuning* modelInfo,
-    const ModelDesc* modelDesc,
-    const LoadedModel* loadedModel)
+    const ModelDesc* modelDesc)
   : nnXLen(nnXLen),
     nnYLen(nnYLen),
     usingFP16Mode(useFP16Mode_),
@@ -321,12 +318,11 @@ struct ComputeContext {
         );
         vk_shader::ComputePipelines* pipelines = nullptr;
         VulkanTuneParams tuneParams;
-        bool didAutoTune = false;
         try {
           if(modelInfo != nullptr) {
             tuneParams = VulkanTuner::loadOrAutoTune(
               tunerFile,homeDataDirOverride,deviceInfo.deviceName,
-              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,&didAutoTune
+              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr
             );
           }
 
@@ -349,11 +345,8 @@ struct ComputeContext {
                 ? tuneParams.vulkan.canUseFP16Compute &&
                   tuneParams.vulkan.shouldUseFP16Compute
                 : false;
-          const bool benchmarkModelPrecision =
-            didAutoTune && loadedModel != nullptr && usingFP16Mode == enabled_t::Auto &&
-            supportsFP16Storage && supportsFP16Compute;
-          tuneParams.vulkan.shouldUseFP16Storage = benchmarkModelPrecision ? false : useFP16Storage;
-          tuneParams.vulkan.shouldUseFP16Compute = benchmarkModelPrecision ? false : useFP16Compute;
+          tuneParams.vulkan.shouldUseFP16Storage = useFP16Storage;
+          tuneParams.vulkan.shouldUseFP16Compute = useFP16Compute;
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
           VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
           if(result != VK_SUCCESS)
@@ -370,13 +363,6 @@ struct ComputeContext {
         }
         this->pipelinesPerDev.emplace(gpuIdx, pipelines);
         this->tuneParamsPerDev.emplace(gpuIdx, tuneParams);
-        if(didAutoTune) {
-          std::string filename = tunerFile;
-          if(filename.empty())
-            filename = VulkanTuner::defaultDirectory(true, homeDataDirOverride) + "/" +
-              VulkanTuner::defaultFileName(deviceInfo.deviceName, nnXLen, nnYLen, *modelInfo);
-          this->tunerFilesPerDev.emplace(gpuIdx, filename);
-        }
       }
 
       vulkanContext = new VulkanContext(
@@ -384,8 +370,6 @@ struct ComputeContext {
         vulkanDevices,
         logger
       );
-      if(loadedModel != nullptr)
-        maybeSelectFP16ForModel(this, loadedModel);
   }
 
   ~ComputeContext() {
@@ -4577,8 +4561,7 @@ ComputeContext* NeuralNet::createComputeContext(
     tunerFile,
     homeDataDirOverride,
     &modelInfo,
-    &loadedModel->modelDesc,
-    loadedModel
+    &loadedModel->modelDesc
   );
 }
 
@@ -4604,7 +4587,6 @@ static ComputeContext* createComputeContextForTesting(
     logger,
     "",
     "",
-    nullptr,
     nullptr,
     nullptr
   );
@@ -5565,189 +5547,6 @@ void NeuralNet::getOutput(
   #endif
 }
 
-namespace {
-  constexpr int MODEL_PRECISION_WARMUP_CALLS = 1;
-  constexpr int MODEL_PRECISION_MEASURE_CALLS = 10;
-
-  struct ModelPrecisionMeasurement {
-    double secondsPerCall;
-    std::vector<float> outputs;
-  };
-
-  ModelPrecisionMeasurement measureModelPrecision(
-    ComputeContext* context,
-    const LoadedModel* loadedModel,
-    uint32_t gpuIdx
-  ) {
-    const int batchSize = VulkanTuner::DEFAULT_BATCH_SIZE;
-    const ModelDesc& modelDesc = loadedModel->modelDesc;
-    ComputeHandle* handle = NeuralNet::createComputeHandle(
-      context, loadedModel, context->logger, batchSize, true, false, gpuIdx, 0
-    );
-    InputBuffers* inputBuffers = nullptr;
-    try {
-      inputBuffers = NeuralNet::createInputBuffers(loadedModel, batchSize, context->nnXLen, context->nnYLen);
-      Board board(context->nnXLen, context->nnYLen);
-      BoardHistory history(
-        board, P_BLACK, Rules::getTrompTaylorish(), 0,
-        BoardHistoryModes(
-          modelDesc.preferPassAliveUnderSuicideRules,
-          modelDesc.preferExcludeTerritoryAdjacentToAtari
-        )
-      );
-      MiscNNInputParams nnInputParams;
-      SGFMetadata sgfMeta;
-      if(modelDesc.numInputMetaChannels > 0)
-        sgfMeta = SGFMetadata::makeDummyWarmupProfile();
-      const int inputsVersion = NNModelVersion::getInputsVersion(modelDesc.modelVersion);
-      std::vector<std::unique_ptr<NNResultBuf>> ownedBufs;
-      std::vector<NNResultBuf*> resultBufs;
-      std::vector<std::unique_ptr<NNOutput>> ownedOutputs;
-      std::vector<NNOutput*> outputs;
-      ownedBufs.reserve(batchSize);
-      resultBufs.reserve(batchSize);
-      ownedOutputs.reserve(batchSize);
-      outputs.reserve(batchSize);
-      for(int row = 0; row < batchSize; row++) {
-        ownedBufs.push_back(std::make_unique<NNResultBuf>());
-        NNResultBuf* input = ownedBufs.back().get();
-        input->rowSpatialBuf.resize(static_cast<size_t>(modelDesc.numInputChannels) * context->nnXLen * context->nnYLen);
-        input->rowGlobalBuf.resize(modelDesc.numInputGlobalChannels);
-        input->rowMetaBuf.resize(modelDesc.numInputMetaChannels);
-        if(inputsVersion == 3)
-          NNInputs::fillRowV3(board, history, P_BLACK, nnInputParams, context->nnXLen, context->nnYLen, false, input->rowSpatialBuf.data(), input->rowGlobalBuf.data());
-        else if(inputsVersion == 4)
-          NNInputs::fillRowV4(board, history, P_BLACK, nnInputParams, context->nnXLen, context->nnYLen, false, input->rowSpatialBuf.data(), input->rowGlobalBuf.data());
-        else if(inputsVersion == 5)
-          NNInputs::fillRowV5(board, history, P_BLACK, nnInputParams, context->nnXLen, context->nnYLen, false, input->rowSpatialBuf.data(), input->rowGlobalBuf.data());
-        else if(inputsVersion == 6)
-          NNInputs::fillRowV6(board, history, P_BLACK, nnInputParams, context->nnXLen, context->nnYLen, false, input->rowSpatialBuf.data(), input->rowGlobalBuf.data());
-        else if(inputsVersion == 7)
-          NNInputs::fillRowV7(board, history, P_BLACK, nnInputParams, context->nnXLen, context->nnYLen, false, input->rowSpatialBuf.data(), input->rowGlobalBuf.data());
-        else
-          ASSERT_UNREACHABLE;
-        if(modelDesc.numInputMetaChannels > 0)
-          SGFMetadata::fillMetadataRow(&sgfMeta, input->rowMetaBuf.data(), P_BLACK, context->nnXLen * context->nnYLen);
-        input->hasRowMeta = modelDesc.numInputMetaChannels > 0;
-        input->symmetry = 0;
-        input->policyOptimism = 0.0;
-        resultBufs.push_back(input);
-
-        ownedOutputs.push_back(std::make_unique<NNOutput>());
-        NNOutput* output = ownedOutputs.back().get();
-        output->nnXLen = context->nnXLen;
-        output->nnYLen = context->nnYLen;
-        output->whiteOwnerMap = nullptr;
-        outputs.push_back(output);
-      }
-
-      for(int i = 0; i < MODEL_PRECISION_WARMUP_CALLS; i++)
-        NeuralNet::getOutput(handle, inputBuffers, batchSize, resultBufs.data(), outputs);
-
-      const auto start = std::chrono::steady_clock::now();
-      for(int i = 0; i < MODEL_PRECISION_MEASURE_CALLS; i++)
-        NeuralNet::getOutput(handle, inputBuffers, batchSize, resultBufs.data(), outputs);
-      const double secondsPerCall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() /
-        MODEL_PRECISION_MEASURE_CALLS;
-
-      ModelPrecisionMeasurement measurement;
-      measurement.secondsPerCall = secondsPerCall;
-      const int policySize = NNPos::getPolicySize(context->nnXLen, context->nnYLen);
-      measurement.outputs.reserve(static_cast<size_t>(batchSize) * (policySize + 3));
-      for(const NNOutput* output : outputs) {
-        measurement.outputs.insert(measurement.outputs.end(), output->policyProbs, output->policyProbs + policySize);
-        measurement.outputs.push_back(output->whiteWinProb);
-        measurement.outputs.push_back(output->whiteLossProb);
-        measurement.outputs.push_back(output->whiteNoResultProb);
-      }
-      NeuralNet::freeInputBuffers(inputBuffers);
-      NeuralNet::freeComputeHandle(handle);
-      return measurement;
-    }
-    catch(...) {
-      NeuralNet::freeInputBuffers(inputBuffers);
-      NeuralNet::freeComputeHandle(handle);
-      throw;
-    }
-  }
-}
-
-static void maybeSelectFP16ForModel(ComputeContext* context, const LoadedModel* loadedModel) {
-  if(context->usingFP16Mode != enabled_t::Auto)
-    return;
-
-  for(const auto& fileEntry : context->tunerFilesPerDev) {
-    const uint32_t gpuIdx = fileEntry.first;
-    auto pipelineEntry = context->pipelinesPerDev.find(gpuIdx);
-    auto tuneParamsEntry = context->tuneParamsPerDev.find(gpuIdx);
-    if(pipelineEntry == context->pipelinesPerDev.end() || tuneParamsEntry == context->tuneParamsPerDev.end())
-      continue;
-    const VulkanTuneParams tunedParams = tuneParamsEntry->second;
-    VulkanTuneParams fp32Params = tunedParams;
-    if(!fp32Params.vulkan.canUseFP16Storage || !fp32Params.vulkan.canUseFP16Compute)
-      continue;
-    fp32Params.vulkan.shouldUseCooperativeMatrix = false;
-    fp32Params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
-    tuneParamsEntry->second = fp32Params;
-
-    vk_shader::ComputePipelines* fp32Pipelines = pipelineEntry->second;
-    vk_shader::ComputePipelines* fp16Pipelines = nullptr;
-    bool fp16PipelinesInstalled = false;
-    try {
-      const ModelPrecisionMeasurement fp32Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
-
-      VulkanTuneParams fp16Params = tunedParams;
-      fp16Params.vulkan.shouldUseFP16Storage = true;
-      fp16Params.vulkan.shouldUseFP16Compute = true;
-      const VulkanDevice* device = context->vulkanContext->findGpuExn(gpuIdx);
-      fp16Pipelines = new vk_shader::ComputePipelines(device->device, context->logger);
-      const VkResult result = fp16Pipelines->createPipelines(
-        fp16Params, context->transformerHeadDims.first, context->transformerHeadDims.second, false
-      );
-      if(result != VK_SUCCESS)
-        throw StringError("Failed to create FP16 Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
-
-      pipelineEntry->second = fp16Pipelines;
-      tuneParamsEntry->second = fp16Params;
-      fp16PipelinesInstalled = true;
-      const ModelPrecisionMeasurement fp16Measurement = measureModelPrecision(context, loadedModel, gpuIdx);
-      const double fp16ErrorProp = VulkanTuner::computeErrorProp(fp32Measurement.outputs, fp16Measurement.outputs);
-      const bool useFP16 = VulkanTuner::shouldUseFP16ForModel(
-        fp32Measurement.secondsPerCall, fp16Measurement.secondsPerCall, fp16ErrorProp
-      );
-
-      if(context->logger != nullptr) {
-        context->logger->write(
-          "Vulkan full-model FP16 comparison: fp32_seconds_per_call=" +
-          Global::strprintf("%.6g", fp32Measurement.secondsPerCall) +
-          ", fp16_seconds_per_call=" + Global::strprintf("%.6g", fp16Measurement.secondsPerCall) +
-          ", error_prop=" + Global::strprintf("%.6g", fp16ErrorProp) +
-          ", selected=" + (useFP16 ? "fp16" : "fp32")
-        );
-      }
-
-      VulkanTuneParams::save(fileEntry.second, useFP16 ? fp16Params : fp32Params);
-      if(useFP16)
-        delete fp32Pipelines;
-      else {
-        pipelineEntry->second = fp32Pipelines;
-        tuneParamsEntry->second = fp32Params;
-        delete fp16Pipelines;
-      }
-      fp16Pipelines = nullptr;
-      fp16PipelinesInstalled = false;
-    }
-    catch(const std::exception& e) {
-      if(fp16PipelinesInstalled) {
-        pipelineEntry->second = fp32Pipelines;
-        tuneParamsEntry->second = fp32Params;
-      }
-      delete fp16Pipelines;
-      if(context->logger != nullptr)
-        context->logger->write("Vulkan full-model FP16 comparison failed; keeping FP32: " + std::string(e.what()));
-    }
-  }
-}
 
 
 bool NeuralNet::testEvaluateConv(

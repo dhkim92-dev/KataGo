@@ -65,11 +65,6 @@ bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSec
          callsPerSecond >= baselineCallsPerSecond * requiredRatio;
 }
 
-bool VulkanTuner::shouldUseFP16ForModel(double fp32Seconds, double fp16Seconds, double fp16ErrorProp) {
-  return isfinite(fp32Seconds) && isfinite(fp16Seconds) && isfinite(fp16ErrorProp) &&
-    fp32Seconds > 0.0 && fp16Seconds > 0.0 && fp16ErrorProp < 1.0 && fp16Seconds < fp32Seconds;
-}
-
 namespace {
   bool supportsFP16CooperativeMatrix(const VulkanDeviceInfo& deviceInfo) {
     if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
@@ -4246,12 +4241,16 @@ namespace {
   ) {
     if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute) {
       if(context.logger != nullptr)
-        context.logger->write("Skipping Vulkan xgemm16 tuning: FP16 storage or compute is unavailable");
+        context.logger->write(
+          "Skipping Vulkan xgemm16 tuning: FP16 storage or compute is unavailable, selected=false"
+        );
       return false;
     }
     if(!isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0) {
       if(context.logger != nullptr)
-        context.logger->write("Skipping Vulkan xgemm16 tuning: FP32 xgemm tuning failed");
+        context.logger->write(
+          "Skipping Vulkan xgemm16 tuning: FP32 xgemm tuning failed, selected=false"
+        );
       return false;
     }
 
@@ -4262,7 +4261,9 @@ namespace {
     if(!isfinite(fp16CallsPerSecond) || fp16CallsPerSecond <= 0.0) {
       config.xgemm16 = config.xgemm;
       if(context.logger != nullptr)
-        context.logger->write("Vulkan xgemm16 tuning failed, retaining xgemm parameters");
+        context.logger->write(
+          "Vulkan xgemm16 tuning failed, retaining xgemm parameters, selected=false"
+        );
       return false;
     }
 
@@ -4274,7 +4275,8 @@ namespace {
       context.logger->write(
         "Vulkan xgemm16 comparison: fp32=" + Global::strprintf("%.6g", fp32CallsPerSecond) +
         " calls/s, p16s16=" + Global::strprintf("%.6g", fp16CallsPerSecond) +
-        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO)
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (computeIsFastEnough ? "true" : "false")
       );
     }
     if(!computeIsFastEnough)
@@ -4293,8 +4295,13 @@ namespace {
     double fp32CallsPerSecond
   ) {
     if(!config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute ||
-       !isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0)
+       !isfinite(fp32CallsPerSecond) || fp32CallsPerSecond <= 0.0) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Skipping Vulkan xgemm storage tuning: FP16 capability or FP32 xgemm baseline unavailable, selected=false"
+        );
       return false;
+    }
 
     VulkanTuneParams tunedConfig = config;
     tunedConfig.vulkan.shouldUseFP16Storage = true;
@@ -4328,8 +4335,14 @@ namespace {
     bool canUseNCHW
   ) {
     if(!canUseHgemmCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
-       !config.vulkan.canUseFP16Compute)
+       !config.vulkan.canUseFP16Compute) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Skipping Vulkan cooperative matrix tuning: capability or FP16 prerequisite unavailable, "
+          "shouldUseCooperativeMatrix=false, shouldUseHgemmCooperativeMatrixNCHW=false"
+        );
       return;
+    }
 
     VulkanTuneParams cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
@@ -4456,6 +4469,16 @@ void VulkanTuner::tune(
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
+  if(logger != nullptr) {
+    logger->write(
+      "Vulkan tuning final selection: "
+      "shouldUseFP16Storage=" + string(tunedConfig.vulkan.shouldUseFP16Storage ? "1" : "0") +
+      ", shouldUseFP16Compute=" + string(tunedConfig.vulkan.shouldUseFP16Compute ? "1" : "0") +
+      ", shouldUseCooperativeMatrix=" + string(tunedConfig.vulkan.shouldUseCooperativeMatrix ? "1" : "0") +
+      ", shouldUseHgemmCooperativeMatrixNCHW=" +
+        string(tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW ? "1" : "0")
+    );
+  }
   dummyThread.stopAndJoin();
   timer.resetRootResources();
   if(logger != nullptr) {
