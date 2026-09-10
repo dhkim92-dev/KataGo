@@ -1516,6 +1516,10 @@ namespace {
               const bool transformerAttentionInput =
                 plan.kernelName == "transformerAttention" &&
                 name.find("transformer_scale_dot_product") == 0 && binding < 3;
+              const bool transformerRMSNormInput =
+                plan.kernelName == "transformerRMSNorm" && name.find("transformer_rms_norm") == 0 && binding == 0;
+              const bool transformerRMSNormGamma =
+                plan.kernelName == "transformerRMSNorm" && name.find("transformer_rms_norm") == 0 && binding == 2;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
                 for(size_t n = 0; n < batchSize; n++)
@@ -1562,6 +1566,17 @@ namespace {
                 const size_t dimension = binding == 2 ? vHeadDim : headDim;
                 const size_t validElements = batchSize * channels * dimension * logicalXYSize;
                 for(size_t i = 0; i < validElements; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(transformerRMSNormInput) {
+                const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
+                const size_t validElements = batchSize * channels * logicalXYSize;
+                for(size_t i = 0; i < validElements; i++)
+                  data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(transformerRMSNormGamma) {
+                const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
+                for(size_t i = 0; i < channels; i++)
                   data[i] = static_cast<float>(rand.nextDouble());
               }
               else if(!winogradInputTransform && !winogradOutputTransform) {
