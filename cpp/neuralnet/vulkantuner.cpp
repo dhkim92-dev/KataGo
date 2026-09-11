@@ -829,10 +829,87 @@ namespace {
     int nnYLen;
     const VulkanTuner::ModelInfoForTuning& modelInfo;
     bool full;
+    vector<CooperativeMatrixTuneShape> cooperativeMatrixTuneShapes;
     Logger* logger;
     VulkanTimestampTimer* timer;
     bool printOnlyOnImprovement;
   };
+
+  bool isSupportedCooperativeMatrixShape(
+    const TuningContext& context,
+    int accType,
+    int mSize,
+    int nSize,
+    int kSize,
+    uint32_t subgroupSize
+  ) {
+    return any_of(
+      context.cooperativeMatrixTuneShapes.begin(),
+      context.cooperativeMatrixTuneShapes.end(),
+      [=](const CooperativeMatrixTuneShape& shape) {
+        return shape.accType == accType &&
+               shape.MSize == mSize &&
+               shape.NSize == nSize &&
+               shape.KSize == kSize &&
+               shape.subgroupSize == subgroupSize;
+      }
+    );
+  }
+
+  bool isValidCooperativeMatrixWorkgroupSize(
+    const TuningContext& context,
+    int mSize,
+    int nSize,
+    uint32_t subgroupSize,
+    int mWave,
+    int nWave
+  ) {
+    if(context.device == nullptr)
+      return false;
+    const uint64_t localSizeX = static_cast<uint64_t>(mWave / mSize) * subgroupSize;
+    const uint64_t localSizeY = static_cast<uint64_t>(nWave / nSize);
+    const VkPhysicalDeviceLimits& limits = context.device->info.properties.limits;
+    return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
+           localSizeY <= limits.maxComputeWorkGroupSize[1] &&
+           1 <= limits.maxComputeWorkGroupSize[2] &&
+           localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations;
+  }
+
+  bool isValidCooperativeMatrixTuneParams(
+    const TuningContext& context,
+    const HGemmCooperativeMatrixTuneParams& params
+  ) {
+    // The generic shader's shared A/B tile loader does not currently add the
+    // workgroup tile bases. Keep those modes out of tuning until it is fixed.
+    return params.isValid() && params.SA == 0 && params.SB == 0 &&
+           isSupportedCooperativeMatrixShape(
+             context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
+           ) &&
+           isValidCooperativeMatrixWorkgroupSize(
+             context, params.MWARP, params.NWARP, params.subgroupSize, params.MWAVE, params.NWAVE
+           );
+  }
+
+  bool isValidCooperativeMatrixTuneParams(
+    const TuningContext& context,
+    const HGemmCooperativeMatrixNCHWTuneParams& params
+  ) {
+    const int spatialAlignment = std::max(16, params.MWARP);
+    return params.isValid() &&
+           spatialAlignment % params.MWARP == 0 &&
+           spatialAlignment % params.VWM == 0 &&
+           isSupportedCooperativeMatrixShape(
+             context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
+           ) &&
+           isValidCooperativeMatrixWorkgroupSize(
+             context, params.MWARP, params.NWARP, params.subgroupSize, params.MWAVE, params.NWAVE
+           );
+  }
+
+  template<typename Tuner>
+  bool isValidTuningConfig(const TuningContext&, const VulkanTuneParams& config) {
+    return Tuner::isValid(config);
+  }
 
   struct GemmTuneCase {
     int inChannels;
@@ -3650,8 +3727,12 @@ namespace {
         swap(configs[i], configs[j]);
       }
     }
-    const size_t candidateCount = count_if(configs.begin(), configs.end(), Tuner::isValid) +
-      (!configs.empty() && !Tuner::isValid(configs.front()) ? 1 : 0);
+    const size_t candidateCount = count_if(
+      configs.begin(), configs.end(), [&context](const VulkanTuneParams& config) {
+        return isValidTuningConfig<Tuner>(context, config);
+      }
+    ) +
+      (!configs.empty() && !isValidTuningConfig<Tuner>(context, configs.front()) ? 1 : 0);
     const TuningMeasurementPlan plan = makeMeasurementPlan(Tuner::name(), context);
 
     if(context.timer == nullptr || !context.timer->isUsable()) {
@@ -3676,7 +3757,7 @@ namespace {
     for(size_t configIndex = 0; configIndex < configs.size(); configIndex++) {
       const VulkanTuneParams& candidate = configs[configIndex];
       const bool isReferenceCandidate = configIndex == 0;
-      if(!isReferenceCandidate && !Tuner::isValid(candidate))
+      if(!isReferenceCandidate && !isValidTuningConfig<Tuner>(context, candidate))
         continue;
       const size_t currentCandidateIndex = candidateIndex++;
       try {
@@ -3881,7 +3962,7 @@ namespace {
     }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
-      for(const CooperativeMatrixTuneShape& shape: getCooperativeMatrixTuneShapes(context.device)) {
+      for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
         VulkanTuneParams accConfig = current;
         accConfig.hgemmCooperativeMatrix.accType = shape.accType;
         accConfig.hgemmCooperativeMatrix.MWARP = shape.MSize;
@@ -3929,8 +4010,8 @@ namespace {
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SA = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SB = v; });
       configs.erase(
-        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {
-          return !p.hgemmCooperativeMatrix.isValid();
+        remove_if(configs.begin(), configs.end(), [&context](const VulkanTuneParams& p) {
+          return !isValidCooperativeMatrixTuneParams(context, p.hgemmCooperativeMatrix);
         }),
         configs.end()
       );
@@ -3981,7 +4062,7 @@ namespace {
     }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
-      for(const CooperativeMatrixTuneShape& shape: getCooperativeMatrixTuneShapes(context.device)) {
+      for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
         VulkanTuneParams accConfig = current;
         accConfig.hgemmCooperativeMatrixNCHW.accType = shape.accType;
         accConfig.hgemmCooperativeMatrixNCHW.MWARP = shape.MSize;
@@ -4027,8 +4108,8 @@ namespace {
       addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWN = v; });
       addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.SB = v; });
       configs.erase(
-        remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {
-          return !p.hgemmCooperativeMatrixNCHW.isValid();
+        remove_if(configs.begin(), configs.end(), [&context](const VulkanTuneParams& p) {
+          return !isValidCooperativeMatrixTuneParams(context, p.hgemmCooperativeMatrixNCHW);
         }),
         configs.end()
       );
@@ -4060,6 +4141,26 @@ namespace {
   struct StopsOnReferenceImplFail<HgemmCooperativeMatrixNCHWTunerImpl> {
     static bool value(const VulkanTuneParams&) { return true; }
   };
+
+  template<>
+  bool isValidTuningConfig<HgemmCooperativeMatrixTunerImpl>(
+    const TuningContext& context,
+    const VulkanTuneParams& config
+  ) {
+    return config.vulkan.canUseCooperativeMatrix &&
+           config.vulkan.canUseFP16Storage &&
+           config.vulkan.canUseFP16Compute &&
+           isValidCooperativeMatrixTuneParams(context, config.hgemmCooperativeMatrix);
+  }
+
+  template<>
+  bool isValidTuningConfig<HgemmCooperativeMatrixNCHWTunerImpl>(
+    const TuningContext& context,
+    const VulkanTuneParams& config
+  ) {
+    return config.vulkan.canUseCooperativeMatrix &&
+           isValidCooperativeMatrixTuneParams(context, config.hgemmCooperativeMatrixNCHW);
+  }
 
   struct XgemmTuner {
     static string name() { return "xgemm"; }
@@ -4675,7 +4776,10 @@ void VulkanTuner::tune(
   VulkanTimestampTimer timer(device);
   VulkanDummyThread dummyThread(device, logger);
   dummyThread.start();
-  TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, full, logger, &timer, printOnlyOnImprovement};
+  TuningContext context{
+    device, batchSize, nnXLen, nnYLen, modelInfo, full,
+    getCooperativeMatrixTuneShapes(device), logger, &timer, printOnlyOnImprovement
+  };
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning capabilities: fp16Storage=" + string(tunedConfig.vulkan.canUseFP16Storage ? "true" : "false") +

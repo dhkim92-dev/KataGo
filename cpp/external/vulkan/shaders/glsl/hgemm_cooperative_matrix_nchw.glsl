@@ -98,6 +98,7 @@ layout(push_constant) uniform HGemmCooperativeMatrixNCHWParams {
 #if SB == 1
 shared realstoreN bTile[(KWG * NWG) / VWN];
 #endif
+shared realstoreM cTile[(MWG * NWG) / VWM];
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
@@ -216,17 +217,30 @@ void main() {
     const int bLocalOffset = bWaveId * NWAVE + subgroupN * NSize;
     for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
       const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
-      const int cGlobalOffset =
-        batchOutputBase + (groupNBase + bLocalOffset) * hwSize + groupMBase + aLocalOffset;
-
-      if(groupMBase + aLocalOffset < hwSize) {
+      if(groupMBase + aLocalOffset < hwSize)
         coopMatStore(
-          acc[bWaveId][aWaveId], d_output,
-          cGlobalOffset / VWM,
-          hwSize / VWM,
+          acc[bWaveId][aWaveId], cTile,
+          (bLocalOffset * MWG + aLocalOffset) / VWM,
+          MWG / VWM,
           gl_CooperativeMatrixLayoutColumnMajor
         );
-      }
     }
+  }
+
+  barrier();
+
+  // Match OpenCL's LocalToGlobalC{Complete,Edge}: cooperative stores use a
+  // workgroup-local tile, then only in-bounds spatial vectors are written.
+  const int tid = LocalId0() + LocalSize0() * (LocalId1() + LocalSize1() * LocalId2());
+  const int numThreads = LocalSize0() * LocalSize1() * LocalSize2();
+  const int tileVectorCount = (MWG * NWG) / VWM;
+  for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+    const int m = (tileVector % (MWG / VWM)) * VWM;
+    const int n = tileVector / (MWG / VWM);
+    const int hw = groupMBase + m;
+    if(hw < hwSize)
+      d_output[
+        (batchOutputBase + (groupNBase + n) * hwSize + hw) / VWM
+      ] = cTile[tileVector];
   }
 }
