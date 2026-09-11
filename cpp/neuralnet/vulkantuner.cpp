@@ -278,10 +278,6 @@ bool HGemmCooperativeMatrixTuneParams::isValid() const {
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
     return false;
-  if(!((MWARP == 8 && NWARP == 32) ||
-       (MWARP == 16 && NWARP == 16) ||
-       (MWARP == 32 && NWARP == 8)))
-    return false;
   return isMultipleOf(MWG, MWAVE) && isMultipleOf(NWG, NWAVE) &&
          isMultipleOf(KWG, KDIM) && isMultipleOf(MWAVE, MWARP) &&
          isMultipleOf(NWAVE, NWARP) && isMultipleOf(MWG, VWM) &&
@@ -306,10 +302,6 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
-    return false;
-  if(!isMultipleOf(MWARP, 4) || !isMultipleOf(NWARP, 4))
-    return false;
-  if(MWARP > 16 || !((MWARP == 8 && NWARP == 32) || (MWARP == 16 && NWARP == 16)))
     return false;
   if(!isMultipleOf(getRequiredCDivisor(), NWG) ||
      !isMultipleOf(getRequiredCDivisor(), KWG))

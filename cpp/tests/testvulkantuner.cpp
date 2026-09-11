@@ -50,6 +50,17 @@ namespace {
     return result;
   }
 
+  VKAPI_ATTR VkResult VKAPI_CALL fakeSixteenByEightCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    VkResult result = fakeCooperativeMatrixProperties(physicalDevice, propertyCount, properties);
+    if(properties != nullptr && result == VK_SUCCESS)
+      properties[0].NSize = 8;
+    return result;
+  }
+
   bool loadThrows(const string& filename) {
     try {
       (void)VulkanTuneParams::load(filename);
@@ -143,6 +154,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
   deviceInfo.cooperativeMatrixPropertiesFn = fakeCooperativeMatrixProperties;
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+  deviceInfo.subgroupProperties.subgroupSize = 32;
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
   const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
   testAssert(hardwareParams.canUseFP16Storage);
@@ -152,6 +164,16 @@ void Tests::runVulkanTunerPersistenceTests() {
   VulkanDeviceInfo nonSubgroupDeviceInfo = deviceInfo;
   nonSubgroupDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonSubgroupCooperativeMatrixProperties;
   testAssert(!VulkanTuner::getHardwareParams(nonSubgroupDeviceInfo).canUseCooperativeMatrix);
+  VulkanDevice sixteenByEightDevice = {};
+  sixteenByEightDevice.info = deviceInfo;
+  sixteenByEightDevice.info.cooperativeMatrixPropertiesFn = fakeSixteenByEightCooperativeMatrixProperties;
+  HGemmCooperativeMatrixTuneParams sixteenByEightParams;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+    &sixteenByEightDevice, sixteenByEightParams
+  ));
+  testAssert(sixteenByEightParams.MWARP == 16);
+  testAssert(sixteenByEightParams.NWARP == 8);
+  testAssert(sixteenByEightParams.KDIM == 16);
   testAssert(!hardwareParams.shouldUseFP16Storage);
   testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
