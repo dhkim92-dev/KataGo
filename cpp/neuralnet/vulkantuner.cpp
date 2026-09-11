@@ -66,39 +66,59 @@ bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSec
 }
 
 namespace {
-  bool supportsFP16CooperativeMatrix(const VulkanDeviceInfo& deviceInfo) {
-    if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
-       deviceInfo.cooperativeMatrixPropertiesFn == nullptr)
+  bool supportsCooperativeMatrixType(const VkCooperativeMatrixPropertiesKHR& property, int accType) {
+    const VkComponentTypeKHR expectedType = accType == 16
+      ? VK_COMPONENT_TYPE_FLOAT16_KHR
+      : VK_COMPONENT_TYPE_FLOAT32_KHR;
+    return property.scope == VK_SCOPE_SUBGROUP_KHR &&
+           property.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+           property.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+           property.CType == expectedType &&
+           property.ResultType == expectedType;
+  }
+
+  bool getSupportedCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR getProperties,
+    VkBool32 cooperativeMatrix,
+    vector<VkCooperativeMatrixPropertiesKHR>& properties
+  ) {
+    if(cooperativeMatrix != VK_TRUE || getProperties == nullptr)
       return false;
 
     uint32_t propertyCount = 0;
-    VkResult result = deviceInfo.cooperativeMatrixPropertiesFn(
-      deviceInfo.physicalDevice, &propertyCount, nullptr
-    );
+    VkResult result = getProperties(physicalDevice, &propertyCount, nullptr);
     if(result != VK_SUCCESS || propertyCount == 0)
       return false;
 
-    vector<VkCooperativeMatrixPropertiesKHR> properties(propertyCount);
+    properties.resize(propertyCount);
     for(VkCooperativeMatrixPropertiesKHR& property: properties) {
       property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
       property.pNext = nullptr;
     }
-    result = deviceInfo.cooperativeMatrixPropertiesFn(
-      deviceInfo.physicalDevice, &propertyCount, properties.data()
-    );
+    result = getProperties(physicalDevice, &propertyCount, properties.data());
     if(result != VK_SUCCESS && result != VK_INCOMPLETE)
       return false;
+    properties.resize(propertyCount);
 
-    for(uint32_t i = 0; i < propertyCount; i++) {
-      const VkCooperativeMatrixPropertiesKHR& property = properties[i];
-      if(property.scope == VK_SCOPE_SUBGROUP_KHR &&
-         property.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-         property.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-         property.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-         property.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR)
-        return true;
-    }
-    return false;
+    properties.erase(
+      remove_if(properties.begin(), properties.end(), [](const VkCooperativeMatrixPropertiesKHR& property) {
+        return !supportsCooperativeMatrixType(property, 16) &&
+               !supportsCooperativeMatrixType(property, 32);
+      }),
+      properties.end()
+    );
+    return !properties.empty();
+  }
+
+  bool supportsCooperativeMatrix(const VulkanDeviceInfo& deviceInfo) {
+    vector<VkCooperativeMatrixPropertiesKHR> properties;
+    return getSupportedCooperativeMatrixProperties(
+      deviceInfo.physicalDevice,
+      deviceInfo.cooperativeMatrixPropertiesFn,
+      deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix,
+      properties
+    );
   }
 }
 
@@ -108,7 +128,7 @@ VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) 
     deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
     deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
   params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-  params.canUseCooperativeMatrix = supportsFP16CooperativeMatrix(deviceInfo);
+  params.canUseCooperativeMatrix = supportsCooperativeMatrix(deviceInfo);
   params.canUseSubgroup =
     (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
@@ -250,6 +270,7 @@ bool XgemmDirectTuneParams::isValid() const {
 bool HGemmCooperativeMatrixTuneParams::isValid() const {
   if(MWARP <= 0 || NWARP <= 0 || KDIM <= 0 || subgroupSize == 0 ||
      MWG <= 0 || NWG <= 0 || KWG <= 0 || MWAVE <= 0 || NWAVE <= 0 ||
+     (accType != 16 && accType != 32) ||
      SA < 0 || SA > 1 || SB < 0 || SB > 1 ||
      (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
@@ -279,14 +300,12 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   if(MWARP <= 0 || NWARP <= 0 || KDIM <= 0 || subgroupSize == 0 ||
      MWG <= 0 || NWG <= 0 || KWG <= 0 ||
      MWAVE <= 0 || NWAVE <= 0 || SB < 0 || SB > 1 ||
+     (accType != 16 && accType != 32) ||
      (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
-    return false;
-  if(CType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16 ||
-     ResultType != spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16)
     return false;
   if(!isMultipleOf(MWARP, 4) || !isMultipleOf(NWARP, 4))
     return false;
@@ -385,6 +404,7 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrix.KWG == other.hgemmCooperativeMatrix.KWG &&
          hgemmCooperativeMatrix.MWAVE == other.hgemmCooperativeMatrix.MWAVE &&
          hgemmCooperativeMatrix.NWAVE == other.hgemmCooperativeMatrix.NWAVE &&
+         hgemmCooperativeMatrix.accType == other.hgemmCooperativeMatrix.accType &&
          hgemmCooperativeMatrix.SA == other.hgemmCooperativeMatrix.SA &&
          hgemmCooperativeMatrix.SB == other.hgemmCooperativeMatrix.SB &&
          hgemmCooperativeMatrix.VWM == other.hgemmCooperativeMatrix.VWM &&
@@ -398,8 +418,7 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrixNCHW.KWG == other.hgemmCooperativeMatrixNCHW.KWG &&
          hgemmCooperativeMatrixNCHW.MWAVE == other.hgemmCooperativeMatrixNCHW.MWAVE &&
          hgemmCooperativeMatrixNCHW.NWAVE == other.hgemmCooperativeMatrixNCHW.NWAVE &&
-         hgemmCooperativeMatrixNCHW.CType == other.hgemmCooperativeMatrixNCHW.CType &&
-         hgemmCooperativeMatrixNCHW.ResultType == other.hgemmCooperativeMatrixNCHW.ResultType &&
+         hgemmCooperativeMatrixNCHW.accType == other.hgemmCooperativeMatrixNCHW.accType &&
          hgemmCooperativeMatrixNCHW.SB == other.hgemmCooperativeMatrixNCHW.SB &&
          hgemmCooperativeMatrixNCHW.VWM == other.hgemmCooperativeMatrixNCHW.VWM &&
          hgemmCooperativeMatrixNCHW.VWN == other.hgemmCooperativeMatrixNCHW.VWN &&
@@ -474,11 +493,12 @@ namespace {
     WRITE(name ".MWAVE", params.MWAVE); WRITE(name ".NWAVE", params.NWAVE); \
     WRITE(name ".MWARP", params.MWARP); WRITE(name ".NWARP", params.NWARP); \
     WRITE(name ".VWM", params.VWM); WRITE(name ".VWN", params.VWN); \
-    WRITE(name ".KDIM", params.KDIM); WRITE(name ".subgroupSize", params.subgroupSize)
+    WRITE(name ".KDIM", params.KDIM); WRITE(name ".subgroupSize", params.subgroupSize); \
+    WRITE(name ".accType", params.accType)
     WRITE_HGEMM("hgemmCooperativeMatrix", profile.hgemmCooperativeMatrix);
     WRITE("hgemmCooperativeMatrix.SA", profile.hgemmCooperativeMatrix.SA); WRITE("hgemmCooperativeMatrix.SB", profile.hgemmCooperativeMatrix.SB);
     WRITE_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW);
-    WRITE("hgemmCooperativeMatrixNCHW.SB", profile.hgemmCooperativeMatrixNCHW.SB); WRITE("hgemmCooperativeMatrixNCHW.CType", profile.hgemmCooperativeMatrixNCHW.CType); WRITE("hgemmCooperativeMatrixNCHW.ResultType", profile.hgemmCooperativeMatrixNCHW.ResultType);
+    WRITE("hgemmCooperativeMatrixNCHW.SB", profile.hgemmCooperativeMatrixNCHW.SB);
 #undef WRITE_HGEMM
 #define WRITE_CONV(name, params) \
     WRITE(name ".inTileXSize", params.inTileXSize); WRITE(name ".inTileYSize", params.inTileYSize); \
@@ -557,9 +577,10 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
 #define READ_HGEMM(name, params) \
     params.MWG = read(name ".MWG"); params.NWG = read(name ".NWG"); params.KWG = read(name ".KWG"); \
     params.MWAVE = read(name ".MWAVE"); params.NWAVE = read(name ".NWAVE"); params.MWARP = read(name ".MWARP"); params.NWARP = read(name ".NWARP"); \
-    params.VWM = read(name ".VWM"); params.VWN = read(name ".VWN"); params.KDIM = read(name ".KDIM"); params.subgroupSize = read(name ".subgroupSize")
+    params.VWM = read(name ".VWM"); params.VWN = read(name ".VWN"); params.KDIM = read(name ".KDIM"); params.subgroupSize = read(name ".subgroupSize"); \
+    params.accType = read(name ".accType")
     READ_HGEMM("hgemmCooperativeMatrix", profile.hgemmCooperativeMatrix); profile.hgemmCooperativeMatrix.SA = read("hgemmCooperativeMatrix.SA"); profile.hgemmCooperativeMatrix.SB = read("hgemmCooperativeMatrix.SB");
-    READ_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW); profile.hgemmCooperativeMatrixNCHW.SB = read("hgemmCooperativeMatrixNCHW.SB"); profile.hgemmCooperativeMatrixNCHW.CType = read("hgemmCooperativeMatrixNCHW.CType"); profile.hgemmCooperativeMatrixNCHW.ResultType = read("hgemmCooperativeMatrixNCHW.ResultType");
+    READ_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW); profile.hgemmCooperativeMatrixNCHW.SB = read("hgemmCooperativeMatrixNCHW.SB");
 #undef READ_HGEMM
 #define READ_CONV(name, params) \
     params.inTileXSize = read(name ".inTileXSize"); params.inTileYSize = read(name ".inTileYSize"); params.outTileXSize = read(name ".outTileXSize"); params.outTileYSize = read(name ".outTileYSize"); \
@@ -661,42 +682,28 @@ VulkanTuner::defaultFileName(const string& gpuName, int nnXLen, int nnYLen, cons
 namespace {
   bool selectHgemmCooperativeMatrixProperties(
     const VulkanDevice* device,
-    HGemmCooperativeMatrixNCHWTuneParams& params
+    HGemmCooperativeMatrixNCHWTuneParams& params,
+    int accType
   ) {
-    if(device == nullptr || device->info.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE)
+    if(device == nullptr)
       return false;
 
-    auto getProperties = device->info.cooperativeMatrixPropertiesFn;
-    if(getProperties == nullptr)
+    vector<VkCooperativeMatrixPropertiesKHR> properties;
+    if(!getSupportedCooperativeMatrixProperties(
+         device->info.physicalDevice,
+         device->info.cooperativeMatrixPropertiesFn,
+         device->info.cooperativeMatrixFeatures.cooperativeMatrix,
+         properties
+       ))
       return false;
 
-    uint32_t propertyCount = 0;
-    VkResult result = getProperties(device->info.physicalDevice, &propertyCount, nullptr);
-    if(result != VK_SUCCESS || propertyCount == 0)
-      return false;
-
-    vector<VkCooperativeMatrixPropertiesKHR> properties(propertyCount);
-    for(VkCooperativeMatrixPropertiesKHR& property: properties) {
-      property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-      property.pNext = nullptr;
-    }
-    result = getProperties(device->info.physicalDevice, &propertyCount, properties.data());
-    if(result != VK_SUCCESS && result != VK_INCOMPLETE)
-      return false;
-
-    for(uint32_t i = 0; i < propertyCount; i++) {
-      const VkCooperativeMatrixPropertiesKHR& property = properties[i];
-      if(property.scope != VK_SCOPE_SUBGROUP_KHR ||
-         property.AType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.BType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.CType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.ResultType != VK_COMPONENT_TYPE_FLOAT16_KHR)
+    for(const VkCooperativeMatrixPropertiesKHR& property: properties) {
+      if(!supportsCooperativeMatrixType(property, accType))
         continue;
+      params.accType = accType;
       params.MWARP = static_cast<int>(property.MSize);
       params.NWARP = static_cast<int>(property.NSize);
       params.KDIM = static_cast<int>(property.KSize);
-      params.CType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
-      params.ResultType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
       params.subgroupSize = device->info.subgroupProperties.subgroupSize;
       if(!params.isValid()) {
         params.MWG = params.MWARP * 2;
@@ -714,35 +721,35 @@ namespace {
 
   bool selectHgemmCooperativeMatrixProperties(
     const VulkanDevice* device,
-    HGemmCooperativeMatrixTuneParams& params
+    HGemmCooperativeMatrixNCHWTuneParams& params
   ) {
-    if(device == nullptr || device->info.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE)
-      return false;
-    auto getProperties = device->info.cooperativeMatrixPropertiesFn;
-    if(getProperties == nullptr)
+    const int preferredAccType = params.accType == 32 ? 32 : 16;
+    if(selectHgemmCooperativeMatrixProperties(device, params, preferredAccType))
+      return true;
+    return selectHgemmCooperativeMatrixProperties(device, params, preferredAccType == 16 ? 32 : 16);
+  }
+
+  bool selectHgemmCooperativeMatrixProperties(
+    const VulkanDevice* device,
+    HGemmCooperativeMatrixTuneParams& params,
+    int accType
+  ) {
+    if(device == nullptr)
       return false;
 
-    uint32_t propertyCount = 0;
-    VkResult result = getProperties(device->info.physicalDevice, &propertyCount, nullptr);
-    if(result != VK_SUCCESS || propertyCount == 0)
-      return false;
-    vector<VkCooperativeMatrixPropertiesKHR> properties(propertyCount);
-    for(VkCooperativeMatrixPropertiesKHR& property: properties) {
-      property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-      property.pNext = nullptr;
-    }
-    result = getProperties(device->info.physicalDevice, &propertyCount, properties.data());
-    if(result != VK_SUCCESS && result != VK_INCOMPLETE)
+    vector<VkCooperativeMatrixPropertiesKHR> properties;
+    if(!getSupportedCooperativeMatrixProperties(
+         device->info.physicalDevice,
+         device->info.cooperativeMatrixPropertiesFn,
+         device->info.cooperativeMatrixFeatures.cooperativeMatrix,
+         properties
+       ))
       return false;
 
-    for(uint32_t i = 0; i < propertyCount; i++) {
-      const VkCooperativeMatrixPropertiesKHR& property = properties[i];
-      if(property.scope != VK_SCOPE_SUBGROUP_KHR ||
-         property.AType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.BType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.CType != VK_COMPONENT_TYPE_FLOAT16_KHR ||
-         property.ResultType != VK_COMPONENT_TYPE_FLOAT16_KHR)
+    for(const VkCooperativeMatrixPropertiesKHR& property: properties) {
+      if(!supportsCooperativeMatrixType(property, accType))
         continue;
+      params.accType = accType;
       params.MWARP = static_cast<int>(property.MSize);
       params.NWARP = static_cast<int>(property.NSize);
       params.KDIM = static_cast<int>(property.KSize);
@@ -758,6 +765,16 @@ namespace {
         return true;
     }
     return false;
+  }
+
+  bool selectHgemmCooperativeMatrixProperties(
+    const VulkanDevice* device,
+    HGemmCooperativeMatrixTuneParams& params
+  ) {
+    const int preferredAccType = params.accType == 32 ? 32 : 16;
+    if(selectHgemmCooperativeMatrixProperties(device, params, preferredAccType))
+      return true;
+    return selectHgemmCooperativeMatrixProperties(device, params, preferredAccType == 16 ? 32 : 16);
   }
 
   class VulkanTimestampTimer;
@@ -1011,6 +1028,7 @@ namespace {
       add("KWG", config.hgemmCooperativeMatrix.KWG);
       add("MWAVE", config.hgemmCooperativeMatrix.MWAVE);
       add("NWAVE", config.hgemmCooperativeMatrix.NWAVE);
+      add("accType", config.hgemmCooperativeMatrix.accType);
       add("SA", config.hgemmCooperativeMatrix.SA);
       add("SB", config.hgemmCooperativeMatrix.SB);
       add("VWM", config.hgemmCooperativeMatrix.VWM);
@@ -1026,8 +1044,7 @@ namespace {
       add("KWG", config.hgemmCooperativeMatrixNCHW.KWG);
       add("MWAVE", config.hgemmCooperativeMatrixNCHW.MWAVE);
       add("NWAVE", config.hgemmCooperativeMatrixNCHW.NWAVE);
-      add("CType", config.hgemmCooperativeMatrixNCHW.CType);
-      add("ResultType", config.hgemmCooperativeMatrixNCHW.ResultType);
+      add("accType", config.hgemmCooperativeMatrixNCHW.accType);
       add("SB", config.hgemmCooperativeMatrixNCHW.SB);
       add("VWM", config.hgemmCooperativeMatrixNCHW.VWM);
       add("VWN", config.hgemmCooperativeMatrixNCHW.VWN);
@@ -3796,8 +3813,17 @@ namespace {
       result.hgemmCooperativeMatrix.VWN = defaults.hgemmCooperativeMatrix.VWN;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
-      vector<VulkanTuneParams> configs = {current};
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
+      vector<VulkanTuneParams> configs;
+      for(int accType: {16, 32}) {
+        VulkanTuneParams accConfig = current;
+        if(selectHgemmCooperativeMatrixProperties(
+             context.device, accConfig.hgemmCooperativeMatrix, accType
+           ))
+          configs.push_back(accConfig);
+      }
+      if(configs.empty())
+        return configs;
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWG = v; });
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWG = v; });
       addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; });
@@ -3858,8 +3884,17 @@ namespace {
       result.hgemmCooperativeMatrixNCHW.VWN = defaults.hgemmCooperativeMatrixNCHW.VWN;
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
-      vector<VulkanTuneParams> configs = {current};
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
+      vector<VulkanTuneParams> configs;
+      for(int accType: {16, 32}) {
+        VulkanTuneParams accConfig = current;
+        if(selectHgemmCooperativeMatrixProperties(
+             context.device, accConfig.hgemmCooperativeMatrixNCHW, accType
+           ))
+          configs.push_back(accConfig);
+      }
+      if(configs.empty())
+        return configs;
       addCandidates(configs, full ? vector<int>{16,32,64,128} : vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWG = v; });
       addCandidates(configs, full ? vector<int>{16,32} : vector<int>{16,32}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWG = v; });
       addCandidates(configs, vector<int>{16,32,64}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; });

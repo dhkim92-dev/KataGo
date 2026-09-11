@@ -39,6 +39,17 @@ namespace {
     return VK_SUCCESS;
   }
 
+  VKAPI_ATTR VkResult VKAPI_CALL fakeNonSubgroupCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    VkResult result = fakeCooperativeMatrixProperties(physicalDevice, propertyCount, properties);
+    if(properties != nullptr && result == VK_SUCCESS)
+      properties[0].scope = VK_SCOPE_DEVICE_KHR;
+    return result;
+  }
+
   bool loadThrows(const string& filename) {
     try {
       (void)VulkanTuneParams::load(filename);
@@ -138,6 +149,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(hardwareParams.canUseFP16Compute);
   testAssert(hardwareParams.canUseCooperativeMatrix);
   testAssert(hardwareParams.canUseSubgroup);
+  VulkanDeviceInfo nonSubgroupDeviceInfo = deviceInfo;
+  nonSubgroupDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonSubgroupCooperativeMatrixProperties;
+  testAssert(!VulkanTuner::getHardwareParams(nonSubgroupDeviceInfo).canUseCooperativeMatrix);
   testAssert(!hardwareParams.shouldUseFP16Storage);
   testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
@@ -201,6 +215,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("xgemm.MWG=") < lineIndex("xgemm16.MWG="));
   testAssert(lineIndex("xgemm16.MWG=") < lineIndex("hgemmCooperativeMatrix.MWG="));
   testAssert(lineIndex("hgemmCooperativeMatrix.MWG=") < lineIndex("hgemmCooperativeMatrixNCHW.MWG="));
+  testAssert(lineIndex("hgemmCooperativeMatrix.accType=") < lineIndex("hgemmCooperativeMatrixNCHW.MWG="));
+  testAssert(lineIndex("hgemmCooperativeMatrixNCHW.accType=") < lineIndex("conv3x3.inTileXSize="));
+  testAssert(lineIndex("hgemmCooperativeMatrixNCHW.CType=") == defaultLines.size());
+  testAssert(lineIndex("hgemmCooperativeMatrixNCHW.ResultType=") == defaultLines.size());
   testAssert(lineIndex("hgemmCooperativeMatrixNCHW.MWG=") < lineIndex("conv3x3.inTileXSize="));
   testAssert(lineIndex("conv5x5.inTileXSize=") < lineIndex("gPool.XYSTRIDE="));
   testAssert(lineIndex("gPool.XYSTRIDE=") < lineIndex("transformer.ATTN_BLOCK_Q="));
@@ -260,8 +278,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.hgemmCooperativeMatrixNCHW.KWG = 32;
   params.hgemmCooperativeMatrix.VWM = 2;
   params.hgemmCooperativeMatrix.VWN = 1;
+  params.hgemmCooperativeMatrix.accType = 32;
   params.hgemmCooperativeMatrixNCHW.VWM = 1;
   params.hgemmCooperativeMatrixNCHW.VWN = 2;
+  params.hgemmCooperativeMatrixNCHW.accType = 32;
   params.vulkan.canUseFP16Storage = true;
   params.vulkan.canUseFP16Compute = true;
   params.vulkan.canUseCooperativeMatrix = true;
@@ -276,6 +296,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   VulkanTuneParams loaded = VulkanTuneParams::load(filename);
   testAssert(loaded == params);
   testAssert(loaded.xgemm16.MWG == 64);
+  testAssert(loaded.hgemmCooperativeMatrix.accType == 32);
+  testAssert(loaded.hgemmCooperativeMatrixNCHW.accType == 32);
 
   writeText(filename, "VERSION=999\n");
   testAssert(loadThrows(filename));
@@ -302,6 +324,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.hgemmCooperativeMatrix.VWM = 8;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.hgemmCooperativeMatrix.accType = 64;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.VWND = 3;

@@ -14,6 +14,17 @@
 #define VWN 4
 #endif
 
+#ifndef ACC_TYPE
+#define ACC_TYPE 16
+#endif
+#if ACC_TYPE == 16
+#define acc_dtype float16_t
+#elif ACC_TYPE == 32
+#define acc_dtype float
+#else
+#error "ACC_TYPE must be 16 or 32"
+#endif
+
 #if VWM == 1
 #define realstoreM float16_t
 #elif VWM == 2
@@ -122,12 +133,12 @@ void main() {
 
   coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag;
   coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> bFrag;
-  coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> cFrag[NWI][MWI];
+  coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> cFrag[NWI][MWI];
 
   for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
     for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
       cFrag[bWaveId][aWaveId] =
-        coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(0.0hf);
+        coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0.0));
     }
   }
 

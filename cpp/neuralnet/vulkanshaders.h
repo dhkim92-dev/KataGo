@@ -47,12 +47,18 @@ extern "C" {
   DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn2##suffix) \
   DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn4##suffix)
 
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb0)
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb1)
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb0)
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb1)
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb0)
-  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
 
 #undef DECLARE_HGEMM_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_VARIANT
@@ -451,12 +457,18 @@ namespace vk_shader {
   DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn2##suffix) \
   DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn4##suffix)
 
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb0)
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa0_sb1)
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb0)
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_f16s16, _sa1_sb1)
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb0)
-  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_p16s16, _sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
 
 #undef DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_SPIRV_VARIANT
@@ -902,12 +914,10 @@ struct LocalDimHash {
 
     /**
      * Specialization constants for hgemm_cooperative_matrix_nchw. The first three fields map to
-     * local_size_*_id 0..2; the remaining fields map to constant IDs 3..12 in
+     * local_size_*_id 0..2; the remaining fields map to constant IDs 3..10 in
      * the shader and therefore must remain in this order.
      */
     struct HGemmCooperativeMatrixNCHWSpec {
-      static constexpr int COMPONENT_TYPE_FLOAT16 = 0;
-
       uint32_t localSizeX = 32;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
@@ -919,8 +929,6 @@ struct LocalDimHash {
       int KWG = 16;
       int MWAVE = 16;
       int NWAVE = 16;
-      int CType = COMPONENT_TYPE_FLOAT16;
-      int ResultType = COMPONENT_TYPE_FLOAT16;
     };
 
     struct TransformerRMSNormSpec {
@@ -1308,6 +1316,7 @@ struct LocalDimHash {
       int KWG = 32;
       int MWAVE = 32;
       int NWAVE = 32;
+      int accType = 16;
       int SA = 0;
       int SB = 0;
       int VWM = 4;
@@ -1334,8 +1343,7 @@ struct LocalDimHash {
       int KWG = 16;
       int MWAVE = 16;
       int NWAVE = 16;
-      int CType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
-      int ResultType = spec::HGemmCooperativeMatrixNCHWSpec::COMPONENT_TYPE_FLOAT16;
+      int accType = 16;
       int SB = 0;
       int VWM = 4;
       int VWN = 4;
@@ -1515,12 +1523,18 @@ struct LocalDimHash {
     VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
 #define DECLARE_HGEMM_SHADER_MODULES(base) \
     VkShaderModule shaderModule_##base##_variants[9] = {};
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa0_sb0)
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa0_sb1)
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa1_sb0)
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_f16s16_sa1_sb1)
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_p16s16_sb0)
-    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_p16s16_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa0_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa0_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa1_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa1_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp16_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp16_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa0_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa0_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa1_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa1_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
 #undef DECLARE_HGEMM_SHADER_MODULES
     VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
