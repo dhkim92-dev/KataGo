@@ -1034,6 +1034,28 @@ namespace {
     return {tunerName, 20, 0, 0.005, 0.025, batchSizes, {}, workloadWeights};
   }
 
+  TuningMeasurementPlan makeCooperativeMatrixScreeningMeasurementPlan(
+    const string& tunerName,
+    const TuningContext& context
+  ) {
+    TuningMeasurementPlan plan = makeMeasurementPlan(tunerName, context);
+    assert(tunerName == "hgemmCooperativeMatrix" || tunerName == "hgemmCooperativeMatrixNCHW");
+    assert(!plan.gemmCases.empty());
+
+    // Screen hardware matrix shapes using one common convolution case and the
+    // largest available case. The selected shape is always remeasured with the
+    // complete plan before it can be saved.
+    vector<GemmTuneCase> cases;
+    cases.push_back(plan.gemmCases[std::min<size_t>(1, plan.gemmCases.size() - 1)]);
+    if(plan.gemmCases.back().inChannels != cases.front().inChannels ||
+       plan.gemmCases.back().outChannels != cases.front().outChannels)
+      cases.push_back(plan.gemmCases.back());
+    plan.gemmCases = cases;
+    plan.workloadWeights.assign(cases.size(), 1.0);
+    plan.totalRuns = cases.size();
+    return plan;
+  }
+
   bool usesCpuReference(const string& tunerName) {
     return tunerName != "conv3x3InputTransform" && tunerName != "conv3x3OutputTransform" &&
            tunerName != "conv5x5InputTransform" && tunerName != "conv5x5OutputTransform";
@@ -3704,12 +3726,24 @@ namespace {
     condition_variable stateCondition;
   };
 
+  struct TuningConfigMeasurement {
+    VulkanTuneParams config;
+    double callsPerSecond;
+    double score;
+  };
+
+  struct TuningConfigMeasurements {
+    vector<TuningConfigMeasurement> values;
+    bool referenceFailed = false;
+  };
+
   template<typename Tuner>
-  double testAllConfigs(const TuningContext& context, VulkanTuneParams& currentConfig) {
-    vector<VulkanTuneParams> configs;
-    configs = Tuner::candidates(currentConfig, context.full, context);
-    VulkanTuneParams defaults;
-    configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
+  TuningConfigMeasurements measureConfigs(
+    const TuningContext& context,
+    vector<VulkanTuneParams> configs,
+    const TuningMeasurementPlan& plan
+  ) {
+    TuningConfigMeasurements measurements;
     dedupCandidates(configs);
     const size_t firstShuffledIndex = KeepsCurrentConfigFirst<Tuner>::value ? 2 : 1;
     if(configs.size() > 2) {
@@ -3725,20 +3759,16 @@ namespace {
       }
     ) +
       (!configs.empty() && !isValidTuningConfig<Tuner>(context, configs.front()) ? 1 : 0);
-    const TuningMeasurementPlan plan = makeMeasurementPlan(Tuner::name(), context);
-
     if(context.timer == nullptr || !context.timer->isUsable()) {
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
-      return 0.0;
+      return measurements;
     }
     VulkanTimestampTimer& timer = *context.timer;
 
     vk_shader::ComputePipelines pipelines(context.device->device, nullptr);
     vector<Pipeline*> previousTargets;
-    bool found = false;
     double bestScore = 0.0;
-    double bestCallsPerSecond = 0.0;
     vector<float> referenceReadback;
     size_t lastBestCandidateIndex = 0;
     size_t candidateIndex = 0;
@@ -3772,7 +3802,10 @@ namespace {
           for(const Pipeline* pipeline: targets)
             pipelines.destroyPipeline(*const_cast<Pipeline*>(pipeline));
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
-            return 0.0;
+          {
+            measurements.referenceFailed = true;
+            return measurements;
+          }
           continue;
         }
         for(const Pipeline* pipeline: targets)
@@ -3796,7 +3829,10 @@ namespace {
           }
           logProgressIfNeeded(currentCandidateIndex, targets);
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
-            return 0.0;
+          {
+            measurements.referenceFailed = true;
+            return measurements;
+          }
           continue;
         }
         if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0) {
@@ -3809,7 +3845,10 @@ namespace {
           }
           logProgressIfNeeded(currentCandidateIndex, targets);
           if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
-            return 0.0;
+          {
+            measurements.referenceFailed = true;
+            return measurements;
+          }
           continue;
         }
         if(referenceReadback.empty() && !cpuReference.empty())
@@ -3821,6 +3860,7 @@ namespace {
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
         const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
+        measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
         if(!context.printOnlyOnImprovement || isBest) {
           logTuningResult(
@@ -3830,9 +3870,6 @@ namespace {
         }
         if(isBest) {
           bestScore = score;
-          bestCallsPerSecond = callsPerSecond;
-          currentConfig = candidate;
-          found = true;
           lastBestCandidateIndex = currentCandidateIndex;
         }
         logProgressIfNeeded(currentCandidateIndex, targets);
@@ -3843,15 +3880,109 @@ namespace {
           logTuningFailure(context, currentCandidateIndex, candidateCount, vector<const Pipeline*>(), Tuner::name(), e.what());
         logProgressIfNeeded(currentCandidateIndex, vector<const Pipeline*>());
         if(StopsOnReferenceImplFail<Tuner>::value(candidate) && isReferenceCandidate)
-          return 0.0;
+        {
+          measurements.referenceFailed = true;
+          return measurements;
+        }
       }
     }
-    if(context.logger != nullptr) {
-      context.logger->write(
-        "Vulkan tuner " + Tuner::name() + (found ? " selected a measured candidate" : " retained the previous candidate")
+    return measurements;
+  }
+
+  template<typename Tuner>
+  struct UsesCooperativeMatrixShapeScreening {
+    static constexpr bool value = false;
+  };
+
+  template<typename Tuner>
+  double testAllConfigs(const TuningContext& context, VulkanTuneParams& currentConfig) {
+    VulkanTuneParams defaults;
+    if constexpr(UsesCooperativeMatrixShapeScreening<Tuner>::value) {
+      vector<VulkanTuneParams> screeningConfigs = Tuner::screeningCandidates(currentConfig, context);
+      if(screeningConfigs.empty())
+        return 0.0;
+      const TuningConfigMeasurements screeningMeasurements = measureConfigs<Tuner>(
+        context, std::move(screeningConfigs), makeCooperativeMatrixScreeningMeasurementPlan(Tuner::name(), context)
       );
+      if(screeningMeasurements.referenceFailed || screeningMeasurements.values.empty())
+        return 0.0;
+
+      vector<TuningConfigMeasurement> selectedShapes;
+      for(int accType: {16, 32}) {
+        const auto bestForAccumulator = max_element(
+          screeningMeasurements.values.begin(), screeningMeasurements.values.end(),
+          [accType](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) {
+            const bool aMatches = Tuner::accumulatorType(a.config) == accType && a.score > 0.0;
+            const bool bMatches = Tuner::accumulatorType(b.config) == accType && b.score > 0.0;
+            return aMatches != bMatches ? !aMatches : a.score < b.score;
+          }
+        );
+        if(bestForAccumulator != screeningMeasurements.values.end() &&
+           Tuner::accumulatorType(bestForAccumulator->config) == accType && bestForAccumulator->score > 0.0)
+          selectedShapes.push_back(*bestForAccumulator);
+      }
+      if(selectedShapes.empty())
+        return 0.0;
+
+      TuningContext detailContext = context;
+      detailContext.cooperativeMatrixTuneShapes.clear();
+      for(const TuningConfigMeasurement& selected: selectedShapes) {
+        const CooperativeMatrixTuneShape shape = Tuner::shape(selected.config);
+        const bool alreadyAdded = any_of(
+          detailContext.cooperativeMatrixTuneShapes.begin(), detailContext.cooperativeMatrixTuneShapes.end(),
+          [&shape](const CooperativeMatrixTuneShape& previous) {
+            return previous.accType == shape.accType && previous.MSize == shape.MSize &&
+                   previous.NSize == shape.NSize && previous.KSize == shape.KSize &&
+                   previous.subgroupSize == shape.subgroupSize;
+          }
+        );
+        if(!alreadyAdded)
+          detailContext.cooperativeMatrixTuneShapes.push_back(shape);
+      }
+      if(context.logger != nullptr) {
+        context.logger->write(
+          "Vulkan tuner " + Tuner::name() + " screened " +
+          to_string(context.cooperativeMatrixTuneShapes.size()) + " cooperative-matrix shapes down to " +
+          to_string(detailContext.cooperativeMatrixTuneShapes.size())
+        );
+      }
+
+      const VulkanTuneParams detailReferenceConfig = selectedShapes.front().config;
+      vector<VulkanTuneParams> configs = Tuner::candidates(detailReferenceConfig, context.full, detailContext);
+      // Retain the tested baseline even when the normal non-full filter omits
+      // an asymmetric hardware shape.
+      for(const TuningConfigMeasurement& selected: selectedShapes)
+        configs.push_back(selected.config);
+      configs.insert(configs.begin(), detailReferenceConfig);
+      const TuningConfigMeasurements measurements = measureConfigs<Tuner>(
+        detailContext, std::move(configs), makeMeasurementPlan(Tuner::name(), detailContext)
+      );
+      if(measurements.referenceFailed || measurements.values.empty())
+        return 0.0;
+      const TuningConfigMeasurement& best = *max_element(
+        measurements.values.begin(), measurements.values.end(),
+        [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
+      );
+      currentConfig = best.config;
+      if(context.logger != nullptr)
+        context.logger->write("Vulkan tuner " + Tuner::name() + " selected a measured candidate");
+      return best.callsPerSecond;
     }
-    return found ? bestCallsPerSecond : 0.0;
+    vector<VulkanTuneParams> configs = Tuner::candidates(currentConfig, context.full, context);
+    configs.insert(configs.begin(), Tuner::reference(currentConfig, defaults));
+    const TuningConfigMeasurements measurements = measureConfigs<Tuner>(
+      context, std::move(configs), makeMeasurementPlan(Tuner::name(), context)
+    );
+    if(measurements.referenceFailed || measurements.values.empty())
+      return 0.0;
+    const TuningConfigMeasurement& best = *max_element(
+      measurements.values.begin(), measurements.values.end(),
+      [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
+    );
+    currentConfig = best.config;
+    if(context.logger != nullptr)
+      context.logger->write("Vulkan tuner " + Tuner::name() + " selected a measured candidate");
+    return best.callsPerSecond;
   }
 
   template<typename Tuner>
@@ -3952,6 +4083,47 @@ namespace {
       result.hgemmCooperativeMatrix.VWN = defaults.hgemmCooperativeMatrix.VWN;
       return result;
     }
+    static vector<VulkanTuneParams> screeningCandidates(const VulkanTuneParams& current, const TuningContext& context) {
+      vector<VulkanTuneParams> configs;
+      for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+        VulkanTuneParams config = current;
+        HGemmCooperativeMatrixTuneParams& params = config.hgemmCooperativeMatrix;
+        params.accType = shape.accType;
+        params.MWARP = shape.MSize;
+        params.NWARP = shape.NSize;
+        params.KDIM = shape.KSize;
+        params.subgroupSize = shape.subgroupSize;
+        params.MWG = shape.MSize * 2;
+        params.NWG = shape.NSize * 2;
+        params.KWG = shape.KSize * 2;
+        params.MWAVE = shape.MSize;
+        params.NWAVE = shape.NSize;
+        params.SA = 0;
+        params.SB = 0;
+        for(int width: {4, 2, 1}) {
+          if(params.MWARP % width == 0 && params.KDIM % width == 0) {
+            params.VWM = width;
+            break;
+          }
+        }
+        for(int width: {4, 2, 1}) {
+          if(params.NWARP % width == 0) {
+            params.VWN = width;
+            break;
+          }
+        }
+        if(isValidCooperativeMatrixTuneParams(context, params))
+          configs.push_back(config);
+      }
+      return configs;
+    }
+    static int accumulatorType(const VulkanTuneParams& config) {
+      return config.hgemmCooperativeMatrix.accType;
+    }
+    static CooperativeMatrixTuneShape shape(const VulkanTuneParams& config) {
+      const HGemmCooperativeMatrixTuneParams& params = config.hgemmCooperativeMatrix;
+      return {params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize};
+    }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
@@ -4031,6 +4203,11 @@ namespace {
   };
 
   template<>
+  struct UsesCooperativeMatrixShapeScreening<HgemmCooperativeMatrixTunerImpl> {
+    static constexpr bool value = true;
+  };
+
+  template<>
   struct StopsOnReferenceImplFail<HgemmCooperativeMatrixTunerImpl> {
     static bool value(const VulkanTuneParams&) { return true; }
   };
@@ -4051,6 +4228,46 @@ namespace {
       result.hgemmCooperativeMatrixNCHW.VWM = defaults.hgemmCooperativeMatrixNCHW.VWM;
       result.hgemmCooperativeMatrixNCHW.VWN = defaults.hgemmCooperativeMatrixNCHW.VWN;
       return result;
+    }
+    static vector<VulkanTuneParams> screeningCandidates(const VulkanTuneParams& current, const TuningContext& context) {
+      vector<VulkanTuneParams> configs;
+      for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+        VulkanTuneParams config = current;
+        HGemmCooperativeMatrixNCHWTuneParams& params = config.hgemmCooperativeMatrixNCHW;
+        params.accType = shape.accType;
+        params.MWARP = shape.MSize;
+        params.NWARP = shape.NSize;
+        params.KDIM = shape.KSize;
+        params.subgroupSize = shape.subgroupSize;
+        params.MWG = shape.MSize;
+        params.NWG = shape.NSize;
+        params.KWG = shape.KSize;
+        params.MWAVE = shape.MSize;
+        params.NWAVE = shape.NSize;
+        params.SB = 0;
+        for(int width: {4, 2, 1}) {
+          if(params.MWARP % width == 0) {
+            params.VWM = width;
+            break;
+          }
+        }
+        for(int width: {4, 2, 1}) {
+          if(params.NWARP % width == 0) {
+            params.VWN = width;
+            break;
+          }
+        }
+        if(isValidCooperativeMatrixTuneParams(context, params))
+          configs.push_back(config);
+      }
+      return configs;
+    }
+    static int accumulatorType(const VulkanTuneParams& config) {
+      return config.hgemmCooperativeMatrixNCHW.accType;
+    }
+    static CooperativeMatrixTuneShape shape(const VulkanTuneParams& config) {
+      const HGemmCooperativeMatrixNCHWTuneParams& params = config.hgemmCooperativeMatrixNCHW;
+      return {params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize};
     }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
@@ -4126,6 +4343,11 @@ namespace {
 
   template<>
   struct KeepsCurrentConfigFirst<HgemmCooperativeMatrixNCHWTunerImpl> {
+    static constexpr bool value = true;
+  };
+
+  template<>
+  struct UsesCooperativeMatrixShapeScreening<HgemmCooperativeMatrixNCHWTunerImpl> {
     static constexpr bool value = true;
   };
 

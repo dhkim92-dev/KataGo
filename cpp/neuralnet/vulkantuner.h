@@ -11,7 +11,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 9;
+  constexpr int TUNER_VERSION = 10;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
