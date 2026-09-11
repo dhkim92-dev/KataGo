@@ -93,7 +93,7 @@ shared realstoreM alm[(MWG * KWG) / VWM];
 shared realstoreN blm[(NWG * KWG) / VWN];
 #endif
 
-void loadSharedTiles(int kwg, int baseA, int baseB) {
+void loadSharedTiles(int kwg, int baseA, int baseB, int groupMBase, int groupNBase) {
   const int tid = int(gl_LocalInvocationIndex);
   const int numThreads = int(gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z);
 
@@ -102,7 +102,7 @@ void loadSharedTiles(int kwg, int baseA, int baseB) {
   for(int i = tid; i < aVectorCount; i += numThreads) {
     const int m = i % (MWG / VWM);
     const int k = i / (MWG / VWM);
-    alm[i] = agm[(baseA + (kwg + k) * kSizeM + m * VWM) / VWM];
+    alm[i] = agm[(baseA + (kwg + k) * kSizeM + groupMBase + m * VWM) / VWM];
   }
 #endif
 #if SB == 1
@@ -110,7 +110,7 @@ void loadSharedTiles(int kwg, int baseA, int baseB) {
   for(int i = tid; i < bVectorCount; i += numThreads) {
     const int n = i % (NWG / VWN);
     const int k = i / (NWG / VWN);
-    blm[i] = bgm[(baseB + (kwg + k) * kSizeN + n * VWN) / VWN];
+    blm[i] = bgm[(baseB + (kwg + k) * kSizeN + groupNBase + n * VWN) / VWN];
   }
 #endif
 
@@ -131,7 +131,7 @@ void main() {
   const int baseB = batch * kSizeN * kSizeK;
   const int baseC = batch * kSizeM * kSizeN;
 
-  coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag;
+  coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag[MWI];
   coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> bFrag;
   coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> cFrag[NWI][MWI];
 
@@ -143,7 +143,7 @@ void main() {
   }
 
   for(int kwg = 0; kwg < kSizeK; kwg += KWG) {
-    loadSharedTiles(kwg, baseA, baseB);
+    loadSharedTiles(kwg, baseA, baseB, groupMBase, groupNBase);
 
     for(int kOffset = 0; kOffset < KWG; kOffset += KSize) {
       for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
@@ -151,37 +151,39 @@ void main() {
 #if SA == 1
         const int aSharedIndex = (kOffset * MWG + aOffset) / VWM;
         coopMatLoad(
-          aFrag, alm, aSharedIndex, MWG / VWM,
+          aFrag[aWaveId], alm, aSharedIndex, MWG / VWM,
           gl_CooperativeMatrixLayoutColumnMajor
         );
 #else
         coopMatLoad(
-          aFrag, agm,
+          aFrag[aWaveId], agm,
           (baseA + (kwg + kOffset) * kSizeM + groupMBase + aOffset) / VWM,
           kSizeM / VWM,
           gl_CooperativeMatrixLayoutColumnMajor
         );
 #endif
+      }
 
-        for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
-          const int bOffset = bWaveId * NWAVE + subgroupN * NSize;
+      for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
+        const int bOffset = bWaveId * NWAVE + subgroupN * NSize;
 #if SB == 1
-          const int bSharedIndex = (kOffset * NWG + bOffset) / VWN;
-          coopMatLoad(
-            bFrag, blm, bSharedIndex, NWG / VWN,
-            gl_CooperativeMatrixLayoutRowMajor
-          );
+        const int bSharedIndex = (kOffset * NWG + bOffset) / VWN;
+        coopMatLoad(
+          bFrag, blm, bSharedIndex, NWG / VWN,
+          gl_CooperativeMatrixLayoutRowMajor
+        );
 #else
-          const int bIndex = groupNBase + bOffset;
-          coopMatLoad(
-            bFrag, bgm,
-            (baseB + (kwg + kOffset) * kSizeN + bIndex) / VWN,
-            kSizeN / VWN,
-            gl_CooperativeMatrixLayoutRowMajor
-          );
+        const int bIndex = groupNBase + bOffset;
+        coopMatLoad(
+          bFrag, bgm,
+          (baseB + (kwg + kOffset) * kSizeN + bIndex) / VWN,
+          kSizeN / VWN,
+          gl_CooperativeMatrixLayoutRowMajor
+        );
 #endif
+        for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
           cFrag[bWaveId][aWaveId] =
-            coopMatMulAdd(aFrag, bFrag, cFrag[bWaveId][aWaveId]);
+            coopMatMulAdd(aFrag[aWaveId], bFrag, cFrag[bWaveId][aWaveId]);
         }
       }
     }

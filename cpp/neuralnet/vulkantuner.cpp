@@ -873,9 +873,7 @@ namespace {
     const TuningContext& context,
     const HGemmCooperativeMatrixTuneParams& params
   ) {
-    // The generic shader's shared A/B tile loader does not currently add the
-    // workgroup tile bases. Keep those modes out of tuning until it is fixed.
-    return params.isValid() && params.SA == 0 && params.SB == 0 &&
+    return params.isValid() &&
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&

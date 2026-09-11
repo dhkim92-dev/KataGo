@@ -229,18 +229,29 @@ void main() {
 
   barrier();
 
-  // Match OpenCL's LocalToGlobalC{Complete,Edge}: cooperative stores use a
-  // workgroup-local tile, then only in-bounds spatial vectors are written.
+  // Match OpenCL's LocalToGlobalC{Complete,Edge}: use an unchecked vector
+  // copy for complete tiles and only test bounds for the final edge tile.
   const int tid = LocalId0() + LocalSize0() * (LocalId1() + LocalSize1() * LocalId2());
   const int numThreads = LocalSize0() * LocalSize1() * LocalSize2();
   const int tileVectorCount = (MWG * NWG) / VWM;
-  for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
-    const int m = (tileVector % (MWG / VWM)) * VWM;
-    const int n = tileVector / (MWG / VWM);
-    const int hw = groupMBase + m;
-    if(hw < hwSize)
+  if(groupMBase + MWG <= hwSize) {
+    for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+      const int m = (tileVector % (MWG / VWM)) * VWM;
+      const int n = tileVector / (MWG / VWM);
       d_output[
-        (batchOutputBase + (groupNBase + n) * hwSize + hw) / VWM
+        (batchOutputBase + (groupNBase + n) * hwSize + groupMBase + m) / VWM
       ] = cTile[tileVector];
+    }
+  }
+  else {
+    for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+      const int m = (tileVector % (MWG / VWM)) * VWM;
+      const int n = tileVector / (MWG / VWM);
+      const int hw = groupMBase + m;
+      if(hw < hwSize)
+        d_output[
+          (batchOutputBase + (groupNBase + n) * hwSize + hw) / VWM
+        ] = cTile[tileVector];
+    }
   }
 }
