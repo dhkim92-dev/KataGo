@@ -351,6 +351,8 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
     return false;
+  if(NWG > 32)
+    return false;
   if(!isMultipleOf(getRequiredCDivisor(), NWG) ||
      !isMultipleOf(getRequiredCDivisor(), KWG))
     return false;
