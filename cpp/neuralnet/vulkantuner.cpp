@@ -1387,7 +1387,10 @@ namespace {
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         config.hgemmCooperativeMatrixNCHW.isValid();
       const size_t xySize = usePaddedNCHWXY || usePaddedGpoolXY
-        ? vk_helper::roundUpToMultiple(logicalXYSize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP)))
+        ? vk_helper::roundUpToMultiple(
+            logicalXYSize,
+            static_cast<size_t>(config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment())
+          )
         : logicalXYSize;
       const bool addChannelBiasesUsingFP16Storage =
         config.vulkan.canUseFP16Storage &&
@@ -1594,6 +1597,12 @@ namespace {
         pendingUploads.push_back({stagingBuffer, destination, size});
         return true;
       };
+      const auto fillPaddedNCHWInput = [&](vector<float>& data, size_t channels, Rand& rand) {
+        for(size_t n = 0; n < batchSize; n++)
+          for(size_t c = 0; c < channels; c++)
+            for(size_t xy = 0; xy < logicalXYSize; xy++)
+              data[(n * channels + c) * xySize + xy] = static_cast<float>(rand.nextDouble());
+      };
       size_t tuningBufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
@@ -1675,9 +1684,7 @@ namespace {
                 const size_t channels = addPointwiseInput
                   ? static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels))
                   : static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels));
-                const size_t validElements = batchSize * channels * logicalXYSize;
-                for(size_t i = 0; i < validElements; i++)
-                  data[i] = static_cast<float>(rand.nextDouble());
+                fillPaddedNCHWInput(data, channels, rand);
               }
               else if(addChannelBiasesInput) {
                 const size_t validBiases = batchSize * static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
@@ -1691,15 +1698,11 @@ namespace {
                 const size_t vHeadDim = static_cast<size_t>(std::max(1, context.modelInfo.transformerVHeadDim));
                 const size_t channels = binding == 0 ? heads : kvHeads;
                 const size_t dimension = binding == 2 ? vHeadDim : headDim;
-                const size_t validElements = batchSize * channels * dimension * logicalXYSize;
-                for(size_t i = 0; i < validElements; i++)
-                  data[i] = static_cast<float>(rand.nextDouble());
+                fillPaddedNCHWInput(data, channels * dimension, rand);
               }
               else if(transformerRMSNormInput) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
-                const size_t validElements = batchSize * channels * logicalXYSize;
-                for(size_t i = 0; i < validElements; i++)
-                  data[i] = static_cast<float>(rand.nextDouble());
+                fillPaddedNCHWInput(data, channels, rand);
               }
               else if(transformerRMSNormGamma) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
@@ -1708,9 +1711,7 @@ namespace {
               }
               else if(spatialRMSNormInput) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
-                const size_t validElements = batchSize * channels * logicalXYSize;
-                for(size_t i = 0; i < validElements; i++)
-                  data[i] = static_cast<float>(rand.nextDouble());
+                fillPaddedNCHWInput(data, channels, rand);
               }
               else if(spatialRMSNormGamma || spatialRMSNormBeta) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
@@ -1801,7 +1802,7 @@ namespace {
         const string& name = pipeline->name;
         const auto& buffer = [&](size_t binding) -> const vector<float>& { return hostFloatBuffers[firstBuffer + binding]; };
         const int cpuBatchSize = std::max(1, context.batchSize);
-        const int cpuXYSize = std::max(1, context.nnXLen * context.nnYLen);
+        const int cpuXYSize = static_cast<int>(xySize);
         const int cpuChannels = std::max(1, context.modelInfo.trunkNumChannels);
 
         if(name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
@@ -2104,8 +2105,11 @@ namespace {
       ) {
         const int batchSize = std::max(1, runBatchSize);
         const int logicalPipelineXYSize = std::max(1, context.nnXLen * context.nnYLen);
-        const int pipelineXYSize = plan.kernelName == "gPool"
-          ? static_cast<int>(xySize) : logicalPipelineXYSize;
+        const bool usesPaddedPipelineXY =
+          plan.kernelName == "gPool" || plan.kernelName == "pointwise" ||
+          plan.kernelName == "transformerAttention" || plan.kernelName == "transformerRMSNorm" ||
+          plan.kernelName == "spatialRMSNorm";
+        const int pipelineXYSize = usesPaddedPipelineXY ? static_cast<int>(xySize) : logicalPipelineXYSize;
         const int channels = std::max(1, runChannels);
         const auto dispatch = [&](uint32_t x, uint32_t y = 1, uint32_t z = 1) {
           vkCmdDispatch(targetCommandBuffer, std::max(1u, x), std::max(1u, y), std::max(1u, z));
