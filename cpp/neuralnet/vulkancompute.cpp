@@ -556,10 +556,10 @@ void doHgemmCooperativeMatrixNCHW(
   assert(descriptorSet != VK_NULL_HANDLE);
   assert(A != nullptr && B != nullptr && C != nullptr);
   assert(result != nullptr);
+  const auto& hgemmParams = tuneParams.hgemmCooperativeMatrixNCHW;
   if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 ||
-     !tuneParams.hgemmCooperativeMatrixNCHW.isValid() ||
-     N % tuneParams.hgemmCooperativeMatrixNCHW.getRequiredCDivisor() != 0 ||
-     K % tuneParams.hgemmCooperativeMatrixNCHW.getRequiredCDivisor() != 0) {
+     !hgemmParams.isValid() || M % hgemmParams.getRequiredSpatialAlignment() != 0 ||
+     N % hgemmParams.NWG != 0 || K % hgemmParams.KWG != 0) {
     *result = VK_ERROR_INITIALIZATION_FAILED;
     return;
   }
@@ -577,14 +577,14 @@ void doHgemmCooperativeMatrixNCHW(
     cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
   );
 
-  const vk_shader::push::HGemmCooperativeMatrixNCHWParams params = {K, M, N};
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+  const vk_shader::push::HGemmCooperativeMatrixNCHWParams pushParams = {K, M, N};
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
 
   const uint32_t wgCountX = static_cast<uint32_t>(
-    (M + tuneParams.hgemmCooperativeMatrixNCHW.MWG - 1) / tuneParams.hgemmCooperativeMatrixNCHW.MWG
+    (M + hgemmParams.MWG - 1) / hgemmParams.MWG
   );
   const uint32_t wgCountY = static_cast<uint32_t>(
-    (N + tuneParams.hgemmCooperativeMatrixNCHW.NWG - 1) / tuneParams.hgemmCooperativeMatrixNCHW.NWG
+    (N + hgemmParams.NWG - 1) / hgemmParams.NWG
   );
   vkCmdDispatch(cb, wgCountX, wgCountY, static_cast<uint32_t>(batchSize));
   vk_helper::barrierCommandBufferForBuffer(cb, C);

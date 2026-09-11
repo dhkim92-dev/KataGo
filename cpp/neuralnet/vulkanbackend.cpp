@@ -895,8 +895,8 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         hgemmParams.isValid() &&
-        inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
-        outChannels % hgemmParams.getRequiredCDivisor() == 0;
+        inChannels % hgemmParams.KWG == 0 &&
+        outChannels % hgemmParams.NWG == 0;
       std::vector<float> transWeights(inChannels * outChannels);
       for (int oc = 0; oc < outChannels; oc++) {
         for (int ic = 0; ic < inChannels; ic++) {
@@ -2146,8 +2146,8 @@ struct TransformerMatMulLayer {
       handle->tuneParams.vulkan.shouldUseFP16Compute &&
       handle->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
       hgemmParams.isValid() &&
-      inChannels % hgemmParams.getRequiredCDivisor() == 0 &&
-      outChannels % hgemmParams.getRequiredCDivisor() == 0;
+      inChannels % hgemmParams.KWG == 0 &&
+      outChannels % hgemmParams.NWG == 0;
     bool useFP16 = handle->usingFP16Storage || usingHgemmCooperativeMatrixNCHW;
     VkResult res = VK_ERROR_UNKNOWN;
     filter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, useFP16, &res);
@@ -4843,7 +4843,7 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.hgemmCooperativeMatrix.isValid();
   if(usingFP16TensorCoresFor1x1) {
-    const int spatialAlignment = std::max(16, tuneParams.hgemmCooperativeMatrixNCHW.MWARP);
+    const int spatialAlignment = tuneParams.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment();
     this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
   } else {
     this->paddedNNXYLen = nnXLen * nnYLen;
@@ -4981,6 +4981,21 @@ struct InputBuffers {
   float* scoreValueResults; //Host pointer
   float* ownershipResults; //Host pointer
   half_t* ownershipResultsHalf; //Host pointer
+  int halfSpatialCapacity;
+
+  void ensureHalfSpatialCapacity(
+    int inputChannels, int policyChannels, int ownershipChannels, int paddedNNXYLen
+  ) {
+    if(paddedNNXYLen <= halfSpatialCapacity)
+      return;
+    delete[] userInputBufferHalf;
+    delete[] policyResultsHalf;
+    delete[] ownershipResultsHalf;
+    halfSpatialCapacity = paddedNNXYLen;
+    userInputBufferHalf = new half_t[(size_t)inputChannels * maxBatchSize * halfSpatialCapacity];
+    policyResultsHalf = new half_t[(size_t)maxBatchSize * policyChannels * halfSpatialCapacity];
+    ownershipResultsHalf = new half_t[(size_t)maxBatchSize * halfSpatialCapacity * ownershipChannels];
+  }
 
   InputBuffers(
     const LoadedModel* loadedModel,
@@ -5018,8 +5033,8 @@ struct InputBuffers {
 
     // userInputBuffer = new float[userInputBufferElts];
     userInputBuffer = new float[(size_t)m.numInputChannels * maxBatchSize * nnXLen * nnYLen];
-    int maxPaddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, 16); // TODO: check max subgroup
-    userInputBufferHalf = new half_t[(size_t)m.numInputChannels * maxBatchSize * maxPaddedNNXYLen];
+    halfSpatialCapacity = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, 16);
+    userInputBufferHalf = new half_t[(size_t)m.numInputChannels * maxBatchSize * halfSpatialCapacity];
     userInputGlobalBuffer = new float[(size_t)m.numInputGlobalChannels * maxBatchSize];
     if(m.numInputMetaChannels > 0)
       userInputMetaBuffer = new float[(size_t)m.numInputMetaChannels * maxBatchSize];
@@ -5028,12 +5043,12 @@ struct InputBuffers {
 
     policyPassResults = new float[(size_t)maxBatchSize * m.numPolicyChannels];
     policyResults = new float[(size_t)maxBatchSize * m.numPolicyChannels * nnXLen * nnYLen];
-    policyResultsHalf = new half_t[(size_t)maxBatchSize * m.numPolicyChannels * maxPaddedNNXYLen];
+    policyResultsHalf = new half_t[(size_t)maxBatchSize * m.numPolicyChannels * halfSpatialCapacity];
     valueResults = new float[(size_t)maxBatchSize * m.numValueChannels];
 
     scoreValueResults = new float[(size_t)maxBatchSize * m.numScoreValueChannels];
     ownershipResults = new float[(size_t)maxBatchSize * nnXLen * nnYLen * m.numOwnershipChannels];
-    ownershipResultsHalf = new half_t[(size_t)maxBatchSize * maxPaddedNNXYLen * m.numOwnershipChannels];
+    ownershipResultsHalf = new half_t[(size_t)maxBatchSize * halfSpatialCapacity * m.numOwnershipChannels];
     // userInputGlobalBuffer = new float[userInputGlobalBufferElts];
     // if ( m.numInputMetaChannels > 0 ) {
     //   userInputMetaBuffer = new float[userInputMetaBufferElts];
@@ -5143,6 +5158,11 @@ void NeuralNet::getOutput(
 
   ComputeHandleInternal* handle = computeHandle->handle.get();
   bool useFP16Storage = handle->usingFP16Storage;
+  if(useFP16Storage) {
+    inputBuffers->ensureHalfSpatialCapacity(
+      numSpatialFeatures, numPolicyChannels, computeHandle->model->numOwnershipChannels, paddedNNXYLen
+    );
+  }
 
   VkResult res = VK_ERROR_UNKNOWN;
 

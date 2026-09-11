@@ -1348,7 +1348,7 @@ struct LocalDimHash {
       int VWM = 4;
       int VWN = 4;
 
-      int getRequiredCDivisor() const;
+      int getRequiredSpatialAlignment() const;
       bool isValid() const;
       bool isSimple() const;
     };

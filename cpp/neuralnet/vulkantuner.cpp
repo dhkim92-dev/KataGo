@@ -329,7 +329,8 @@ bool HGemmCooperativeMatrixTuneParams::isValid() const {
   return isMultipleOf(MWG, MWAVE) && isMultipleOf(NWG, NWAVE) &&
          isMultipleOf(KWG, KDIM) && isMultipleOf(MWAVE, MWARP) &&
          isMultipleOf(NWAVE, NWARP) && isMultipleOf(MWG, VWM) &&
-         isMultipleOf(NWG, VWN) && isMultipleOf(KWG, VWM);
+         isMultipleOf(NWG, VWN) && isMultipleOf(KWG, VWM) &&
+         isMultipleOf(MWARP, VWM) && isMultipleOf(NWARP, VWN);
 }
 
 bool HGemmCooperativeMatrixTuneParams::isSimple() const {
@@ -351,20 +352,15 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
     return false;
-  if(NWG > 32)
-    return false;
-  if(!isMultipleOf(getRequiredCDivisor(), NWG) ||
-     !isMultipleOf(getRequiredCDivisor(), KWG))
-    return false;
   return isMultipleOf(MWG, MWAVE) && isMultipleOf(NWG, NWAVE) &&
          isMultipleOf(KWG, KDIM) && isMultipleOf(MWAVE, MWARP) &&
          isMultipleOf(NWAVE, NWARP) && isMultipleOf(MWG, VWM) &&
-         isMultipleOf(NWG, VWN);
+         isMultipleOf(NWG, VWN) && isMultipleOf(MWARP, VWM) &&
+         isMultipleOf(NWARP, VWN);
 }
 
-int HGemmCooperativeMatrixNCHWTuneParams::getRequiredCDivisor() const {
-  // Keep the Vulkan NCHW HGEMM channel contract identical to OpenCL.
-  return 32;
+int HGemmCooperativeMatrixNCHWTuneParams::getRequiredSpatialAlignment() const {
+  return std::lcm(std::lcm(16, MWARP), VWM);
 }
 
 bool HGemmCooperativeMatrixNCHWTuneParams::isSimple() const {
@@ -748,14 +744,12 @@ namespace {
       params.NWARP = static_cast<int>(property.NSize);
       params.KDIM = static_cast<int>(property.KSize);
       params.subgroupSize = device->info.subgroupProperties.subgroupSize;
-      if(!params.isValid()) {
-        params.MWG = params.MWARP * 2;
-        params.NWG = params.NWARP * 2;
-        params.KWG = params.KDIM * 2;
-        params.MWAVE = params.MWARP;
-        params.NWAVE = params.NWARP;
-        params.SB = 0;
-      }
+      params.MWG = params.MWARP;
+      params.NWG = params.NWARP;
+      params.KWG = params.KDIM;
+      params.MWAVE = params.MWARP;
+      params.NWAVE = params.NWARP;
+      params.SB = 0;
       if(params.isValid())
         return true;
     }
@@ -894,10 +888,7 @@ namespace {
     const TuningContext& context,
     const HGemmCooperativeMatrixNCHWTuneParams& params
   ) {
-    const int spatialAlignment = std::max(16, params.MWARP);
     return params.isValid() &&
-           spatialAlignment % params.MWARP == 0 &&
-           spatialAlignment % params.VWM == 0 &&
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
@@ -1458,11 +1449,14 @@ namespace {
         };
         if(cooperative && directGemm) {
           dimensions.gemmM = vk_helper::roundUpToMultipleInt(
-            dimensions.logicalM, std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP)
+            dimensions.logicalM, config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment()
           );
-          const int align = config.hgemmCooperativeMatrixNCHW.getRequiredCDivisor();
-          dimensions.gemmN = vk_helper::roundUpToMultipleInt(dimensions.logicalN, align);
-          dimensions.gemmK = vk_helper::roundUpToMultipleInt(dimensions.logicalK, align);
+          dimensions.gemmN = vk_helper::roundUpToMultipleInt(
+            dimensions.logicalN, config.hgemmCooperativeMatrixNCHW.NWG
+          );
+          dimensions.gemmK = vk_helper::roundUpToMultipleInt(
+            dimensions.logicalK, config.hgemmCooperativeMatrixNCHW.KWG
+          );
         }
         else if(!directGemm) {
           dimensions.gemmM = vk_helper::roundUpToMultipleInt(
@@ -4050,9 +4044,9 @@ namespace {
     }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
-      result.hgemmCooperativeMatrixNCHW.MWG = result.hgemmCooperativeMatrixNCHW.MWARP * 2;
-      result.hgemmCooperativeMatrixNCHW.NWG = result.hgemmCooperativeMatrixNCHW.NWARP * 2;
-      result.hgemmCooperativeMatrixNCHW.KWG = result.hgemmCooperativeMatrixNCHW.KDIM * 2;
+      result.hgemmCooperativeMatrixNCHW.MWG = result.hgemmCooperativeMatrixNCHW.MWARP;
+      result.hgemmCooperativeMatrixNCHW.NWG = result.hgemmCooperativeMatrixNCHW.NWARP;
+      result.hgemmCooperativeMatrixNCHW.KWG = result.hgemmCooperativeMatrixNCHW.KDIM;
       result.hgemmCooperativeMatrixNCHW.MWAVE = result.hgemmCooperativeMatrixNCHW.MWARP;
       result.hgemmCooperativeMatrixNCHW.NWAVE = result.hgemmCooperativeMatrixNCHW.NWARP;
       result.hgemmCooperativeMatrixNCHW.SB = defaults.hgemmCooperativeMatrixNCHW.SB;
@@ -4069,9 +4063,9 @@ namespace {
         accConfig.hgemmCooperativeMatrixNCHW.NWARP = shape.NSize;
         accConfig.hgemmCooperativeMatrixNCHW.KDIM = shape.KSize;
         accConfig.hgemmCooperativeMatrixNCHW.subgroupSize = shape.subgroupSize;
-        accConfig.hgemmCooperativeMatrixNCHW.MWG = shape.MSize * 2;
-        accConfig.hgemmCooperativeMatrixNCHW.NWG = shape.NSize * 2;
-        accConfig.hgemmCooperativeMatrixNCHW.KWG = shape.KSize * 2;
+        accConfig.hgemmCooperativeMatrixNCHW.MWG = shape.MSize;
+        accConfig.hgemmCooperativeMatrixNCHW.NWG = shape.NSize;
+        accConfig.hgemmCooperativeMatrixNCHW.KWG = shape.KSize;
         accConfig.hgemmCooperativeMatrixNCHW.MWAVE = shape.MSize;
         accConfig.hgemmCooperativeMatrixNCHW.NWAVE = shape.NSize;
         accConfig.hgemmCooperativeMatrixNCHW.SB = 0;

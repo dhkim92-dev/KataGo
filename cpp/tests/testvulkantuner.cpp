@@ -174,6 +174,18 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(sixteenByEightParams.MWARP == 16);
   testAssert(sixteenByEightParams.NWARP == 8);
   testAssert(sixteenByEightParams.KDIM == 16);
+  testAssert(sixteenByEightParams.isValid());
+  HGemmCooperativeMatrixNCHWTuneParams thirtyTwoByEightParams;
+  thirtyTwoByEightParams.MWARP = 32;
+  thirtyTwoByEightParams.NWARP = 8;
+  thirtyTwoByEightParams.KDIM = 16;
+  thirtyTwoByEightParams.MWG = 32;
+  thirtyTwoByEightParams.NWG = 8;
+  thirtyTwoByEightParams.KWG = 16;
+  thirtyTwoByEightParams.MWAVE = 32;
+  thirtyTwoByEightParams.NWAVE = 8;
+  testAssert(thirtyTwoByEightParams.isValid());
+  testAssert(thirtyTwoByEightParams.getRequiredSpatialAlignment() == 32);
   testAssert(!hardwareParams.shouldUseFP16Storage);
   testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
