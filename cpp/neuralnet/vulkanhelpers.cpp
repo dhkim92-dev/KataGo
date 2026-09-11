@@ -1112,6 +1112,20 @@ void vk_helper::copyDeviceBufferToHost(
     commandBuffer
   );
 
+  *result = vmaInvalidateAllocation(
+    device->allocator,
+    readbackBuffer->allocation,
+    0,
+    VK_WHOLE_SIZE
+  );
+  if(*result != VK_SUCCESS) {
+    vk_helper::releaseVulkanBuffer(
+      device,
+      readbackBuffer
+    );
+    return;
+  }
+
   // Map readback buffer and copy data to hostPtr
   void* mappedData = nullptr;
   *result = vmaMapMemory(
