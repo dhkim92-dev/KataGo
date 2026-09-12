@@ -61,6 +61,17 @@ namespace {
     return result;
   }
 
+  VKAPI_ATTR VkResult VKAPI_CALL fakeSaturatingCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    VkResult result = fakeCooperativeMatrixProperties(physicalDevice, propertyCount, properties);
+    if(properties != nullptr && result == VK_SUCCESS)
+      properties[0].saturatingAccumulation = VK_TRUE;
+    return result;
+  }
+
   VKAPI_ATTR VkResult VKAPI_CALL fakeSixteenByEightCooperativeMatrixProperties(
     VkPhysicalDevice physicalDevice,
     uint32_t* propertyCount,
@@ -140,6 +151,7 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
+  testAssert(VulkanTuner::TUNER_VERSION == 15);
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
@@ -194,7 +206,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   }
   testAssert(VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO == 1.20);
-  testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO == 0.90);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO == 1.10);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO == 0.95);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR == 2);
@@ -228,12 +240,21 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(hardwareParams.canUseFP16Compute);
   testAssert(hardwareParams.canUseCooperativeMatrix);
   testAssert(hardwareParams.canUseSubgroup);
+  VulkanDeviceInfo incompleteSubgroupDeviceInfo = deviceInfo;
+  incompleteSubgroupDeviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_FALSE;
+  testAssert(!VulkanTuner::getHardwareParams(incompleteSubgroupDeviceInfo).canUseCooperativeMatrix);
+  testAssert(!vk_shader::tune::isValidCooperativeMatrixConfig(
+    incompleteSubgroupDeviceInfo, defaults.hgemmCooperativeMatrix
+  ));
   VulkanDeviceInfo nonSubgroupDeviceInfo = deviceInfo;
   nonSubgroupDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonSubgroupCooperativeMatrixProperties;
   testAssert(!VulkanTuner::getHardwareParams(nonSubgroupDeviceInfo).canUseCooperativeMatrix);
   VulkanDeviceInfo nonPowerOfTwoDeviceInfo = deviceInfo;
   nonPowerOfTwoDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonPowerOfTwoCooperativeMatrixProperties;
   testAssert(!VulkanTuner::getHardwareParams(nonPowerOfTwoDeviceInfo).canUseCooperativeMatrix);
+  VulkanDeviceInfo saturatingDeviceInfo = deviceInfo;
+  saturatingDeviceInfo.cooperativeMatrixPropertiesFn = fakeSaturatingCooperativeMatrixProperties;
+  testAssert(!VulkanTuner::getHardwareParams(saturatingDeviceInfo).canUseCooperativeMatrix);
   VulkanDevice sixteenByEightDevice = {};
   sixteenByEightDevice.info = deviceInfo;
   sixteenByEightDevice.info.cooperativeMatrixPropertiesFn = fakeSixteenByEightCooperativeMatrixProperties;
@@ -325,6 +346,11 @@ void Tests::runVulkanTunerPersistenceTests() {
   multiSubgroupParams.NWAVE = 32;
   testAssert(multiSubgroupParams.isValid());
   testAssert(isValidCooperativeMatrixConfig(deviceInfo, multiSubgroupParams));
+  VulkanDeviceInfo twoDimensionalWorkgroupDeviceInfo = deviceInfo;
+  twoDimensionalWorkgroupDeviceInfo.properties.limits.maxComputeWorkGroupSize[0] = 64;
+  testAssert(isValidCooperativeMatrixConfig(twoDimensionalWorkgroupDeviceInfo, multiSubgroupParams));
+  twoDimensionalWorkgroupDeviceInfo.properties.limits.maxComputeWorkGroupSize[1] = 1;
+  testAssert(!isValidCooperativeMatrixConfig(twoDimensionalWorkgroupDeviceInfo, multiSubgroupParams));
   HGemmCooperativeMatrixNCHWTuneParams multiSubgroupNCHWParams;
   multiSubgroupNCHWParams.MWG = 64;
   multiSubgroupNCHWParams.NWG = 64;

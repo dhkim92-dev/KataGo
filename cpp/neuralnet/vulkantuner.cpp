@@ -75,6 +75,7 @@ namespace {
       ? VK_COMPONENT_TYPE_FLOAT16_KHR
       : VK_COMPONENT_TYPE_FLOAT32_KHR;
     return property.scope == VK_SCOPE_SUBGROUP_KHR &&
+           property.saturatingAccumulation == VK_FALSE &&
            property.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
            property.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
            property.CType == expectedType &&
@@ -215,6 +216,9 @@ namespace {
     int kSize,
     uint32_t subgroupSize
   ) {
+    if(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups != VK_TRUE ||
+       (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0)
+      return false;
     vector<VkCooperativeMatrixPropertiesKHR> properties;
     if(!getSupportedCooperativeMatrixProperties(
          deviceInfo.physicalDevice,
@@ -239,16 +243,16 @@ namespace {
   ) {
     if(!params.isValid())
       return false;
-    const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) *
-      (params.NWAVE / params.NWARP) * params.subgroupSize;
+    const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) * params.subgroupSize;
+    const uint64_t localSizeY = static_cast<uint64_t>(params.NWAVE / params.NWARP);
     const uint64_t sharedHalfElements =
       (params.SA == 1 ? static_cast<uint64_t>(params.MWG) * params.KWG : 0) +
       (params.SB == 1 ? static_cast<uint64_t>(params.NWG) * params.KWG : 0);
     const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
     return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
-           1 <= limits.maxComputeWorkGroupSize[1] &&
+           localSizeY <= limits.maxComputeWorkGroupSize[1] &&
            1 <= limits.maxComputeWorkGroupSize[2] &&
-           localSizeX <= limits.maxComputeWorkGroupInvocations &&
+           localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations &&
            sharedHalfElements * sizeof(uint16_t) <= limits.maxComputeSharedMemorySize;
   }
 
@@ -258,15 +262,15 @@ namespace {
   ) {
     if(!params.isValid())
       return false;
-    const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) *
-      (params.NWAVE / params.NWARP) * params.subgroupSize;
+    const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) * params.subgroupSize;
+    const uint64_t localSizeY = static_cast<uint64_t>(params.NWAVE / params.NWARP);
     const uint64_t sharedHalfElements = static_cast<uint64_t>(params.MWG) * params.NWG +
       (params.SB == 1 ? static_cast<uint64_t>(params.NWG) * params.KWG : 0);
     const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
     return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
-           1 <= limits.maxComputeWorkGroupSize[1] &&
+           localSizeY <= limits.maxComputeWorkGroupSize[1] &&
            1 <= limits.maxComputeWorkGroupSize[2] &&
-           localSizeX <= limits.maxComputeWorkGroupInvocations &&
+           localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations &&
            sharedHalfElements * sizeof(uint16_t) <= limits.maxComputeSharedMemorySize;
   }
 }
@@ -277,10 +281,10 @@ VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) 
     deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
     deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
   params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
-  params.canUseCooperativeMatrix = supportsCooperativeMatrix(deviceInfo);
   params.canUseSubgroup =
     (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+  params.canUseCooperativeMatrix = params.canUseSubgroup && supportsCooperativeMatrix(deviceInfo);
   return params;
 }
 
@@ -1736,6 +1740,7 @@ namespace {
         return config.vulkan.shouldUseFP16Storage;
       };
       vector<float> gemmInput, gemmFilter;
+      bool gemmOutputIsHalf = false;
       vector<vector<float>> hostFloatBuffers;
       hostFloatBuffers.reserve(descriptorCount);
       struct PendingUpload {
@@ -1770,6 +1775,8 @@ namespace {
       size_t tuningBufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
+          if(isGemm && binding == outputBinding(pipeline))
+            gemmOutputIsHalf = halfBinding(pipeline, binding);
           vector<float> data(scratchBytes / sizeof(float), 0.0f);
           Rand rand("VulkanTunerInput:" + to_string(binding));
           if(binding != outputBinding(pipeline)) {
@@ -1783,8 +1790,12 @@ namespace {
                     data[(static_cast<size_t>(n) * gemmK + k) * width + x] =
                       static_cast<float>(rand.nextDouble() - 0.5) / sqrtf(static_cast<float>(logicalK));
               if(cpuReference != nullptr) {
-                if(binding == 0) gemmInput = data;
-                else gemmFilter = data;
+                vector<float>& referenceInput = binding == 0 ? gemmInput : gemmFilter;
+                referenceInput = data;
+                if(halfBinding(pipeline, binding)) {
+                  for(float& value: referenceInput)
+                    value = half_float::half_cast<float>(half_float::half_cast<half_t>(value));
+                }
               }
             }
             else {
@@ -1944,7 +1955,8 @@ namespace {
         }
       }
       if(isGemm && cpuReference != nullptr) {
-        // The reference uses logical float inputs, before half quantization.
+        // Match the actual storage conversion so the validation error measures
+        // the GEMM itself instead of charging every candidate for FP16 I/O rounding.
         for(const GemmTuneCase& gemmCase: plan.gemmCases) {
           const GemmDimensions dimensions = getGemmDimensions(gemmCase.inChannels, gemmCase.outChannels);
           for(int n = 0; n < gemmBatch; n++)
@@ -1957,7 +1969,10 @@ namespace {
                   ]) * gemmFilter[
                     (static_cast<size_t>(directGemm ? 0 : n) * dimensions.gemmK + k) * dimensions.gemmN + y
                   ];
-                cpuReference->push_back(static_cast<float>(sum));
+                float resultValue = static_cast<float>(sum);
+                if(gemmOutputIsHalf)
+                  resultValue = half_float::half_cast<float>(half_float::half_cast<half_t>(resultValue));
+                cpuReference->push_back(resultValue);
               }
         }
       }
@@ -4045,7 +4060,11 @@ namespace {
         }
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
-        const double score = VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
+        const bool cooperativeMatrixError =
+          (Tuner::name() == "hgemmCooperativeMatrix" || Tuner::name() == "hgemmCooperativeMatrixNCHW") &&
+          errorProp > plan.errorTolerance;
+        const double score = cooperativeMatrixError ? 0.0 :
+          VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
         if(!context.printOnlyOnImprovement || isBest) {

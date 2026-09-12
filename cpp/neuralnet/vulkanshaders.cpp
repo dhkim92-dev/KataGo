@@ -965,9 +965,8 @@ namespace vk_shader {
       return VK_ERROR_INITIALIZATION_FAILED;
 
     HGemmCooperativeMatrixSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) *
-      static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP) * tuneParams.subgroupSize;
-    spec.localSizeY = 1;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
     spec.localSizeZ = 1;
     spec.MSize = tuneParams.MWARP;
     spec.NSize = tuneParams.NWARP;
@@ -1021,8 +1020,7 @@ namespace vk_shader {
     return createPipeline(
       name, shaderModules[variant], 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
       &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE
-        ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
     );
   }
 
@@ -1031,9 +1029,8 @@ namespace vk_shader {
       return VK_ERROR_INITIALIZATION_FAILED;
 
     HGemmCooperativeMatrixNCHWSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) *
-      static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP) * tuneParams.subgroupSize;
-    spec.localSizeY = 1;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
     spec.localSizeZ = 1;
     spec.MSize = tuneParams.MWARP;
     spec.NSize = tuneParams.NWARP;
@@ -1076,8 +1073,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE
-        ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
     );
   }
 
