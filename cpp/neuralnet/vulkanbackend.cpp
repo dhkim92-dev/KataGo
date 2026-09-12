@@ -890,7 +890,6 @@ struct ConvLayer {
       usingHgemmCooperativeMatrixNCHW =
         handle_->usingFP16Storage &&
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
-        handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
@@ -2141,7 +2140,6 @@ struct TransformerMatMulLayer {
     usingHgemmCooperativeMatrixNCHW =
       handle->usingFP16Storage &&
       handle->tuneParams.vulkan.canUseCooperativeMatrix &&
-      handle->tuneParams.vulkan.shouldUseCooperativeMatrix &&
       handle->tuneParams.vulkan.shouldUseFP16Storage &&
       handle->tuneParams.vulkan.shouldUseFP16Compute &&
       handle->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
@@ -4831,7 +4829,6 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.canUseFP16Storage &&
     tuneParams.vulkan.canUseFP16Compute &&
     tuneParams.vulkan.canUseCooperativeMatrix &&
-    tuneParams.vulkan.shouldUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseFP16Storage &&
     tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&

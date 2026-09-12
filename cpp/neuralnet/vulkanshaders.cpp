@@ -590,7 +590,6 @@ namespace vk_shader {
       if((result = createHgemmCooperativeMatrix(hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
     }
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
-       tuneParams.vulkan.shouldUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&

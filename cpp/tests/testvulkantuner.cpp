@@ -326,6 +326,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());
+  params.vulkan.shouldUseCooperativeMatrix = false;
+  testAssert(params.isValid());
   VulkanTuneParams::save(filename, params);
   VulkanTuneParams loaded = VulkanTuneParams::load(filename);
   testAssert(loaded == params);

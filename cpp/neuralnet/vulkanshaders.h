@@ -1386,6 +1386,7 @@ struct LocalDimHash {
       bool canUseSubgroup = false;
       bool shouldUseFP16Storage = false;
       bool shouldUseFP16Compute = false;
+      // Generic Winograd HGEMM only. NCHW HGEMM is controlled independently below.
       bool shouldUseCooperativeMatrix = false;
       bool shouldUseHgemmCooperativeMatrixNCHW = false;
       bool shouldUseSubgroup = false;

@@ -493,7 +493,7 @@ bool VulkanTuneParams::isValid() const {
   if(vulkan.shouldUseCooperativeMatrix && !vulkan.canUseCooperativeMatrix)
     return false;
   if(vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-     (!vulkan.canUseCooperativeMatrix || !vulkan.shouldUseCooperativeMatrix ||
+     (!vulkan.canUseCooperativeMatrix ||
       !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute))
     return false;
   return VulkanTuningProfile::isValid();
@@ -1371,7 +1371,6 @@ namespace {
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
       const bool useNCHWCooperativeMatrix =
         config.vulkan.canUseCooperativeMatrix &&
-        config.vulkan.shouldUseCooperativeMatrix &&
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         config.hgemmCooperativeMatrixNCHW.isValid();
       const bool usePaddedNCHWXY =
@@ -1383,7 +1382,6 @@ namespace {
         config.vulkan.shouldUseFP16Storage &&
         config.vulkan.shouldUseFP16Compute &&
         config.vulkan.canUseCooperativeMatrix &&
-        config.vulkan.shouldUseCooperativeMatrix &&
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         config.hgemmCooperativeMatrixNCHW.isValid();
       const size_t xySize = usePaddedNCHWXY || usePaddedGpoolXY
@@ -1400,7 +1398,6 @@ namespace {
         config.vulkan.canUseFP16Storage &&
         config.vulkan.canUseFP16Compute &&
         config.vulkan.canUseCooperativeMatrix &&
-        config.vulkan.shouldUseCooperativeMatrix &&
         config.vulkan.shouldUseFP16Storage &&
         config.vulkan.shouldUseFP16Compute &&
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
@@ -4895,7 +4892,7 @@ namespace {
     bool canUseHgemmCooperativeMatrix,
     bool canUseNCHW
   ) {
-    if(!canUseHgemmCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
+    if((!canUseHgemmCooperativeMatrix && !canUseNCHW) || !config.vulkan.canUseFP16Storage ||
        !config.vulkan.canUseFP16Compute) {
       if(context.logger != nullptr)
         context.logger->write(
@@ -4908,8 +4905,9 @@ namespace {
     VulkanTuneParams cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = true;
-    const double hgemmCallsPerSecond = runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig);
-    const bool useHgemm = VulkanTuner::isFastEnough(
+    const double hgemmCallsPerSecond = canUseHgemmCooperativeMatrix
+      ? runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig) : 0.0;
+    const bool useHgemm = canUseHgemmCooperativeMatrix && VulkanTuner::isFastEnough(
       hgemmCallsPerSecond, xgemmBaselineCallsPerSecond, VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
     );
     if(useHgemm) {
@@ -4933,16 +4931,16 @@ namespace {
     const double hgemmNCHWCallsPerSecond = canUseNCHW
       ? runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, cooperativeConfig)
       : 0.0;
-    const bool useHgemmNCHW = config.vulkan.shouldUseCooperativeMatrix && VulkanTuner::isFastEnough(
+    const bool useHgemmNCHW = canUseNCHW && VulkanTuner::isFastEnough(
       hgemmNCHWCallsPerSecond, xgemmDirectBaselineCallsPerSecond,
       VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
     );
     if(useHgemmNCHW) {
       config.hgemmCooperativeMatrixNCHW = cooperativeConfig.hgemmCooperativeMatrixNCHW;
-      config.vulkan.shouldUseCooperativeMatrix = true;
       config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
+      config.vulkan.shouldUseFP16Compute = true;
     }
-    if(config.vulkan.shouldUseCooperativeMatrix)
+    if(config.vulkan.shouldUseCooperativeMatrix || config.vulkan.shouldUseHgemmCooperativeMatrixNCHW)
       config.vulkan.shouldUseFP16Storage = true;
     if(context.logger != nullptr) {
       context.logger->write(
@@ -5010,7 +5008,7 @@ void VulkanTuner::tune(
     tunedConfig.vulkan.canUseCooperativeMatrix &&
     HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(device, tunedConfig.hgemmCooperativeMatrix);
   const bool canUseHgemmCooperativeMatrixNCHW =
-    canUseHgemmCooperativeMatrix &&
+    tunedConfig.vulkan.canUseCooperativeMatrix &&
     HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(
       device, tunedConfig.hgemmCooperativeMatrixNCHW
     );
