@@ -2,6 +2,7 @@
 
 #include "../tests/tests.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -14,6 +15,25 @@
 using namespace std;
 
 namespace {
+  void setCooperativeMatrixProperty(
+    VkCooperativeMatrixPropertiesKHR& property,
+    uint32_t mSize,
+    uint32_t nSize,
+    uint32_t kSize,
+    VkComponentTypeKHR accumulatorType = VK_COMPONENT_TYPE_FLOAT16_KHR
+  ) {
+    property = {};
+    property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    property.MSize = mSize;
+    property.NSize = nSize;
+    property.KSize = kSize;
+    property.AType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    property.BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+    property.CType = accumulatorType;
+    property.ResultType = accumulatorType;
+    property.scope = VK_SCOPE_SUBGROUP_KHR;
+  }
+
   VKAPI_ATTR VkResult VKAPI_CALL fakeCooperativeMatrixProperties(
     VkPhysicalDevice,
     uint32_t* propertyCount,
@@ -25,16 +45,7 @@ namespace {
     }
     if(*propertyCount == 0)
       return VK_INCOMPLETE;
-    properties[0] = {};
-    properties[0].sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-    properties[0].MSize = 16;
-    properties[0].NSize = 16;
-    properties[0].KSize = 16;
-    properties[0].AType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-    properties[0].BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-    properties[0].CType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-    properties[0].ResultType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-    properties[0].scope = VK_SCOPE_SUBGROUP_KHR;
+    setCooperativeMatrixProperty(properties[0], 16, 16, 16);
     *propertyCount = 1;
     return VK_SUCCESS;
   }
@@ -83,6 +94,31 @@ namespace {
       properties[0].ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
     }
     return result;
+  }
+
+  int incompletePropertyDataQueries = 0;
+  VKAPI_ATTR VkResult VKAPI_CALL fakeIncompleteCooperativeMatrixProperties(
+    VkPhysicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    if(properties == nullptr) {
+      *propertyCount = incompletePropertyDataQueries == 0 ? 1 : 4;
+      return VK_SUCCESS;
+    }
+    if(incompletePropertyDataQueries++ == 0) {
+      if(*propertyCount > 0)
+        setCooperativeMatrixProperty(properties[0], 16, 16, 16);
+      *propertyCount = std::min<uint32_t>(*propertyCount, 1);
+      return VK_INCOMPLETE;
+    }
+    const uint32_t count = std::min<uint32_t>(*propertyCount, 4);
+    if(count > 0) setCooperativeMatrixProperty(properties[0], 1, 1, 1);
+    if(count > 1) setCooperativeMatrixProperty(properties[1], 8, 32, 16);
+    if(count > 2) setCooperativeMatrixProperty(properties[2], 8, 32, 16);
+    if(count > 3) setCooperativeMatrixProperty(properties[3], 32, 8, 16, VK_COMPONENT_TYPE_FLOAT32_KHR);
+    *propertyCount = count;
+    return VK_SUCCESS;
   }
 
   bool loadThrows(const string& filename) {
@@ -160,6 +196,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO == 0.90);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO == 1.20);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO == 0.95);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR == 2);
 
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
   testAssert(
@@ -180,6 +218,11 @@ void Tests::runVulkanTunerPersistenceTests() {
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
   deviceInfo.subgroupProperties.subgroupSize = 32;
   deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  deviceInfo.properties.limits.maxComputeWorkGroupSize[0] = 1024;
+  deviceInfo.properties.limits.maxComputeWorkGroupSize[1] = 1024;
+  deviceInfo.properties.limits.maxComputeWorkGroupSize[2] = 64;
+  deviceInfo.properties.limits.maxComputeWorkGroupInvocations = 1024;
+  deviceInfo.properties.limits.maxComputeSharedMemorySize = 32768;
   const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(deviceInfo);
   testAssert(hardwareParams.canUseFP16Storage);
   testAssert(hardwareParams.canUseFP16Compute);
@@ -228,6 +271,38 @@ void Tests::runVulkanTunerPersistenceTests() {
     &float32AccumulatorDevice, float32AccumulatorNCHWParams
   ));
   testAssert(float32AccumulatorNCHWParams.accType == 32);
+  VulkanDevice incompletePropertyDevice = {};
+  incompletePropertyDevice.info = deviceInfo;
+  incompletePropertyDevice.info.cooperativeMatrixPropertiesFn = fakeIncompleteCooperativeMatrixProperties;
+  incompletePropertyDataQueries = 0;
+  HGemmCooperativeMatrixTuneParams oneByOneParams;
+  oneByOneParams.MWARP = 1;
+  oneByOneParams.NWARP = 1;
+  oneByOneParams.KDIM = 1;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+    &incompletePropertyDevice, oneByOneParams
+  ));
+  testAssert(incompletePropertyDataQueries >= 2);
+  testAssert(oneByOneParams.MWARP == 1 && oneByOneParams.NWARP == 1 && oneByOneParams.KDIM == 1);
+  testAssert(oneByOneParams.VWM == 1 && oneByOneParams.VWN == 1);
+  HGemmCooperativeMatrixTuneParams asymmetricParams;
+  asymmetricParams.MWARP = 8;
+  asymmetricParams.NWARP = 32;
+  asymmetricParams.KDIM = 16;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+    &incompletePropertyDevice, asymmetricParams
+  ));
+  testAssert(asymmetricParams.MWARP == 8 && asymmetricParams.NWARP == 32 && asymmetricParams.KDIM == 16);
+  HGemmCooperativeMatrixTuneParams asymmetricFloat32Params;
+  asymmetricFloat32Params.accType = 32;
+  asymmetricFloat32Params.MWARP = 32;
+  asymmetricFloat32Params.NWARP = 8;
+  asymmetricFloat32Params.KDIM = 16;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+    &incompletePropertyDevice, asymmetricFloat32Params
+  ));
+  testAssert(asymmetricFloat32Params.accType == 32 && asymmetricFloat32Params.MWARP == 32 &&
+             asymmetricFloat32Params.NWARP == 8 && asymmetricFloat32Params.KDIM == 16);
   HGemmCooperativeMatrixTuneParams nonPowerOfTwoParams = sixteenByEightParams;
   nonPowerOfTwoParams.NWARP = 24;
   testAssert(!nonPowerOfTwoParams.isValid());
@@ -242,6 +317,46 @@ void Tests::runVulkanTunerPersistenceTests() {
   thirtyTwoByEightParams.NWAVE = 8;
   testAssert(thirtyTwoByEightParams.isValid());
   testAssert(thirtyTwoByEightParams.getRequiredSpatialAlignment() == 32);
+  HGemmCooperativeMatrixTuneParams multiSubgroupParams;
+  multiSubgroupParams.MWG = 64;
+  multiSubgroupParams.NWG = 64;
+  multiSubgroupParams.KWG = 32;
+  multiSubgroupParams.MWAVE = 32;
+  multiSubgroupParams.NWAVE = 32;
+  testAssert(multiSubgroupParams.isValid());
+  testAssert(isValidCooperativeMatrixConfig(deviceInfo, multiSubgroupParams));
+  HGemmCooperativeMatrixNCHWTuneParams multiSubgroupNCHWParams;
+  multiSubgroupNCHWParams.MWG = 64;
+  multiSubgroupNCHWParams.NWG = 64;
+  multiSubgroupNCHWParams.KWG = 32;
+  multiSubgroupNCHWParams.MWAVE = 32;
+  multiSubgroupNCHWParams.NWAVE = 32;
+  testAssert(multiSubgroupNCHWParams.isValid());
+  testAssert(isValidCooperativeMatrixConfig(deviceInfo, multiSubgroupNCHWParams));
+  HGemmCooperativeMatrixTuneParams kDimensionOneParams;
+  kDimensionOneParams.MWARP = 4;
+  kDimensionOneParams.NWARP = 4;
+  kDimensionOneParams.KDIM = 1;
+  kDimensionOneParams.MWG = 4;
+  kDimensionOneParams.NWG = 4;
+  kDimensionOneParams.KWG = 1;
+  kDimensionOneParams.MWAVE = 4;
+  kDimensionOneParams.NWAVE = 4;
+  kDimensionOneParams.VWM = 4;
+  kDimensionOneParams.VWN = 4;
+  testAssert(kDimensionOneParams.isValid());
+  HGemmCooperativeMatrixTuneParams nonPowerOfTwoRatioParams = multiSubgroupParams;
+  nonPowerOfTwoRatioParams.MWAVE = 48;
+  nonPowerOfTwoRatioParams.MWG = 96;
+  testAssert(!nonPowerOfTwoRatioParams.isValid());
+  VulkanDeviceInfo limitedDeviceInfo = deviceInfo;
+  limitedDeviceInfo.properties.limits.maxComputeWorkGroupInvocations = 64;
+  testAssert(!isValidCooperativeMatrixConfig(limitedDeviceInfo, multiSubgroupParams));
+  VulkanDeviceInfo limitedSharedMemoryDeviceInfo = deviceInfo;
+  limitedSharedMemoryDeviceInfo.properties.limits.maxComputeSharedMemorySize = 1024;
+  HGemmCooperativeMatrixTuneParams sharedMemoryParams = multiSubgroupParams;
+  sharedMemoryParams.SA = 1;
+  testAssert(!isValidCooperativeMatrixConfig(limitedSharedMemoryDeviceInfo, sharedMemoryParams));
   testAssert(!hardwareParams.shouldUseFP16Storage);
   testAssert(!hardwareParams.shouldUseFP16Compute);
   defaults.vulkan.canUseFP16Storage = true;
@@ -279,6 +394,17 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(
     VulkanTuner::loadOrCreate(defaultsFilename, "", "", 19, 19, modelInfo, deviceInfo, nullptr) == defaults
   );
+  const string deviceLimitedFilename = "tests/scratch/vulkantuner-device-limited.txt";
+  VulkanTuneParams deviceLimitedConfig = defaults;
+  deviceLimitedConfig.vulkan.shouldUseFP16Storage = true;
+  deviceLimitedConfig.vulkan.shouldUseFP16Compute = true;
+  deviceLimitedConfig.vulkan.shouldUseCooperativeMatrix = true;
+  deviceLimitedConfig.hgemmCooperativeMatrix = multiSubgroupParams;
+  VulkanTuneParams::save(deviceLimitedFilename, deviceLimitedConfig);
+  const VulkanTuneParams revalidatedConfig = VulkanTuner::loadOrCreate(
+    deviceLimitedFilename, "", "", 19, 19, modelInfo, limitedDeviceInfo, nullptr
+  );
+  testAssert(!revalidatedConfig.vulkan.shouldUseCooperativeMatrix);
   vector<string> defaultLines = FileUtils::readFileLines(defaultsFilename, '\n');
   testAssert(defaultLines[0] == "VERSION=" + to_string(VulkanTuner::TUNER_VERSION));
   testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");

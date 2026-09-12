@@ -9,6 +9,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <algorithm>
 
 #ifndef VMA_IMPLEMENTATION
 #define VMA_IMPLEMENTATION
@@ -385,12 +386,15 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
         default: return "UNKNOWN(" + std::to_string(static_cast<int>(type)) + ")";
         }
       };
-      uint32_t propertyCount = 0;
-      VkResult propertyResult = deviceInfo.cooperativeMatrixPropertiesFn == nullptr
-        ? VK_ERROR_EXTENSION_NOT_PRESENT
-        : deviceInfo.cooperativeMatrixPropertiesFn(physicalDevice, &propertyCount, nullptr);
-      if(propertyResult == VK_SUCCESS && propertyCount > 0) {
-        std::vector<VkCooperativeMatrixPropertiesKHR> cooperativeProperties(propertyCount);
+      std::vector<VkCooperativeMatrixPropertiesKHR> cooperativeProperties;
+      while(deviceInfo.cooperativeMatrixPropertiesFn != nullptr) {
+        uint32_t propertyCount = 0;
+        VkResult propertyResult = deviceInfo.cooperativeMatrixPropertiesFn(
+          physicalDevice, &propertyCount, nullptr
+        );
+        if((propertyResult != VK_SUCCESS && propertyResult != VK_INCOMPLETE) || propertyCount == 0)
+          break;
+        cooperativeProperties.assign(propertyCount, {});
         for(VkCooperativeMatrixPropertiesKHR& property: cooperativeProperties) {
           property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
           property.pNext = nullptr;
@@ -398,21 +402,26 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
         propertyResult = deviceInfo.cooperativeMatrixPropertiesFn(
           physicalDevice, &propertyCount, cooperativeProperties.data()
         );
-        if(propertyResult == VK_SUCCESS || propertyResult == VK_INCOMPLETE) {
-          for(uint32_t propertyIndex = 0; propertyIndex < propertyCount; propertyIndex++) {
-            const VkCooperativeMatrixPropertiesKHR& property = cooperativeProperties[propertyIndex];
-            writeFeatureSupport(
-              "  Cooperative Matrix Property[" + std::to_string(propertyIndex) + "]: " +
-              "M=" + std::to_string(property.MSize) +
-              " N=" + std::to_string(property.NSize) +
-              " K=" + std::to_string(property.KSize) +
-              " AType=" + componentTypeName(property.AType) +
-              " BType=" + componentTypeName(property.BType) +
-              " CType=" + componentTypeName(property.CType) +
-              " ResultType=" + componentTypeName(property.ResultType)
-            );
-          }
-        }
+        if(propertyResult == VK_INCOMPLETE)
+          continue;
+        if(propertyResult != VK_SUCCESS)
+          cooperativeProperties.clear();
+        else
+          cooperativeProperties.resize(propertyCount);
+        break;
+      }
+      for(size_t propertyIndex = 0; propertyIndex < cooperativeProperties.size(); propertyIndex++) {
+        const VkCooperativeMatrixPropertiesKHR& property = cooperativeProperties[propertyIndex];
+        writeFeatureSupport(
+          "  Cooperative Matrix Property[" + std::to_string(propertyIndex) + "]: " +
+          "M=" + std::to_string(property.MSize) +
+          " N=" + std::to_string(property.NSize) +
+          " K=" + std::to_string(property.KSize) +
+          " AType=" + componentTypeName(property.AType) +
+          " BType=" + componentTypeName(property.BType) +
+          " CType=" + componentTypeName(property.CType) +
+          " ResultType=" + componentTypeName(property.ResultType)
+        );
       }
     }
 
@@ -470,6 +479,25 @@ VulkanDevice* vk_helper::createVulkanDevice(
       throw StringError("Required device extension " + std::string(requiredExt) + " is not available on device " + deviceInfo.deviceName);
     }
   }
+
+  const bool subgroupSizeControlCore =
+    VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) > 1 ||
+    (VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
+     VK_VERSION_MINOR(deviceInfo.properties.apiVersion) >= 3);
+  const bool subgroupSizeControlExtensionAvailable = std::any_of(
+    availableExtensions.begin(), availableExtensions.end(), [](const VkExtensionProperties& extension) {
+      return std::string(extension.extensionName) == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+    }
+  );
+  const bool subgroupSizeControlAlreadyRequested = std::any_of(
+    requiredExtensions.begin(), requiredExtensions.end(), [](const char* extension) {
+      return std::string(extension) == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+    }
+  );
+  if(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE &&
+     !subgroupSizeControlCore && subgroupSizeControlExtensionAvailable &&
+     !subgroupSizeControlAlreadyRequested)
+    requiredExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 
   const float queuePriorities[2] = {1.0f, 1.0f};
   uint32_t queueFamilyPropertyCount = 0;
@@ -537,7 +565,19 @@ VulkanDevice* vk_helper::createVulkanDevice(
     m4Features.maintenance4 = VK_TRUE;
   }
   
+  const bool enableComputeFullSubgroups =
+    deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE &&
+    (subgroupSizeControlCore || subgroupSizeControlExtensionAvailable);
+  VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures = {};
+  subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+  if(enableComputeFullSubgroups) {
+    subgroupSizeControlFeatures.subgroupSizeControl =
+      deviceInfo.subgroupSizeControlFeatures.subgroupSizeControl;
+    subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  }
+
   cmFeatures.pNext = &m4Features;
+  m4Features.pNext = enableComputeFullSubgroups ? &subgroupSizeControlFeatures : nullptr;
   storage16BitFeatures.pNext = &f16Feat;
   f16Feat.pNext = &cmFeatures;
 
@@ -562,6 +602,8 @@ VulkanDevice* vk_helper::createVulkanDevice(
 
   VulkanDevice* vulkanDevice = new VulkanDevice();
   vulkanDevice->info = deviceInfo;
+  vulkanDevice->info.subgroupSizeControlFeatures.computeFullSubgroups =
+    enableComputeFullSubgroups ? VK_TRUE : VK_FALSE;
   vulkanDevice->device = device;
   vulkanDevice->queue = queue;
   if(queueCount >= 2)
@@ -653,12 +695,14 @@ VkPipeline vk_helper::createComputePipeline(
     VkShaderModule computeShaderModule,
     VkResult *result,
     VkSpecializationInfo* specializationInfo,
-    std::string entryPointName
+    std::string entryPointName,
+    VkPipelineShaderStageCreateFlags stageFlags
 ) {
   VkComputePipelineCreateInfo pipelineCI = {};
   pipelineCI.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
   pipelineCI.layout = pipelineLayout;
   pipelineCI.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  pipelineCI.stage.flags = stageFlags;
   pipelineCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   pipelineCI.stage.module = computeShaderModule;
   pipelineCI.stage.pName = entryPointName.data();

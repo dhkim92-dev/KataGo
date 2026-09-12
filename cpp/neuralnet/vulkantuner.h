@@ -2,6 +2,8 @@
 #ifndef NEURALNET_VULKANTUNER_H_
 #define NEURALNET_VULKANTUNER_H_
 
+#include <cstddef>
+
 #include "../core/logger.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/vulkanhelpers.h"
@@ -11,7 +13,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 13;
+  constexpr int TUNER_VERSION = 14;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -19,6 +21,8 @@ namespace VulkanTuner {
   constexpr double FP16_STORAGE_MIN_THROUGHPUT_RATIO = 1.20;
   constexpr double COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO = 0.90;
   constexpr double COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO = 1.20;
+  constexpr double COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO = 0.95;
+  constexpr std::size_t COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR = 2;
 
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);

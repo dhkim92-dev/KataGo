@@ -549,7 +549,9 @@ namespace vk_shader {
     shaderModuleFields.clear();
   }
 
-  ComputePipelines::ComputePipelines(VkDevice device_, Logger* logger_): device(device_), logger(logger_) {
+  ComputePipelines::ComputePipelines(
+    VkDevice device_, const VulkanDeviceInfo& deviceInfo_, Logger* logger_
+  ): device(device_), deviceInfo(deviceInfo_), logger(logger_) {
     VkResult res = VK_ERROR_UNKNOWN;
     cache = vk_helper::createPipelineCache(device, &res);
     if(res != VK_SUCCESS)
@@ -751,7 +753,8 @@ namespace vk_shader {
     VkSpecializationInfo* specializationInfo,
     uint32_t localSizeX,
     uint32_t localSizeY,
-    uint32_t localSizeZ
+    uint32_t localSizeZ,
+    VkPipelineShaderStageCreateFlags stageFlags
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
     if(shaderModule == VK_NULL_HANDLE)
@@ -795,7 +798,9 @@ namespace vk_shader {
     if(res != VK_SUCCESS)
       return fail(res);
 
-    pipeline = vk_helper::createComputePipeline(device, layout, cache, shaderModule, &res, specializationInfo);
+    pipeline = vk_helper::createComputePipeline(
+      device, layout, cache, shaderModule, &res, specializationInfo, "main", stageFlags
+    );
 
     if(res != VK_SUCCESS)
       return fail(res);
@@ -956,12 +961,13 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createHgemmCooperativeMatrix(Pipeline& pipeline, const HGemmCooperativeMatrixTuneParams& tuneParams) {
-    if(!tuneParams.isValid())
+    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
       return VK_ERROR_INITIALIZATION_FAILED;
 
     HGemmCooperativeMatrixSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
-    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) *
+      static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = 1;
     spec.localSizeZ = 1;
     spec.MSize = tuneParams.MWARP;
     spec.NSize = tuneParams.NWARP;
@@ -1014,17 +1020,20 @@ namespace vk_shader {
     const std::string name = hgemmVariantName(shaderStem, shaderSuffix, tuneParams.VWM, tuneParams.VWN);
     return createPipeline(
       name, shaderModules[variant], 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
-      &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+      &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
+      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE
+        ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0
     );
   }
 
   VkResult ComputePipelines::createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const HGemmCooperativeMatrixNCHWTuneParams& tuneParams) {
-    if(!tuneParams.isValid())
+    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
       return VK_ERROR_INITIALIZATION_FAILED;
 
     HGemmCooperativeMatrixNCHWSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
-    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) *
+      static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = 1;
     spec.localSizeZ = 1;
     spec.MSize = tuneParams.MWARP;
     spec.NSize = tuneParams.NWARP;
@@ -1066,7 +1075,9 @@ namespace vk_shader {
       &specData.info,
       spec.localSizeX,
       spec.localSizeY,
-      spec.localSizeZ
+      spec.localSizeZ,
+      deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE
+        ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0
     );
   }
 

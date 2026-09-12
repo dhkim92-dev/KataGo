@@ -123,8 +123,10 @@ void main() {
   const int groupM = int(gl_WorkGroupID.x);
   const int groupN = int(gl_WorkGroupID.y);
   const int batch = int(gl_WorkGroupID.z);
-  const int subgroupM = int(gl_LocalInvocationID.x) / int(gl_SubgroupSize);
-  const int subgroupN = int(gl_LocalInvocationID.y);
+  const int subgroupCountM = MWAVE / MSize;
+  const int subgroupLinear = int(gl_SubgroupID);
+  const int subgroupM = subgroupLinear % subgroupCountM;
+  const int subgroupN = subgroupLinear / subgroupCountM;
   const int groupMBase = groupM * MWG;
   const int groupNBase = groupN * NWG;
   const int baseA = batch * kSizeM * kSizeK;

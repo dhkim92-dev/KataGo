@@ -156,7 +156,8 @@ namespace vk_helper {
     VkShaderModule computeShaderModule,
     VkResult* result,
     VkSpecializationInfo* specializationInfo = nullptr,
-    std::string entryPointName = "main"
+    std::string entryPointName = "main",
+    VkPipelineShaderStageCreateFlags stageFlags = 0
   );
 
   VkDescriptorSetLayout createDescriptorSetLayout(

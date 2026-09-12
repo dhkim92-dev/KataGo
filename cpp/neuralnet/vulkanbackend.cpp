@@ -347,7 +347,7 @@ struct ComputeContext {
                 : false;
           tuneParams.vulkan.shouldUseFP16Storage = useFP16Storage;
           tuneParams.vulkan.shouldUseFP16Compute = useFP16Compute;
-          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, logger);
+          pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, vulkanDevice->info, logger);
           VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
           if(result != VK_SUCCESS)
             throw StringError("Failed to create Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));

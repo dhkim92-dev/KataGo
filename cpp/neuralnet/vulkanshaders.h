@@ -1353,6 +1353,15 @@ struct LocalDimHash {
       bool isSimple() const;
     };
 
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixNCHWTuneParams& params
+    );
+
     struct TransformerTuneParams {
       int ATTN_BLOCK_Q=128  ;
       int ATTN_BLOCK_KV=32;
@@ -1483,6 +1492,7 @@ struct LocalDimHash {
 
   struct ComputePipelines {
     VkDevice device;
+    VulkanDeviceInfo deviceInfo;
     VkPipelineCache cache;
     Logger* logger;
     bool printPipelineCreation = false;
@@ -1648,7 +1658,7 @@ struct LocalDimHash {
     Pipeline transformerSpatialRMSNormReduce;
     Pipeline transformerSpatialRMSNormSumSq;
 
-    ComputePipelines(VkDevice device_, Logger* logger_);
+    ComputePipelines(VkDevice device_, const VulkanDeviceInfo& deviceInfo_, Logger* logger_);
     ComputePipelines() = delete;
     ComputePipelines(const ComputePipelines&) = delete;
     ComputePipelines& operator=(const ComputePipelines&) = delete;
@@ -1703,7 +1713,8 @@ struct LocalDimHash {
       VkSpecializationInfo* specializationInfo = nullptr,
       uint32_t localSizeX = 1,
       uint32_t localSizeY = 1,
-      uint32_t localSizeZ = 1
+      uint32_t localSizeZ = 1,
+      VkPipelineShaderStageCreateFlags stageFlags = 0
     );
 
   private :

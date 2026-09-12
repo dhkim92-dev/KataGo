@@ -127,10 +127,12 @@ void main() {
   const int groupN = GroupId1();
   const int batch = GroupId2();
 
-  // Vulkan subgroup size is device-dependent. The host must specialize
-  // local_size_x to (MWAVE / MSize) * gl_SubgroupSize for this mapping.
-  const int subgroupM = LocalId0() / int(gl_SubgroupSize);
-  const int subgroupN = LocalId1();
+  // Fragment ownership is derived from the subgroup itself. Vulkan does not
+  // define a mapping between LocalInvocationId and SubgroupLocalInvocationId.
+  const int subgroupCountM = MWAVE / MSize;
+  const int subgroupLinear = int(gl_SubgroupID);
+  const int subgroupM = subgroupLinear % subgroupCountM;
+  const int subgroupN = subgroupLinear / subgroupCountM;
 
   // Every workgroup computes one MWG x NWG tile. Only a MWAVE x NWAVE
   // collection of fragments is resident at once; aWaveId/bWaveId reuse it
