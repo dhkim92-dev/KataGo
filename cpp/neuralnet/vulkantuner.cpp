@@ -66,6 +66,10 @@ bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSec
 }
 
 namespace {
+  bool isPositivePowerOfTwo(int value) {
+    return value > 0 && (value & (value - 1)) == 0;
+  }
+
   bool supportsCooperativeMatrixType(const VkCooperativeMatrixPropertiesKHR& property, int accType) {
     const VkComponentTypeKHR expectedType = accType == 16
       ? VK_COMPONENT_TYPE_FLOAT16_KHR
@@ -75,6 +79,21 @@ namespace {
            property.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
            property.CType == expectedType &&
            property.ResultType == expectedType;
+  }
+
+  bool supportsCooperativeMatrixShape(const VkCooperativeMatrixPropertiesKHR& property) {
+    return isPositivePowerOfTwo(static_cast<int>(property.MSize)) &&
+           isPositivePowerOfTwo(static_cast<int>(property.NSize)) &&
+           isPositivePowerOfTwo(static_cast<int>(property.KSize));
+  }
+
+  int largestCooperativeMatrixVectorWidth(int firstDimension, int secondDimension = 0) {
+    for(int width: {4, 2}) {
+      if(firstDimension % width == 0 &&
+         (secondDimension == 0 || secondDimension % width == 0))
+        return width;
+    }
+    return 0;
   }
 
   bool getSupportedCooperativeMatrixProperties(
@@ -103,8 +122,9 @@ namespace {
 
     properties.erase(
       remove_if(properties.begin(), properties.end(), [](const VkCooperativeMatrixPropertiesKHR& property) {
-        return !supportsCooperativeMatrixType(property, 16) &&
-               !supportsCooperativeMatrixType(property, 32);
+        return !supportsCooperativeMatrixShape(property) ||
+               (!supportsCooperativeMatrixType(property, 16) &&
+                !supportsCooperativeMatrixType(property, 32));
       }),
       properties.end()
     );
@@ -166,6 +186,32 @@ namespace {
       deviceInfo.cooperativeMatrixPropertiesFn,
       deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix,
       properties
+    );
+  }
+
+  bool isSupportedCooperativeMatrixShape(
+    const VulkanDeviceInfo& deviceInfo,
+    int accType,
+    int mSize,
+    int nSize,
+    int kSize,
+    uint32_t subgroupSize
+  ) {
+    vector<VkCooperativeMatrixPropertiesKHR> properties;
+    if(!getSupportedCooperativeMatrixProperties(
+         deviceInfo.physicalDevice,
+         deviceInfo.cooperativeMatrixPropertiesFn,
+         deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix,
+         properties
+       ))
+      return false;
+    return subgroupSize == deviceInfo.subgroupProperties.subgroupSize && any_of(
+      properties.begin(), properties.end(), [&](const VkCooperativeMatrixPropertiesKHR& property) {
+        return supportsCooperativeMatrixType(property, accType) &&
+               static_cast<int>(property.MSize) == mSize &&
+               static_cast<int>(property.NSize) == nSize &&
+               static_cast<int>(property.KSize) == kSize;
+      }
     );
   }
 }
@@ -322,6 +368,8 @@ bool HGemmCooperativeMatrixTuneParams::isValid() const {
      SA < 0 || SA > 1 || SB < 0 || SB > 1 ||
      (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
     return false;
+  if(!isPositivePowerOfTwo(MWARP) || !isPositivePowerOfTwo(NWARP) || !isPositivePowerOfTwo(KDIM))
+    return false;
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
   if(localSizeX == 0 || localSizeY == 0 || localSizeX * localSizeY > 1024)
@@ -347,6 +395,8 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isValid() const {
      MWAVE <= 0 || NWAVE <= 0 || SB < 0 || SB > 1 ||
      (accType != 16 && accType != 32) ||
      (VWM != 1 && VWM != 2 && VWM != 4) || (VWN != 1 && VWN != 2 && VWN != 4))
+    return false;
+  if(!isPositivePowerOfTwo(MWARP) || !isPositivePowerOfTwo(NWARP) || !isPositivePowerOfTwo(KDIM))
     return false;
   const uint64_t localSizeX = static_cast<uint64_t>(MWAVE / MWARP) * subgroupSize;
   const uint64_t localSizeY = static_cast<uint64_t>(NWAVE / NWARP);
@@ -750,6 +800,10 @@ namespace {
       params.MWAVE = params.MWARP;
       params.NWAVE = params.NWARP;
       params.SB = 0;
+      params.VWM = largestCooperativeMatrixVectorWidth(params.MWARP);
+      params.VWN = largestCooperativeMatrixVectorWidth(params.NWARP);
+      if(params.VWM == 0 || params.VWN == 0)
+        continue;
       if(params.isValid())
         return true;
     }
@@ -791,13 +845,17 @@ namespace {
       params.NWARP = static_cast<int>(property.NSize);
       params.KDIM = static_cast<int>(property.KSize);
       params.subgroupSize = device->info.subgroupProperties.subgroupSize;
-      params.MWG = params.MWARP * 2;
-      params.NWG = params.NWARP * 2;
-      params.KWG = params.KDIM * 2;
+      params.MWG = params.MWARP;
+      params.NWG = params.NWARP;
+      params.KWG = params.KDIM;
       params.MWAVE = params.MWARP;
       params.NWAVE = params.NWARP;
       params.SA = 0;
       params.SB = 0;
+      params.VWM = largestCooperativeMatrixVectorWidth(params.MWARP, params.KDIM);
+      params.VWN = largestCooperativeMatrixVectorWidth(params.NWARP);
+      if(params.VWM == 0 || params.VWN == 0)
+        continue;
       if(params.isValid())
         return true;
     }
@@ -873,10 +931,16 @@ namespace {
     const TuningContext& context,
     const HGemmCooperativeMatrixTuneParams& params
   ) {
+    uint64_t sharedHalfElements = 0;
+    if(params.SA == 1)
+      sharedHalfElements += static_cast<uint64_t>(params.MWG) * params.KWG;
+    if(params.SB == 1)
+      sharedHalfElements += static_cast<uint64_t>(params.NWG) * params.KWG;
     return params.isValid() &&
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
+           sharedHalfElements * sizeof(uint16_t) <= context.device->info.properties.limits.maxComputeSharedMemorySize &&
            isValidCooperativeMatrixWorkgroupSize(
              context, params.MWARP, params.NWARP, params.subgroupSize, params.MWAVE, params.NWAVE
            );
@@ -886,10 +950,14 @@ namespace {
     const TuningContext& context,
     const HGemmCooperativeMatrixNCHWTuneParams& params
   ) {
+    uint64_t sharedHalfElements = static_cast<uint64_t>(params.MWG) * params.NWG;
+    if(params.SB == 1)
+      sharedHalfElements += static_cast<uint64_t>(params.NWG) * params.KWG;
     return params.isValid() &&
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
+           sharedHalfElements * sizeof(uint16_t) <= context.device->info.properties.limits.maxComputeSharedMemorySize &&
            isValidCooperativeMatrixWorkgroupSize(
              context, params.MWARP, params.NWARP, params.subgroupSize, params.MWAVE, params.NWAVE
            );
@@ -1086,27 +1154,26 @@ namespace {
     configs = expanded;
   }
 
-  template<typename Getter>
-  vector<int> getCooperativeMatrixDimensionCandidates(
-    const vector<VulkanTuneParams>& configs,
+  template<typename Getter, typename Setter>
+  void addCooperativeMatrixSafeTileCandidates(
+    vector<VulkanTuneParams>& configs,
     Getter getter,
-    int maximum
+    Setter setter
   ) {
-    vector<int> values;
+    vector<VulkanTuneParams> expanded;
+    expanded.reserve(configs.size() * 2);
     for(const VulkanTuneParams& config: configs) {
-      const int base = getter(config);
-      for(int value = base; value > 0 && value <= maximum;) {
-        if(find(values.begin(), values.end(), value) == values.end())
-          values.push_back(value);
-        if(value > maximum / 2)
-          break;
-        value *= 2;
+      const int fragmentDimension = getter(config);
+      VulkanTuneParams fragmentTile = config;
+      setter(fragmentTile, fragmentDimension);
+      expanded.push_back(fragmentTile);
+      if(fragmentDimension <= numeric_limits<int>::max() / 2) {
+        VulkanTuneParams doubleFragmentTile = config;
+        setter(doubleFragmentTile, fragmentDimension * 2);
+        expanded.push_back(doubleFragmentTile);
       }
-      if(base > maximum && find(values.begin(), values.end(), base) == values.end())
-        values.push_back(base);
     }
-    sort(values.begin(), values.end());
-    return values;
+    configs = expanded;
   }
 
   void dedupCandidates(vector<VulkanTuneParams>& configs) {
@@ -4071,11 +4138,11 @@ namespace {
     }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
-      // Match OpenCL's untuned HGemmWmmaParams defaults. MWARP/NWARP/KDIM
-      // and subgroupSize remain the hardware-selected Vulkan values.
-      result.hgemmCooperativeMatrix.MWG = result.hgemmCooperativeMatrix.MWARP * 2;
-      result.hgemmCooperativeMatrix.NWG = result.hgemmCooperativeMatrix.NWARP * 2;
-      result.hgemmCooperativeMatrix.KWG = result.hgemmCooperativeMatrix.KDIM * 2;
+      // The reference uses one property-defined fragment in each dimension.
+      // MWARP/NWARP/KDIM and subgroupSize remain hardware-selected values.
+      result.hgemmCooperativeMatrix.MWG = result.hgemmCooperativeMatrix.MWARP;
+      result.hgemmCooperativeMatrix.NWG = result.hgemmCooperativeMatrix.NWARP;
+      result.hgemmCooperativeMatrix.KWG = result.hgemmCooperativeMatrix.KDIM;
       result.hgemmCooperativeMatrix.MWAVE = result.hgemmCooperativeMatrix.MWARP;
       result.hgemmCooperativeMatrix.NWAVE = result.hgemmCooperativeMatrix.NWARP;
       result.hgemmCooperativeMatrix.SA = 0;
@@ -4094,25 +4161,17 @@ namespace {
         params.NWARP = shape.NSize;
         params.KDIM = shape.KSize;
         params.subgroupSize = shape.subgroupSize;
-        params.MWG = shape.MSize * 2;
-        params.NWG = shape.NSize * 2;
-        params.KWG = shape.KSize * 2;
+        params.MWG = shape.MSize;
+        params.NWG = shape.NSize;
+        params.KWG = shape.KSize;
         params.MWAVE = shape.MSize;
         params.NWAVE = shape.NSize;
         params.SA = 0;
         params.SB = 0;
-        for(int width: {4, 2, 1}) {
-          if(params.MWARP % width == 0 && params.KDIM % width == 0) {
-            params.VWM = width;
-            break;
-          }
-        }
-        for(int width: {4, 2, 1}) {
-          if(params.NWARP % width == 0) {
-            params.VWN = width;
-            break;
-          }
-        }
+        params.VWM = largestCooperativeMatrixVectorWidth(params.MWARP, params.KDIM);
+        params.VWN = largestCooperativeMatrixVectorWidth(params.NWARP);
+        if(params.VWM == 0 || params.VWN == 0)
+          continue;
         if(isValidCooperativeMatrixTuneParams(context, params))
           configs.push_back(config);
       }
@@ -4125,7 +4184,7 @@ namespace {
       const HGemmCooperativeMatrixTuneParams& params = config.hgemmCooperativeMatrix;
       return {params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize};
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
         VulkanTuneParams accConfig = current;
@@ -4134,9 +4193,9 @@ namespace {
         accConfig.hgemmCooperativeMatrix.NWARP = shape.NSize;
         accConfig.hgemmCooperativeMatrix.KDIM = shape.KSize;
         accConfig.hgemmCooperativeMatrix.subgroupSize = shape.subgroupSize;
-        accConfig.hgemmCooperativeMatrix.MWG = shape.MSize * 2;
-        accConfig.hgemmCooperativeMatrix.NWG = shape.NSize * 2;
-        accConfig.hgemmCooperativeMatrix.KWG = shape.KSize * 2;
+        accConfig.hgemmCooperativeMatrix.MWG = shape.MSize;
+        accConfig.hgemmCooperativeMatrix.NWG = shape.NSize;
+        accConfig.hgemmCooperativeMatrix.KWG = shape.KSize;
         accConfig.hgemmCooperativeMatrix.MWAVE = shape.MSize;
         accConfig.hgemmCooperativeMatrix.NWAVE = shape.NSize;
         accConfig.hgemmCooperativeMatrix.SA = 0;
@@ -4145,49 +4204,28 @@ namespace {
       }
       if(configs.empty())
         return configs;
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.MWARP; },
-        full ? 128 : 64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.NWARP; },
-        full ? 128 : 64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.KDIM; },
-        64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.MWARP; },
-        64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWAVE = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.NWARP; },
-        64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWAVE = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWM = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWN = v; });
-      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SA = v; });
-      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.SB = v; });
+      // Keep one fragment per subgroup and limit the accumulator footprint.
+      // Only one- and two-fragment workgroup tiles are tuned.
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.MWARP; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.MWG = v; }
+      );
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.NWARP; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.NWG = v; }
+      );
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrix.KDIM; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.KWG = v; }
+      );
+      addCandidates(configs, vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWM = v; });
+      addCandidates(configs, vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrix.VWN = v; });
       configs.erase(
         remove_if(configs.begin(), configs.end(), [&context](const VulkanTuneParams& p) {
           return !isValidCooperativeMatrixTuneParams(context, p.hgemmCooperativeMatrix);
         }),
         configs.end()
       );
-      if(!full) {
-        configs.erase(
-          remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) {
-            return !p.hgemmCooperativeMatrix.isSimple();
-          }),
-          configs.end()
-        );
-      }
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
@@ -4246,18 +4284,10 @@ namespace {
         params.MWAVE = shape.MSize;
         params.NWAVE = shape.NSize;
         params.SB = 0;
-        for(int width: {4, 2, 1}) {
-          if(params.MWARP % width == 0) {
-            params.VWM = width;
-            break;
-          }
-        }
-        for(int width: {4, 2, 1}) {
-          if(params.NWARP % width == 0) {
-            params.VWN = width;
-            break;
-          }
-        }
+        params.VWM = largestCooperativeMatrixVectorWidth(params.MWARP);
+        params.VWN = largestCooperativeMatrixVectorWidth(params.NWARP);
+        if(params.VWM == 0 || params.VWN == 0)
+          continue;
         if(isValidCooperativeMatrixTuneParams(context, params))
           configs.push_back(config);
       }
@@ -4270,7 +4300,7 @@ namespace {
       const HGemmCooperativeMatrixNCHWTuneParams& params = config.hgemmCooperativeMatrixNCHW;
       return {params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize};
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
         VulkanTuneParams accConfig = current;
@@ -4289,46 +4319,29 @@ namespace {
       }
       if(configs.empty())
         return configs;
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.MWARP; },
-        full ? 128 : 64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.NWARP; },
-        32
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.KDIM; },
-        64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.MWARP; },
-        64
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWAVE = v; });
-      addCandidates(configs, getCooperativeMatrixDimensionCandidates(
-        configs,
-        [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.NWARP; },
-        32
-      ), [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWAVE = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWM = v; });
-      addCandidates(configs, full ? vector<int>{1,2,4} : vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWN = v; });
-      addCandidates(configs, vector<int>{0,1}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.SB = v; });
+      // The NCHW shader uses a shared output tile. Restricting waves to one
+      // fragment and tiles to one or two fragments keeps that tile within the
+      // explicit shared-memory check below.
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.MWARP; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.MWG = v; }
+      );
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.NWARP; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.NWG = v; }
+      );
+      addCooperativeMatrixSafeTileCandidates(
+        configs, [](const VulkanTuneParams& p) { return p.hgemmCooperativeMatrixNCHW.KDIM; },
+        [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.KWG = v; }
+      );
+      addCandidates(configs, vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWM = v; });
+      addCandidates(configs, vector<int>{2,4}, [](VulkanTuneParams& p, int v) { p.hgemmCooperativeMatrixNCHW.VWN = v; });
       configs.erase(
         remove_if(configs.begin(), configs.end(), [&context](const VulkanTuneParams& p) {
           return !isValidCooperativeMatrixTuneParams(context, p.hgemmCooperativeMatrixNCHW);
         }),
         configs.end()
       );
-      if(!full) {
-        configs.erase(
-          remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& p) { return !p.hgemmCooperativeMatrixNCHW.isSimple(); }),
-          configs.end()
-        );
-      }
       // Keep the incoming configuration at the same position as OpenCL's
       // explicit current-config insertion after candidate generation.
       configs.insert(configs.begin(), current);
@@ -5070,6 +5083,25 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
        loaded.vulkan.canUseCooperativeMatrix != available.canUseCooperativeMatrix ||
        loaded.vulkan.canUseSubgroup != available.canUseSubgroup)
       throw IOError("Vulkan tuning capabilities changed for " + filename);
+    if((loaded.vulkan.shouldUseCooperativeMatrix &&
+        !isSupportedCooperativeMatrixShape(
+          deviceInfo,
+          loaded.hgemmCooperativeMatrix.accType,
+          loaded.hgemmCooperativeMatrix.MWARP,
+          loaded.hgemmCooperativeMatrix.NWARP,
+          loaded.hgemmCooperativeMatrix.KDIM,
+          loaded.hgemmCooperativeMatrix.subgroupSize
+        )) ||
+       (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+        !isSupportedCooperativeMatrixShape(
+          deviceInfo,
+          loaded.hgemmCooperativeMatrixNCHW.accType,
+          loaded.hgemmCooperativeMatrixNCHW.MWARP,
+          loaded.hgemmCooperativeMatrixNCHW.NWARP,
+          loaded.hgemmCooperativeMatrixNCHW.KDIM,
+          loaded.hgemmCooperativeMatrixNCHW.subgroupSize
+        )))
+      throw IOError("Vulkan cooperative-matrix shape changed for " + filename);
     if(logger != nullptr)
       logger->write("Loaded Vulkan tuning parameters from: " + filename);
     return loaded;
@@ -5110,6 +5142,26 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
          loaded.vulkan.canUseCooperativeMatrix != available.canUseCooperativeMatrix ||
          loaded.vulkan.canUseSubgroup != available.canUseSubgroup) {
         throw IOError("Vulkan tuning capabilities changed for " + filename);
+      }
+      if((loaded.vulkan.shouldUseCooperativeMatrix &&
+          !isSupportedCooperativeMatrixShape(
+            device->info,
+            loaded.hgemmCooperativeMatrix.accType,
+            loaded.hgemmCooperativeMatrix.MWARP,
+            loaded.hgemmCooperativeMatrix.NWARP,
+            loaded.hgemmCooperativeMatrix.KDIM,
+            loaded.hgemmCooperativeMatrix.subgroupSize
+          )) ||
+         (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+          !isSupportedCooperativeMatrixShape(
+            device->info,
+            loaded.hgemmCooperativeMatrixNCHW.accType,
+            loaded.hgemmCooperativeMatrixNCHW.MWARP,
+            loaded.hgemmCooperativeMatrixNCHW.NWARP,
+            loaded.hgemmCooperativeMatrixNCHW.KDIM,
+            loaded.hgemmCooperativeMatrixNCHW.subgroupSize
+          ))) {
+        throw IOError("Vulkan cooperative-matrix shape changed for " + filename);
       }
     }
     if(logger != nullptr)

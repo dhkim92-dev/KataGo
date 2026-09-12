@@ -61,6 +61,30 @@ namespace {
     return result;
   }
 
+  VKAPI_ATTR VkResult VKAPI_CALL fakeNonPowerOfTwoCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    VkResult result = fakeCooperativeMatrixProperties(physicalDevice, propertyCount, properties);
+    if(properties != nullptr && result == VK_SUCCESS)
+      properties[0].NSize = 24;
+    return result;
+  }
+
+  VKAPI_ATTR VkResult VKAPI_CALL fakeFloat32AccumulatorCooperativeMatrixProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* propertyCount,
+    VkCooperativeMatrixPropertiesKHR* properties
+  ) {
+    VkResult result = fakeCooperativeMatrixProperties(physicalDevice, propertyCount, properties);
+    if(properties != nullptr && result == VK_SUCCESS) {
+      properties[0].CType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+      properties[0].ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+    }
+    return result;
+  }
+
   bool loadThrows(const string& filename) {
     try {
       (void)VulkanTuneParams::load(filename);
@@ -164,9 +188,23 @@ void Tests::runVulkanTunerPersistenceTests() {
   VulkanDeviceInfo nonSubgroupDeviceInfo = deviceInfo;
   nonSubgroupDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonSubgroupCooperativeMatrixProperties;
   testAssert(!VulkanTuner::getHardwareParams(nonSubgroupDeviceInfo).canUseCooperativeMatrix);
+  VulkanDeviceInfo nonPowerOfTwoDeviceInfo = deviceInfo;
+  nonPowerOfTwoDeviceInfo.cooperativeMatrixPropertiesFn = fakeNonPowerOfTwoCooperativeMatrixProperties;
+  testAssert(!VulkanTuner::getHardwareParams(nonPowerOfTwoDeviceInfo).canUseCooperativeMatrix);
   VulkanDevice sixteenByEightDevice = {};
   sixteenByEightDevice.info = deviceInfo;
   sixteenByEightDevice.info.cooperativeMatrixPropertiesFn = fakeSixteenByEightCooperativeMatrixProperties;
+  testAssert(VulkanTuner::getHardwareParams(sixteenByEightDevice.info).canUseCooperativeMatrix);
+  HGemmCooperativeMatrixTuneParams expectedSixteenByEightParams;
+  expectedSixteenByEightParams.MWARP = 16;
+  expectedSixteenByEightParams.NWARP = 8;
+  expectedSixteenByEightParams.KDIM = 16;
+  expectedSixteenByEightParams.MWG = 16;
+  expectedSixteenByEightParams.NWG = 8;
+  expectedSixteenByEightParams.KWG = 16;
+  expectedSixteenByEightParams.MWAVE = 16;
+  expectedSixteenByEightParams.NWAVE = 8;
+  testAssert(expectedSixteenByEightParams.isValid());
   HGemmCooperativeMatrixTuneParams sixteenByEightParams;
   testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
     &sixteenByEightDevice, sixteenByEightParams
@@ -175,6 +213,24 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(sixteenByEightParams.NWARP == 8);
   testAssert(sixteenByEightParams.KDIM == 16);
   testAssert(sixteenByEightParams.isValid());
+  VulkanDevice float32AccumulatorDevice = {};
+  float32AccumulatorDevice.info = deviceInfo;
+  float32AccumulatorDevice.info.cooperativeMatrixPropertiesFn = fakeFloat32AccumulatorCooperativeMatrixProperties;
+  HGemmCooperativeMatrixTuneParams float32AccumulatorParams;
+  float32AccumulatorParams.accType = 32;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+    &float32AccumulatorDevice, float32AccumulatorParams
+  ));
+  testAssert(float32AccumulatorParams.accType == 32);
+  HGemmCooperativeMatrixNCHWTuneParams float32AccumulatorNCHWParams;
+  float32AccumulatorNCHWParams.accType = 32;
+  testAssert(VulkanTuner::HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(
+    &float32AccumulatorDevice, float32AccumulatorNCHWParams
+  ));
+  testAssert(float32AccumulatorNCHWParams.accType == 32);
+  HGemmCooperativeMatrixTuneParams nonPowerOfTwoParams = sixteenByEightParams;
+  nonPowerOfTwoParams.NWARP = 24;
+  testAssert(!nonPowerOfTwoParams.isValid());
   HGemmCooperativeMatrixNCHWTuneParams thirtyTwoByEightParams;
   thirtyTwoByEightParams.MWARP = 32;
   thirtyTwoByEightParams.NWARP = 8;
