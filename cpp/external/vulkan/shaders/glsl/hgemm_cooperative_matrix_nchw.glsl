@@ -78,15 +78,19 @@ layout(constant_id = 10) const int NWAVE = 32;
 // B is [C, OC] in memory, i.e. [C, OC] row-major.
 // C is [OC, HW] in memory, i.e. [HW, OC] column-major.
 layout(set = 0, binding = 0) readonly buffer Input {
-  realstoreM d_input[];
+  float16_t d_input[];
 };
 
 layout(set = 0, binding = 1) readonly buffer Filter {
+#if SB == 1
   realstoreN d_filter[];
+#else
+  float16_t d_filter[];
+#endif
 };
 
 layout(set = 0, binding = 2) writeonly buffer Output {
-  realstoreM d_output[];
+  float16_t d_output[];
 };
 
 layout(push_constant) uniform HGemmCooperativeMatrixNCHWParams {
@@ -96,9 +100,22 @@ layout(push_constant) uniform HGemmCooperativeMatrixNCHWParams {
 };
 
 #if SB == 1
-shared realstoreN bTile[(KWG * NWG) / VWN];
+// The leading uvec4 gives the cooperative-matrix pointee a 16-byte-aligned
+// address, matching the explicit alignment on the OpenCL local tile.
+struct BTileStorage {
+  uvec4 alignment;
+  realstoreN values[(KWG * NWG) / VWN];
+};
+shared BTileStorage bTileStorage;
+#define bTile bTileStorage.values
 #endif
-shared realstoreM cTile[(MWG * NWG) / VWM];
+// Keep the scalar accumulator tile 16-byte aligned for cooperative stores.
+struct CTileStorage {
+  uvec4 alignment;
+  acc_dtype values[MWG * NWG];
+};
+shared CTileStorage cTileStorage;
+#define cTile cTileStorage.values
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
@@ -173,8 +190,8 @@ void main() {
         if(aFragmentInBounds) {
           coopMatLoad(
             matA[aWaveId], d_input,
-            aGlobalOffset / VWM,
-            hwSize / VWM,
+            aGlobalOffset,
+            hwSize,
             gl_CooperativeMatrixLayoutColumnMajor
           );
         }
@@ -195,8 +212,8 @@ void main() {
           (kBase + kOffset) * ocSize + groupNBase + bLocalOffset;
         coopMatLoad(
           matB, d_filter,
-          bGlobalOffset / VWN,
-          ocSize / VWN,
+          bGlobalOffset,
+          ocSize,
           gl_CooperativeMatrixLayoutRowMajor
         );
 #endif
@@ -222,8 +239,8 @@ void main() {
       if(groupMBase + aLocalOffset < hwSize)
         coopMatStore(
           acc[bWaveId][aWaveId], cTile,
-          (bLocalOffset * MWG + aLocalOffset) / VWM,
-          MWG / VWM,
+          bLocalOffset * MWG + aLocalOffset,
+          MWG,
           gl_CooperativeMatrixLayoutColumnMajor
         );
     }
@@ -238,22 +255,24 @@ void main() {
   const int tileVectorCount = (MWG * NWG) / VWM;
   if(groupMBase + MWG <= hwSize) {
     for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
-      const int m = (tileVector % (MWG / VWM)) * VWM;
-      const int n = tileVector / (MWG / VWM);
-      d_output[
-        (batchOutputBase + (groupNBase + n) * hwSize + groupMBase + m) / VWM
-      ] = cTile[tileVector];
+      const int tileBase = tileVector * VWM;
+      for(int lane = 0; lane < VWM; lane++) {
+        const int tileIndex = tileBase + lane;
+        const int m = tileIndex % MWG;
+        const int n = tileIndex / MWG;
+        d_output[batchOutputBase + (groupNBase + n) * hwSize + groupMBase + m] =
+          float16_t(cTile[tileIndex]);
+      }
     }
   }
   else {
-    for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
-      const int m = (tileVector % (MWG / VWM)) * VWM;
-      const int n = tileVector / (MWG / VWM);
+    const int tileSize = MWG * NWG;
+    for(int tileIndex = tid; tileIndex < tileSize; tileIndex += numThreads) {
+      const int m = tileIndex % MWG;
+      const int n = tileIndex / MWG;
       const int hw = groupMBase + m;
       if(hw < hwSize)
-        d_output[
-          (batchOutputBase + (groupNBase + n) * hwSize + hw) / VWM
-        ] = cTile[tileVector];
+        d_output[batchOutputBase + (groupNBase + n) * hwSize + hw] = float16_t(cTile[tileIndex]);
     }
   }
 }

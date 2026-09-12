@@ -151,7 +151,7 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 15);
+  testAssert(VulkanTuner::TUNER_VERSION == 16);
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
@@ -292,6 +292,21 @@ void Tests::runVulkanTunerPersistenceTests() {
     &float32AccumulatorDevice, float32AccumulatorNCHWParams
   ));
   testAssert(float32AccumulatorNCHWParams.accType == 32);
+  VulkanDeviceInfo accumulatorMemoryLimitedDeviceInfo = float32AccumulatorDevice.info;
+  accumulatorMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 1039;
+  testAssert(!isValidCooperativeMatrixConfig(
+    accumulatorMemoryLimitedDeviceInfo, float32AccumulatorParams
+  ));
+  testAssert(!isValidCooperativeMatrixConfig(
+    accumulatorMemoryLimitedDeviceInfo, float32AccumulatorNCHWParams
+  ));
+  accumulatorMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 1040;
+  testAssert(isValidCooperativeMatrixConfig(
+    accumulatorMemoryLimitedDeviceInfo, float32AccumulatorParams
+  ));
+  testAssert(isValidCooperativeMatrixConfig(
+    accumulatorMemoryLimitedDeviceInfo, float32AccumulatorNCHWParams
+  ));
   VulkanDevice incompletePropertyDevice = {};
   incompletePropertyDevice.info = deviceInfo;
   incompletePropertyDevice.info.cooperativeMatrixPropertiesFn = fakeIncompleteCooperativeMatrixProperties;
@@ -359,6 +374,94 @@ void Tests::runVulkanTunerPersistenceTests() {
   multiSubgroupNCHWParams.NWAVE = 32;
   testAssert(multiSubgroupNCHWParams.isValid());
   testAssert(isValidCooperativeMatrixConfig(deviceInfo, multiSubgroupNCHWParams));
+  HGemmCooperativeMatrixTuneParams reportedGenericParams;
+  reportedGenericParams.MWG = 16;
+  reportedGenericParams.NWG = 32;
+  reportedGenericParams.KWG = 16;
+  reportedGenericParams.MWAVE = 16;
+  reportedGenericParams.NWAVE = 16;
+  reportedGenericParams.MWARP = 16;
+  reportedGenericParams.NWARP = 8;
+  reportedGenericParams.VWM = 2;
+  reportedGenericParams.VWN = 1;
+  reportedGenericParams.KDIM = 16;
+  reportedGenericParams.subgroupSize = 32;
+  reportedGenericParams.accType = 16;
+  reportedGenericParams.SA = 0;
+  reportedGenericParams.SB = 0;
+  testAssert(reportedGenericParams.isValid());
+  testAssert(isValidCooperativeMatrixConfig(
+    sixteenByEightDevice.info, reportedGenericParams
+  ));
+  {
+    const int M = 32;
+    const int N = 64;
+    vector<int> coverage(M * N, 0);
+    const int subgroupCountM = reportedGenericParams.MWAVE / reportedGenericParams.MWARP;
+    const int subgroupCountN = reportedGenericParams.NWAVE / reportedGenericParams.NWARP;
+    for(int groupM = 0; groupM < M / reportedGenericParams.MWG; groupM++) {
+      for(int groupN = 0; groupN < N / reportedGenericParams.NWG; groupN++) {
+        for(int subgroup = 0; subgroup < subgroupCountM * subgroupCountN; subgroup++) {
+          const int subgroupM = subgroup % subgroupCountM;
+          const int subgroupN = subgroup / subgroupCountM;
+          for(int bWave = 0; bWave < reportedGenericParams.NWG / reportedGenericParams.NWAVE; bWave++) {
+            const int bOffset = bWave * reportedGenericParams.NWAVE + subgroupN * reportedGenericParams.NWARP;
+            for(int aWave = 0; aWave < reportedGenericParams.MWG / reportedGenericParams.MWAVE; aWave++) {
+              const int aOffset = aWave * reportedGenericParams.MWAVE + subgroupM * reportedGenericParams.MWARP;
+              for(int n = 0; n < reportedGenericParams.NWARP; n++)
+                for(int m = 0; m < reportedGenericParams.MWARP; m++)
+                  coverage[(groupN * reportedGenericParams.NWG + bOffset + n) * M +
+                           groupM * reportedGenericParams.MWG + aOffset + m]++;
+            }
+          }
+        }
+      }
+    }
+    testAssert(all_of(coverage.begin(), coverage.end(), [](int count) { return count == 1; }));
+  }
+  HGemmCooperativeMatrixNCHWTuneParams reportedNCHWParams;
+  reportedNCHWParams.MWG = 16;
+  reportedNCHWParams.NWG = 64;
+  reportedNCHWParams.KWG = 32;
+  reportedNCHWParams.MWAVE = 16;
+  reportedNCHWParams.NWAVE = 32;
+  reportedNCHWParams.MWARP = 16;
+  reportedNCHWParams.NWARP = 16;
+  reportedNCHWParams.VWM = 2;
+  reportedNCHWParams.VWN = 4;
+  reportedNCHWParams.KDIM = 16;
+  reportedNCHWParams.subgroupSize = 32;
+  reportedNCHWParams.accType = 16;
+  reportedNCHWParams.SB = 0;
+  testAssert(reportedNCHWParams.isValid());
+  testAssert(reportedNCHWParams.getRequiredSpatialAlignment() == 16);
+  testAssert(isValidCooperativeMatrixConfig(deviceInfo, reportedNCHWParams));
+  {
+    const int logicalNNXYLen = 19 * 19;
+    const int alignment = reportedNCHWParams.getRequiredSpatialAlignment();
+    const int paddedNNXYLen = ((logicalNNXYLen + alignment - 1) / alignment) * alignment;
+    testAssert(paddedNNXYLen == 368);
+    vector<int> coverage(reportedNCHWParams.NWG * paddedNNXYLen, 0);
+    const int subgroupCountM = reportedNCHWParams.MWAVE / reportedNCHWParams.MWARP;
+    const int subgroupCountN = reportedNCHWParams.NWAVE / reportedNCHWParams.NWARP;
+    for(int groupM = 0; groupM < paddedNNXYLen / reportedNCHWParams.MWG; groupM++) {
+      for(int subgroup = 0; subgroup < subgroupCountM * subgroupCountN; subgroup++) {
+        const int subgroupM = subgroup % subgroupCountM;
+        const int subgroupN = subgroup / subgroupCountM;
+        for(int bWave = 0; bWave < reportedNCHWParams.NWG / reportedNCHWParams.NWAVE; bWave++) {
+          const int bOffset = bWave * reportedNCHWParams.NWAVE + subgroupN * reportedNCHWParams.NWARP;
+          for(int aWave = 0; aWave < reportedNCHWParams.MWG / reportedNCHWParams.MWAVE; aWave++) {
+            const int aOffset = aWave * reportedNCHWParams.MWAVE + subgroupM * reportedNCHWParams.MWARP;
+            for(int n = 0; n < reportedNCHWParams.NWARP; n++)
+              for(int m = 0; m < reportedNCHWParams.MWARP; m++)
+                coverage[(bOffset + n) * paddedNNXYLen +
+                         groupM * reportedNCHWParams.MWG + aOffset + m]++;
+          }
+        }
+      }
+    }
+    testAssert(all_of(coverage.begin(), coverage.end(), [](int count) { return count == 1; }));
+  }
   HGemmCooperativeMatrixTuneParams kDimensionOneParams;
   kDimensionOneParams.MWARP = 4;
   kDimensionOneParams.NWARP = 4;

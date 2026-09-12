@@ -248,12 +248,18 @@ namespace {
     const uint64_t sharedHalfElements =
       (params.SA == 1 ? static_cast<uint64_t>(params.MWG) * params.KWG : 0) +
       (params.SB == 1 ? static_cast<uint64_t>(params.NWG) * params.KWG : 0);
+    const uint64_t accumulatorTileBytes = params.accType == 32
+      ? static_cast<uint64_t>(params.MWG) * params.NWG * sizeof(float)
+      : 0;
+    const uint64_t sharedAlignmentBytes = 4 * sizeof(uint32_t) *
+      ((params.SA == 1 ? 1 : 0) + (params.SB == 1 ? 1 : 0) + (params.accType == 32 ? 1 : 0));
     const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
     return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
            localSizeY <= limits.maxComputeWorkGroupSize[1] &&
            1 <= limits.maxComputeWorkGroupSize[2] &&
            localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations &&
-           sharedHalfElements * sizeof(uint16_t) <= limits.maxComputeSharedMemorySize;
+           sharedHalfElements * sizeof(uint16_t) + accumulatorTileBytes + sharedAlignmentBytes <=
+             limits.maxComputeSharedMemorySize;
   }
 
   bool isWithinCooperativeMatrixDeviceLimits(
@@ -264,14 +270,18 @@ namespace {
       return false;
     const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) * params.subgroupSize;
     const uint64_t localSizeY = static_cast<uint64_t>(params.NWAVE / params.NWARP);
-    const uint64_t sharedHalfElements = static_cast<uint64_t>(params.MWG) * params.NWG +
-      (params.SB == 1 ? static_cast<uint64_t>(params.NWG) * params.KWG : 0);
+    const uint64_t accumulatorTileBytes = static_cast<uint64_t>(params.MWG) * params.NWG *
+      (params.accType == 32 ? sizeof(float) : sizeof(uint16_t));
+    const uint64_t sharedFilterBytes = params.SB == 1
+      ? static_cast<uint64_t>(params.NWG) * params.KWG * sizeof(uint16_t)
+      : 0;
+    const uint64_t sharedAlignmentBytes = 4 * sizeof(uint32_t) * (params.SB == 1 ? 2 : 1);
     const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
     return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
            localSizeY <= limits.maxComputeWorkGroupSize[1] &&
            1 <= limits.maxComputeWorkGroupSize[2] &&
            localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations &&
-           sharedHalfElements * sizeof(uint16_t) <= limits.maxComputeSharedMemorySize;
+           accumulatorTileBytes + sharedFilterBytes + sharedAlignmentBytes <= limits.maxComputeSharedMemorySize;
   }
 }
 
@@ -1341,11 +1351,16 @@ namespace {
       add("localSubgroups",
           (config.hgemmCooperativeMatrix.MWAVE / config.hgemmCooperativeMatrix.MWARP) *
           (config.hgemmCooperativeMatrix.NWAVE / config.hgemmCooperativeMatrix.NWARP));
-      add("sharedBytes", 2 * (
+      add("sharedBytes",
+          2 * (
           (config.hgemmCooperativeMatrix.SA == 1
             ? config.hgemmCooperativeMatrix.MWG * config.hgemmCooperativeMatrix.KWG : 0) +
           (config.hgemmCooperativeMatrix.SB == 1
-            ? config.hgemmCooperativeMatrix.NWG * config.hgemmCooperativeMatrix.KWG : 0)));
+            ? config.hgemmCooperativeMatrix.NWG * config.hgemmCooperativeMatrix.KWG : 0)) +
+          (config.hgemmCooperativeMatrix.accType == 32
+            ? 4 * config.hgemmCooperativeMatrix.MWG * config.hgemmCooperativeMatrix.NWG : 0) +
+          16 * (config.hgemmCooperativeMatrix.SA + config.hgemmCooperativeMatrix.SB +
+            (config.hgemmCooperativeMatrix.accType == 32 ? 1 : 0)));
     }
     else if(tunerName == "hgemmCooperativeMatrixNCHW") {
       add("MWARP", config.hgemmCooperativeMatrixNCHW.MWARP);
@@ -1369,10 +1384,12 @@ namespace {
       add("localSubgroups",
           (config.hgemmCooperativeMatrixNCHW.MWAVE / config.hgemmCooperativeMatrixNCHW.MWARP) *
           (config.hgemmCooperativeMatrixNCHW.NWAVE / config.hgemmCooperativeMatrixNCHW.NWARP));
-      add("sharedBytes", 2 * (
-          config.hgemmCooperativeMatrixNCHW.MWG * config.hgemmCooperativeMatrixNCHW.NWG +
+      add("sharedBytes",
+          (config.hgemmCooperativeMatrixNCHW.accType == 32 ? 4 : 2) *
+            config.hgemmCooperativeMatrixNCHW.MWG * config.hgemmCooperativeMatrixNCHW.NWG +
           (config.hgemmCooperativeMatrixNCHW.SB == 1
-            ? config.hgemmCooperativeMatrixNCHW.NWG * config.hgemmCooperativeMatrixNCHW.KWG : 0)));
+            ? 2 * config.hgemmCooperativeMatrixNCHW.NWG * config.hgemmCooperativeMatrixNCHW.KWG : 0) +
+          16 * (1 + config.hgemmCooperativeMatrixNCHW.SB));
     }
     else if(
       tunerName == "conv3x3InputTransform" || tunerName == "conv3x3OutputTransform" ||
