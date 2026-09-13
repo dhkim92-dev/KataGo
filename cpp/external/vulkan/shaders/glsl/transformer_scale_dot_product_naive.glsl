@@ -30,6 +30,12 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     int numHeads;
     int numKVHeads;
     float scale; // 1/sqrt(headDim)
+    int qOffset;
+    int kOffset;
+    int vOffset;
+    int qBatchStride;
+    int kBatchStride;
+    int vBatchStride;
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
@@ -39,7 +45,9 @@ void main() {
   const int n = bh / numHeads;
   const int h = bh % numHeads;
   const int kvh = h / (numHeads / numKVHeads);
-  const int kvBase = n * numKVHeads + kvh;
+  const int qBatchBase = n * qBatchStride;
+  const int kBatchBase = n * kBatchStride;
+  const int vBatchBase = n * vBatchStride;
 
   if(qPos >= seqLen)
     return;
@@ -55,7 +63,7 @@ void main() {
   // Load query vector into private registers
   float q[ATTN_HEAD_DIM];
   for(int d = 0; d < ATTN_HEAD_DIM; d++) {
-    q[d] = LOAD(Q, (bh * ATTN_HEAD_DIM + d) * seqLen + qPos);
+    q[d] = LOAD(Q, qBatchBase + qOffset + (h * ATTN_HEAD_DIM + d) * seqLen + qPos);
   }
 
   // Online softmax: iterate over all key positions
@@ -74,7 +82,7 @@ void main() {
     // Dot product Q . K
     float _dot = 0.0f;
     for(int d = 0; d < ATTN_HEAD_DIM; d++) {
-      float kVal = LOAD(K, (kvBase * ATTN_HEAD_DIM + d) * seqLen + kPos);
+      float kVal = LOAD(K, kBatchBase + kOffset + (kvh * ATTN_HEAD_DIM + d) * seqLen + kPos);
       _dot += q[d] * kVal;
     }
     _dot *= scale;
@@ -91,7 +99,7 @@ void main() {
     runningMax = newMax;
 
     for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
-      float vVal = LOAD(V, (kvBase * ATTN_V_HEAD_DIM + d) * seqLen + kPos);
+      float vVal = LOAD(V, vBatchBase + vOffset + (kvh * ATTN_V_HEAD_DIM + d) * seqLen + kPos);
       acc[d] += expCur * vVal;
     }
   }

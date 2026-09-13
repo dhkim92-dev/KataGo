@@ -20,6 +20,8 @@ layout(push_constant) uniform RoPEParams {
     int xySize;
     int numPairs;
     int learnableRope; // 1 = per-head tables, 0 = shared tables
+    int regionOffset;
+    int batchStride;
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
@@ -32,8 +34,9 @@ void main() {
     int h = nh % numBufHeads;
 
     if(n < nSize && pairIdx < numPairs && xy < xySize) {
-        int idx0 = ((n * numBufHeads + h) * headDim + pairIdx * 2) * xySize + xy;
-        int idx1 = ((n * numBufHeads + h) * headDim + pairIdx * 2 + 1) * xySize + xy;
+        int batchBase = n * batchStride + regionOffset;
+        int idx0 = batchBase + (h * headDim + pairIdx * 2) * xySize + xy;
+        int idx1 = batchBase + (h * headDim + pairIdx * 2 + 1) * xySize + xy;
 
         float x0 = LOAD(data, idx0);
         float x1 = LOAD(data, idx1);

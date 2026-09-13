@@ -338,6 +338,12 @@ namespace vk_shader {
   const unsigned char* spirv_transformer_scale_dot_product_p16s16 = _binary_transformer_scale_dot_product_p16s16_start;
   size_t spirv_transformer_scale_dot_product_p16s16_size = _binary_transformer_scale_dot_product_p16s16_size;
 
+  // transformer_scale_dot_product_coopmat
+  const unsigned char* spirv_transformer_scale_dot_product_coopmat_p32s16 = _binary_transformer_scale_dot_product_coopmat_p32s16_start;
+  size_t spirv_transformer_scale_dot_product_coopmat_p32s16_size = _binary_transformer_scale_dot_product_coopmat_p32s16_size;
+  const unsigned char* spirv_transformer_scale_dot_product_coopmat_p16s16 = _binary_transformer_scale_dot_product_coopmat_p16s16_start;
+  size_t spirv_transformer_scale_dot_product_coopmat_p16s16_size = _binary_transformer_scale_dot_product_coopmat_p16s16_size;
+
   // transformer_scale_dot_product_naive_fp32
   const unsigned char* spirv_transformer_scale_dot_product_naive_fp32 = _binary_transformer_scale_dot_product_naive_fp32_start;
   size_t spirv_transformer_scale_dot_product_naive_fp32_size = _binary_transformer_scale_dot_product_naive_fp32_size;
@@ -493,6 +499,8 @@ namespace vk_shader {
       {spirv_transformer_scale_dot_product_naive_p32s16, spirv_transformer_scale_dot_product_naive_p32s16_size, &shaderModule_transformer_scale_dot_product_naive_p32s16},
       {spirv_transformer_scale_dot_product_p16s16, spirv_transformer_scale_dot_product_p16s16_size, &shaderModule_transformer_scale_dot_product_p16s16},
       {spirv_transformer_scale_dot_product_p32s16, spirv_transformer_scale_dot_product_p32s16_size, &shaderModule_transformer_scale_dot_product_p32s16},
+      {spirv_transformer_scale_dot_product_coopmat_p16s16, spirv_transformer_scale_dot_product_coopmat_p16s16_size, &shaderModule_transformer_scale_dot_product_coopmat_p16s16},
+      {spirv_transformer_scale_dot_product_coopmat_p32s16, spirv_transformer_scale_dot_product_coopmat_p32s16_size, &shaderModule_transformer_scale_dot_product_coopmat_p32s16},
       {spirv_transformer_spatial_rms_norm_apply_fp32, spirv_transformer_spatial_rms_norm_apply_fp32_size, &shaderModule_transformer_spatial_rms_norm_apply_fp32},
       {spirv_transformer_spatial_rms_norm_apply_p16s16, spirv_transformer_spatial_rms_norm_apply_p16s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p16s16},
       {spirv_transformer_spatial_rms_norm_apply_p32s16, spirv_transformer_spatial_rms_norm_apply_p32s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p32s16},
@@ -662,8 +670,19 @@ namespace vk_shader {
     if((result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSq, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
-      if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
-      if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
+        if((result = createTransformerScaleDotProductCoopmat(
+          transformerScaleDotProductCoopmat,
+          tuneParams.transformerScaleDotProductCoopmat,
+          qHeadDim,
+          vHeadDim,
+          tuneParams.vulkan
+        )) != VK_SUCCESS) return result;
+      }
+      else {
+        if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+        if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      }
     }
     return VK_SUCCESS;
   }
@@ -716,6 +735,7 @@ namespace vk_shader {
     destroyPipeline(transformerRmsNorm);
     destroyPipeline(transformerApplyRoPE);
     destroyPipeline(transformerScaleDotProduct);
+    destroyPipeline(transformerScaleDotProductCoopmat);
     destroyPipeline(transformerScaleDotProductNaive);
     destroyPipeline(transformerSwiGLU);
     destroyPipeline(transformerSpatialRMSNormApply);
@@ -1369,6 +1389,53 @@ namespace vk_shader {
       return createPipeline("transformer_scale_dot_product_p32s16", shaderModule_transformer_scale_dot_product_p32s16, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
     return createPipeline("transformer_scale_dot_product_fp32", shaderModule_transformer_scale_dot_product_fp32, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  VkResult ComputePipelines::createTransformerScaleDotProductCoopmat(
+    Pipeline& pipeline,
+    const TransformerScaleDotProductCoopmatTuneParams& tuneParams,
+    int qHeadDim,
+    int vHeadDim,
+    const VulkanParams& vulkanParams
+  ) {
+    if(!isValidTransformerScaleDotProductCoopmatConfig(deviceInfo, tuneParams, qHeadDim, vHeadDim))
+      return VK_ERROR_INITIALIZATION_FAILED;
+    if(!vulkanParams.canUseCooperativeMatrix || !vulkanParams.shouldUseCooperativeMatrix ||
+       !vulkanParams.canUseFP16Storage || !vulkanParams.canUseFP16Compute ||
+       !vulkanParams.shouldUseFP16Storage || !vulkanParams.shouldUseFP16Compute)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+    TransformerScaleDotProductCoopmatSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MSize) *
+      static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NSize) * tuneParams.subgroupSize;
+    spec.localSizeY = 1;
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MSize;
+    spec.NSize = tuneParams.NSize;
+    spec.KSize = tuneParams.KSize;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    spec.ATTN_HEAD_DIM = qHeadDim;
+    spec.ATTN_V_HEAD_DIM = vHeadDim;
+    SpecializationData specData(spec);
+    const VkShaderModule shaderModule = tuneParams.accType == 32
+      ? shaderModule_transformer_scale_dot_product_coopmat_p32s16
+      : shaderModule_transformer_scale_dot_product_coopmat_p16s16;
+    return createPipeline(
+      "transformer_scale_dot_product_coopmat",
+      shaderModule,
+      5,
+      sizeof(ScaleDotProductPushParam),
+      pipeline,
+      &specData.info,
+      spec.localSizeX,
+      spec.localSizeY,
+      spec.localSizeZ,
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+    );
   }
 
   VkResult ComputePipelines::createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {

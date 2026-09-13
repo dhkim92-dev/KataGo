@@ -2278,7 +2278,9 @@ struct TransformerApplyRoPELayer {
     const int headDim,
     const int seqLen,
     const int numPairs,
-    const int learnableInt
+    const int learnableInt,
+    const int regionOffset,
+    const int batchStride
   ) {
     assert(cb != VK_NULL_HANDLE);
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
@@ -2296,6 +2298,8 @@ struct TransformerApplyRoPELayer {
     params.xySize = seqLen; // 7
     params.numPairs = numPairs;  //8 
     params.learnableRope = learnableInt; //9
+    params.regionOffset = regionOffset;
+    params.batchStride = batchStride;
 
     vkCmdPushConstants(
       cb,
@@ -2338,16 +2342,18 @@ struct TransformerApplyRoPELayer {
     const int headDim,
     const int seqLen,
     const int numPairs,
-    const int learnableInt
+    const int learnableInt,
+    const int regionOffset,
+    const int batchStride
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for TransformerApplyRoPELayer", res);
-    forward(commandBuffer, batchSize, input, cosTable, sinTable, numHeads, numKVHeads, headDim, seqLen, numPairs, learnableInt);
+    forward(commandBuffer, batchSize, input, cosTable, sinTable, numHeads, numKVHeads, headDim, seqLen, numPairs, learnableInt, regionOffset, batchStride);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerApplyRoPELayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
-    printDeviceBuffer("TransformerApplyRoPELayer Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(numHeads) * static_cast<size_t>(headDim) * static_cast<size_t>(seqLen));
+    printDeviceBuffer("TransformerApplyRoPELayer Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(batchStride));
   }
 };
 
@@ -2357,6 +2363,7 @@ struct TransformerAttentionLayer {
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
   Pipeline pipeline;
   ScaleDotProductPushParam params;
+  const bool useCooperativeMatrix;
   const bool useTiled;
 
   explicit TransformerAttentionLayer(
@@ -2365,6 +2372,7 @@ struct TransformerAttentionLayer {
     const int numKVHeads
   ): 
     handle(handle),
+    useCooperativeMatrix(handle->tuneParams.vulkan.shouldUseCooperativeMatrix),
     useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0)
   {
 
@@ -2373,7 +2381,10 @@ struct TransformerAttentionLayer {
     params.numHeads = numHeads;
     params.numKVHeads = numKVHeads;
     params.scale = 1.0f / sqrtf(static_cast<float>(handle->qHeadDim));
-    if(useTiled) {
+    if(useCooperativeMatrix) {
+      pipeline = pipelines->transformerScaleDotProductCoopmat;
+    }
+    else if(useTiled) {
       pipeline = pipelines->transformerScaleDotProduct;
     } else {
       pipeline = pipelines->transformerScaleDotProductNaive;
@@ -2388,26 +2399,40 @@ struct TransformerAttentionLayer {
   void forward(
     VkCommandBuffer cb,
     int batchSize,
-    VulkanBuffer* Q,
-    VulkanBuffer* K,
-    VulkanBuffer* V,
+    VulkanBuffer* packedQKV,
     VulkanBuffer* output,
-    VulkanBuffer* mask
+    VulkanBuffer* mask,
+    const int qOffset,
+    const int kOffset,
+    const int vOffset,
+    const int batchStride
   ) {
     auto writeDescriptors = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, Q),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, K),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, V),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, packedQKV),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, packedQKV),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, packedQKV),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, output),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
 
+    params.qOffset = qOffset;
+    params.kOffset = kOffset;
+    params.vOffset = vOffset;
+    params.qBatchStride = batchStride;
+    params.kBatchStride = batchStride;
+    params.vBatchStride = batchStride;
+
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
-    if (useTiled) {
+    if (useCooperativeMatrix) {
+      const auto& coopmatParams = handle->tuneParams.transformerScaleDotProductCoopmat;
+      const uint32_t numQGroups = (params.seqLen + coopmatParams.MWG - 1) / coopmatParams.MWG;
+      vkCmdDispatch(cb, numQGroups, static_cast<uint32_t>(batchSize) * params.numHeads, 1);
+    }
+    else if (useTiled) {
       auto tuneParams = handle->tuneParams.transformer;
       uint32_t qPerThread = tuneParams.Q_PER_THREAD;
       uint32_t totalQPerWG = pipeline.localSizeX * qPerThread;
@@ -2439,16 +2464,18 @@ struct TransformerAttentionLayer {
 
   void debug(
     int batchSize,
-    VulkanBuffer* Q,
-    VulkanBuffer* K,
-    VulkanBuffer* V,
+    VulkanBuffer* packedQKV,
     VulkanBuffer* output,
-    VulkanBuffer* mask
+    VulkanBuffer* mask,
+    const int qOffset,
+    const int kOffset,
+    const int vOffset,
+    const int batchStride
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for TransformerAttentionLayer", res);
-    forward(commandBuffer, batchSize, Q, K, V, output, mask);
+    forward(commandBuffer, batchSize, packedQKV, output, mask, qOffset, kOffset, vOffset, batchStride);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerAttentionLayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
@@ -2836,6 +2863,73 @@ struct RMSNormLayer {
   }
 };
 
+static bool canUsePackedQKVHgemm(
+  const ComputeHandleInternal* handle,
+  const int inChannels
+) {
+  const auto& hgemmParams = handle->tuneParams.hgemmCooperativeMatrixNCHW;
+  return
+    handle->usingFP16Storage &&
+    handle->tuneParams.vulkan.canUseCooperativeMatrix &&
+    handle->tuneParams.vulkan.shouldUseFP16Storage &&
+    handle->tuneParams.vulkan.shouldUseFP16Compute &&
+    handle->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+    hgemmParams.isValid() &&
+    handle->paddedNNXYLen % hgemmParams.getRequiredSpatialAlignment() == 0 &&
+    inChannels % hgemmParams.KWG == 0;
+}
+
+static int getPackedQKVOutChannels(
+  const ComputeHandleInternal* handle,
+  const int inChannels,
+  const int logicalOutChannels
+) {
+  if(!canUsePackedQKVHgemm(handle, inChannels))
+    return logicalOutChannels;
+  return vk_helper::roundUpToMultipleInt(
+    logicalOutChannels,
+    handle->tuneParams.hgemmCooperativeMatrixNCHW.NWG
+  );
+}
+
+static MatMulLayerDesc makePackedQKVDesc(
+  const TransformerAttentionDesc* desc,
+  const int physicalOutChannels
+) {
+  const MatMulLayerDesc& qDesc = desc->qProj;
+  const MatMulLayerDesc& kDesc = desc->kProj;
+  const MatMulLayerDesc& vDesc = desc->vProj;
+  testAssert(qDesc.inChannels == kDesc.inChannels);
+  testAssert(qDesc.inChannels == vDesc.inChannels);
+  testAssert(qDesc.weights.size() == static_cast<size_t>(qDesc.inChannels * qDesc.outChannels));
+  testAssert(kDesc.weights.size() == static_cast<size_t>(kDesc.inChannels * kDesc.outChannels));
+  testAssert(vDesc.weights.size() == static_cast<size_t>(vDesc.inChannels * vDesc.outChannels));
+  testAssert(physicalOutChannels >= qDesc.outChannels + kDesc.outChannels + vDesc.outChannels);
+
+  MatMulLayerDesc result;
+  result.name = qDesc.name + "_packed_qkv";
+  result.inChannels = qDesc.inChannels;
+  result.outChannels = physicalOutChannels;
+  result.weights.assign(
+    static_cast<size_t>(result.inChannels) * static_cast<size_t>(result.outChannels),
+    0.0f
+  );
+
+  for(int ic = 0; ic < result.inChannels; ic++) {
+    const size_t qSrcBase = static_cast<size_t>(ic) * qDesc.outChannels;
+    const size_t kSrcBase = static_cast<size_t>(ic) * kDesc.outChannels;
+    const size_t vSrcBase = static_cast<size_t>(ic) * vDesc.outChannels;
+    const size_t dstBase = static_cast<size_t>(ic) * result.outChannels;
+    for(int oc = 0; oc < qDesc.outChannels; oc++)
+      result.weights[dstBase + oc] = qDesc.weights[qSrcBase + oc];
+    for(int oc = 0; oc < kDesc.outChannels; oc++)
+      result.weights[dstBase + qDesc.outChannels + oc] = kDesc.weights[kSrcBase + oc];
+    for(int oc = 0; oc < vDesc.outChannels; oc++)
+      result.weights[dstBase + qDesc.outChannels + kDesc.outChannels + oc] = vDesc.weights[vSrcBase + oc];
+  }
+  return result;
+}
+
 struct TransformerAttentionBlock {
   ComputeHandleInternal *handle;
   const std::string name;
@@ -2849,11 +2943,11 @@ struct TransformerAttentionBlock {
   const int nnYLen;
   const int paddedNNXYLen;
   const int inChannels;  // = numHeads * qHeadDim (or whatever c_main is)
+  const int qkvPhysicalOutChannels;
 
+  MatMulLayerDesc qkvProjDesc;
   TransformerRMSNormLayer* preLN;
-  TransformerMatMulLayer* qProj;
-  TransformerMatMulLayer* kProj;
-  TransformerMatMulLayer* vProj;
+  TransformerMatMulLayer* qkvProj;
   TransformerMatMulLayer* outProj;
   TransformerApplyRoPELayer* qRoPE;
   TransformerApplyRoPELayer* kRoPE;
@@ -2883,10 +2977,16 @@ struct TransformerAttentionBlock {
     nnYLen(nnY),
     paddedNNXYLen(handle->paddedNNXYLen),
     inChannels(desc->qProj.inChannels),
+    qkvPhysicalOutChannels(
+      getPackedQKVOutChannels(
+        handle,
+        desc->qProj.inChannels,
+        numHeads * qHeadDim + numKVHeads * qHeadDim + numKVHeads * vHeadDim
+      )
+    ),
+    qkvProjDesc(makePackedQKVDesc(desc, qkvPhysicalOutChannels)),
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
-    qProj(new TransformerMatMulLayer(handle, &desc->qProj)),
-    kProj(new TransformerMatMulLayer(handle, &desc->kProj)),
-    vProj(new TransformerMatMulLayer(handle, &desc->vProj)),
+    qkvProj(new TransformerMatMulLayer(handle, &qkvProjDesc)),
     outProj(new TransformerMatMulLayer(handle, &desc->outProj)),
     ropeCosTable(nullptr),
     ropeSinTable(nullptr),
@@ -2895,6 +2995,7 @@ struct TransformerAttentionBlock {
     kRoPE( useRope ? new TransformerApplyRoPELayer(handle) : nullptr ),
     attention(new TransformerAttentionLayer(handle, numHeads, numKVHeads))
   {
+    qkvProjDesc.releaseWeights();
     if ( useRope ) {
       ropeNumPairs = qHeadDim/2;
 
@@ -2931,9 +3032,7 @@ struct TransformerAttentionBlock {
     }
     delete preLN;
     delete outProj;
-    delete qProj;
-    delete kProj;
-    delete vProj;
+    delete qkvProj;
   }
 
   void forward(
@@ -2949,35 +3048,36 @@ struct TransformerAttentionBlock {
     const int seqLen = paddedNNXYLen;
     const int qTotalDim = numHeads * qHeadDim;
     const int kTotalDim = numKVHeads * qHeadDim;
-    const int vTotalDim = numKVHeads * vHeadDim;
+    const int qOffset = 0;
+    const int kOffset = qTotalDim * seqLen;
+    const int vOffset = (qTotalDim + kTotalDim) * seqLen;
+    const int packedBatchStride = qkvPhysicalOutChannels * seqLen;
 
     // Step 1: RMSNorm
     // preLN: trunk -> trunkScratch (normalized)
     preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
 
-    // Step 2: Q/K/V projections using tuned xgemm (same as 1x1 conv)
-    SizedBuf<VulkanBuffer*> qBuf(scratch->allocator, scratch->getBufSizeXY(qTotalDim));
-    SizedBuf<VulkanBuffer*> kBuf(scratch->allocator, scratch->getBufSizeXY(kTotalDim));
-    SizedBuf<VulkanBuffer*> vBuf(scratch->allocator, scratch->getBufSizeXY(vTotalDim));
-
-    qProj->forward(cb, batchSize, trunkScratch, qBuf.buf, mask, convWorkspace);
-    kProj->forward(cb, batchSize, trunkScratch, kBuf.buf, mask, convWorkspace);
-    vProj->forward(cb, batchSize, trunkScratch, vBuf.buf, mask, convWorkspace);
+    // Step 2: Combined Q/K/V projection into [Q | K | V | padding]
+    SizedBuf<VulkanBuffer*> packedQKV(
+      scratch->allocator,
+      scratch->getBufSizeXY(qkvPhysicalOutChannels)
+    );
+    qkvProj->forward(cb, batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
     // Step 3: Apply RoPE to Q and K
     if(useRope) {
       int learnableInt = learnableRope ? 1 : 0;
 
       // Apply to Q - Q is (N, numHeads*qHeadDim, HW), reshape as (N*numHeads, qHeadDim, HW)
-      qRoPE->forward(cb, batchSize, qBuf.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt );
-      vk_helper::barrierCommandBufferForBuffer(cb, qBuf.buf);
+      qRoPE->forward(cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, qOffset, packedBatchStride );
+      vk_helper::barrierCommandBufferForBuffer(cb, packedQKV.buf);
       // Apply to K
-      kRoPE->forward(cb, batchSize, kBuf.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
-      vk_helper::barrierCommandBufferForBuffer(cb, kBuf.buf);
+      kRoPE->forward(cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, kOffset, packedBatchStride);
+      vk_helper::barrierCommandBufferForBuffer(cb, packedQKV.buf);
     }
     // Step 4: Scaled dot product attention
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
-    attention->forward(cb, batchSize, qBuf.buf, kBuf.buf, vBuf.buf, attnOut.buf, mask);
+    attention->forward(cb, batchSize, packedQKV.buf, attnOut.buf, mask, qOffset, kOffset, vOffset, packedBatchStride);
     vk_helper::barrierCommandBufferForBuffer(cb, attnOut.buf);
     // Step 5: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
     outProj->forward(cb, batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
@@ -2998,26 +3098,28 @@ struct TransformerAttentionBlock {
     const int seqLen = paddedNNXYLen;
     const int qTotalDim = numHeads * qHeadDim;
     const int kTotalDim = numKVHeads * qHeadDim;
-    const int vTotalDim = numKVHeads * vHeadDim;
+    const int qOffset = 0;
+    const int kOffset = qTotalDim * seqLen;
+    const int vOffset = (qTotalDim + kTotalDim) * seqLen;
+    const int packedBatchStride = qkvPhysicalOutChannels * seqLen;
 
     preLN->debug(batchSize, trunk, trunkScratch, mask);
 
-    SizedBuf<VulkanBuffer*> qBuf(scratch->allocator, scratch->getBufSizeXY(qTotalDim));
-    SizedBuf<VulkanBuffer*> kBuf(scratch->allocator, scratch->getBufSizeXY(kTotalDim));
-    SizedBuf<VulkanBuffer*> vBuf(scratch->allocator, scratch->getBufSizeXY(vTotalDim));
+    SizedBuf<VulkanBuffer*> packedQKV(
+      scratch->allocator,
+      scratch->getBufSizeXY(qkvPhysicalOutChannels)
+    );
 
-    qProj->debug(batchSize, trunkScratch, qBuf.buf, mask, convWorkspace);
-    kProj->debug(batchSize, trunkScratch, kBuf.buf, mask, convWorkspace);
-    vProj->debug(batchSize, trunkScratch, vBuf.buf, mask, convWorkspace);
+    qkvProj->debug(batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
     if(useRope) {
       int learnableInt = learnableRope ? 1 : 0;
-      qRoPE->debug(batchSize, qBuf.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
-      kRoPE->debug(batchSize, kBuf.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt);
+      qRoPE->debug(batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, qOffset, packedBatchStride);
+      kRoPE->debug(batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, kOffset, packedBatchStride);
     }
 
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
-    attention->debug(batchSize, qBuf.buf, kBuf.buf, vBuf.buf, attnOut.buf, mask);
+    attention->debug(batchSize, packedQKV.buf, attnOut.buf, mask, qOffset, kOffset, vOffset, packedBatchStride);
     outProj->debug(batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
 
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
@@ -3027,9 +3129,7 @@ struct TransformerAttentionBlock {
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
     ConvWorkspaceEltsNeeded maxElts;
-    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, qProj->requiredConvWorkspaceElts(handle, maxBatchSize));
-    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, kProj->requiredConvWorkspaceElts(handle, maxBatchSize));
-    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, vProj->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, qkvProj->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, outProj->requiredConvWorkspaceElts(handle, maxBatchSize));
     return maxElts;
   }

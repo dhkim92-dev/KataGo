@@ -371,6 +371,15 @@ extern "C" {
   extern const unsigned char* _binary_transformer_scale_dot_product_p16s16_end;
   extern const size_t _binary_transformer_scale_dot_product_p16s16_size;
 
+  // transformer_scale_dot_product_coopmat
+  extern const unsigned char _binary_transformer_scale_dot_product_coopmat_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_coopmat_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_coopmat_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_coopmat_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_coopmat_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_coopmat_p16s16_size;
+
   // transformer_swiglu_fp32
   extern const unsigned char _binary_transformer_swiglu_fp32_start[];
   extern const unsigned char* _binary_transformer_swiglu_fp32_end;
@@ -965,6 +974,24 @@ struct LocalDimHash {
       int ATTN_V_HEAD_DIM = 1;
     };
 
+    /** Specialization constants for transformer_scale_dot_product_coopmat. */
+    struct TransformerScaleDotProductCoopmatSpec {
+      // Field order matches specialization IDs 0 through 12 in the shader.
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+    };
+
     struct TransformerSwiGLUSpec {
       uint32_t localSizeX = 32;
       uint32_t localSizeY = 1;
@@ -1198,6 +1225,8 @@ struct LocalDimHash {
       int xySize;
       int numPairs;
       int learnableRope;
+      int regionOffset;
+      int batchStride;
     };
 
     /**
@@ -1208,6 +1237,12 @@ struct LocalDimHash {
       int numHeads;
       int numKVHeads;
       float scale;
+      int qOffset;
+      int kOffset;
+      int vOffset;
+      int qBatchStride;
+      int kBatchStride;
+      int vBatchStride;
     };
 
     struct TransformerSwiGLUPushParams {
@@ -1361,7 +1396,6 @@ struct LocalDimHash {
       const VulkanDeviceInfo& deviceInfo,
       const HGemmCooperativeMatrixNCHWTuneParams& params
     );
-
     struct TransformerTuneParams {
       int ATTN_BLOCK_Q=128  ;
       int ATTN_BLOCK_KV=32;
@@ -1370,6 +1404,29 @@ struct LocalDimHash {
 
       bool isValid() const;
     };
+
+    /** Runtime tuning parameters for transformer_scale_dot_product_coopmat. */
+    struct TransformerScaleDotProductCoopmatTuneParams {
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      uint32_t subgroupSize = 32;
+      int accType = 32;
+
+      bool isValid() const;
+    };
+
+    bool isValidTransformerScaleDotProductCoopmatConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const TransformerScaleDotProductCoopmatTuneParams& params,
+      int qHeadDim,
+      int vHeadDim
+    );
 
     struct TransformerRMSNormTuneParms {
       int WG_C_SIZE = 64;
@@ -1416,6 +1473,7 @@ struct LocalDimHash {
       XgemmTuneParams xgemm16;
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
+      TransformerScaleDotProductCoopmatTuneParams transformerScaleDotProductCoopmat;
       TransformerRMSNormTuneParms rmsNorm;
       TransformerSpatialRmsNormTuneParams spatialRMSNorm;
 
@@ -1561,6 +1619,8 @@ struct LocalDimHash {
     VkShaderModule shaderModule_transformer_scale_dot_product_naive_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_scale_dot_product_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_scale_dot_product_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_coopmat_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_coopmat_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p32s16 = VK_NULL_HANDLE;
@@ -1652,6 +1712,7 @@ struct LocalDimHash {
     Pipeline transformerRmsNorm;
     Pipeline transformerApplyRoPE;
     Pipeline transformerScaleDotProduct;
+    Pipeline transformerScaleDotProductCoopmat;
     Pipeline transformerScaleDotProductNaive;
     Pipeline transformerSwiGLU;
     Pipeline transformerSpatialRMSNormApply;
@@ -1698,6 +1759,7 @@ struct LocalDimHash {
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProductCoopmat(Pipeline& pipeline, const tune::TransformerScaleDotProductCoopmatTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);

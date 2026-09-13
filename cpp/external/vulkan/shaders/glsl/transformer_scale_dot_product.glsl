@@ -32,6 +32,12 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     int numHeads;
     int numKVHeads;
     float scale; // 1/sqrt(headDim)
+    int qOffset;
+    int kOffset;
+    int vOffset;
+    int qBatchStride;
+    int kBatchStride;
+    int vBatchStride;
 };
 
 // Store tiles as [dimension][key position]. This preserves coalesced global
@@ -49,7 +55,9 @@ void main() {
   const int n = bh / numHeads;
   const int h = bh % numHeads;
   const int kvh = h / (numHeads / numKVHeads);
-  const int kvBase = n * numKVHeads + kvh;
+  const int qBatchBase = n * qBatchStride;
+  const int kBatchBase = n * kBatchStride;
+  const int vBatchBase = n * vBatchStride;
 
   float q[Q_PER_THREAD * ATTN_HEAD_DIM];
   float qMask[Q_PER_THREAD];
@@ -64,7 +72,7 @@ void main() {
       qMask[qi] = LOAD(mask, n * seqLen + qPos);
       if(qMask[qi] != 0.0f) {
         for(int d = 0; d < ATTN_HEAD_DIM; d++) {
-          q[qi * ATTN_HEAD_DIM + d] = LOAD(Q, (bh * ATTN_HEAD_DIM + d) * seqLen + qPos);
+          q[qi * ATTN_HEAD_DIM + d] = LOAD(Q, qBatchBase + qOffset + (h * ATTN_HEAD_DIM + d) * seqLen + qPos);
         }
       }
     }
@@ -87,7 +95,7 @@ void main() {
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
-        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(K, (kvBase * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
+        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(K, kBatchBase + kOffset + (kvh * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
       } else {
         kTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
       }
@@ -100,7 +108,7 @@ void main() {
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
       if(globalKPos < seqLen) {
-        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(V, (kvBase * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
+        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(V, vBatchBase + vOffset + (kvh * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
       } else {
         vTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
       }
