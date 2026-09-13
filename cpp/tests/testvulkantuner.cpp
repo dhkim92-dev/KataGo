@@ -151,7 +151,7 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 17);
+  testAssert(VulkanTuner::TUNER_VERSION == 19);
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
@@ -192,6 +192,14 @@ void Tests::runVulkanTunerPersistenceTests() {
     testAssert(!VulkanTuner::isFastEnough(badRate, 100.0, 1.0));
     testAssert(!VulkanTuner::isFastEnough(100.0, badRate, 1.0));
   }
+  testAssert(VulkanTuner::computeCooperativeMatrixTuningScore(300.0, 0.0001, 0.002) == 300.0);
+  testAssert(VulkanTuner::computeCooperativeMatrixTuningScore(230.0, 0.0, 0.002) == 230.0);
+  testAssert(
+    VulkanTuner::computeCooperativeMatrixTuningScore(300.0, 0.0001, 0.002) >
+    VulkanTuner::computeCooperativeMatrixTuningScore(230.0, 0.0, 0.002)
+  );
+  testAssert(VulkanTuner::computeCooperativeMatrixTuningScore(300.0, 0.002001, 0.002) == 0.0);
+  testAssert(VulkanTuner::computeCooperativeMatrixTuningScore(300.0, nan, 0.002) == 0.0);
   // Optional paths use the adjustable VulkanTuner throughput thresholds.
   testAssert(VulkanTuner::isFastEnough(100.0, 100.0, 1.0));
   testAssert(!VulkanTuner::isFastEnough(99.999, 100.0, 1.0));

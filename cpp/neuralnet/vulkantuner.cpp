@@ -59,6 +59,17 @@ double VulkanTuner::computeTuningScore(double callsPerSecond, double errorProp, 
   return callsPerSecond * penalty;
 }
 
+double VulkanTuner::computeCooperativeMatrixTuningScore(
+  double callsPerSecond,
+  double errorProp,
+  double errorTolerance
+) {
+  if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0 || !isfinite(errorProp) ||
+     errorProp > errorTolerance)
+    return 0.0;
+  return callsPerSecond;
+}
+
 bool VulkanTuner::isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio) {
   return isfinite(callsPerSecond) && isfinite(baselineCallsPerSecond) &&
          callsPerSecond > 0.0 && baselineCallsPerSecond > 0.0 &&
@@ -1500,8 +1511,8 @@ namespace {
     const string params = describeTuningParams(tunerName, candidate);
     ostringstream out;
     out << "Tuning " << pipelineNames << " " << (isBest ? "* " : "  ")
-        << candidateIndex << "/" << totalCandidates
-        << (candidateIndex == 0 ? " (reference)" : "")
+        << "(" << candidateIndex << "/" << totalCandidates << ")"
+        << (candidateIndex == 1 ? " (reference)" : "")
         << " Calls/sec " << callsPerSecond
         << " ErrorProp " << errorProp
         << " " << params;
@@ -1519,7 +1530,7 @@ namespace {
     const string pipelineNames = describeTuningPipelines(pipelines, tunerName);
     writeTuningLog(
       context,
-      "Tuning " + pipelineNames + " " + to_string(candidateIndex) + "/" + to_string(totalCandidates) + " failed: " + error
+      "Tuning " + pipelineNames + " (" + to_string(candidateIndex) + "/" + to_string(totalCandidates) + ") failed: " + error
     );
   }
 
@@ -1528,12 +1539,14 @@ namespace {
     size_t candidateIndex,
     size_t totalCandidates,
     const vector<const Pipeline*>& pipelines,
-    const string& tunerName
+    const string& tunerName,
+    bool isReference = false
   ) {
     const string pipelineNames = describeTuningPipelines(pipelines, tunerName);
     writeTuningLog(
       context,
-      "Tuning " + pipelineNames + " " + to_string(candidateIndex) + "/" + to_string(totalCandidates) + " ..."
+      "Tuning " + pipelineNames + " (" + to_string(candidateIndex) + "/" + to_string(totalCandidates) + ")" +
+        (isReference ? " (reference)" : "") + " ..."
     );
   }
 
@@ -3627,7 +3640,7 @@ namespace {
 
     void run() {
       if(logger != nullptr)
-        logger->write("Dummy tuning thread starting");
+        logger->write("Dummy tuning thread starting with fixed 128x128x128 FP32 XGEMM workload");
 
       if(device->dummyQueue == VK_NULL_HANDLE) {
         reportFailure("no dedicated Vulkan queue is available");
@@ -3642,10 +3655,6 @@ namespace {
       VulkanBuffer* matrixA = nullptr;
       VulkanBuffer* matrixB = nullptr;
       VulkanBuffer* matrixC = nullptr;
-      VulkanBuffer* matrixD = nullptr;
-      VulkanBuffer* buffer = nullptr;
-      VulkanBuffer* buffer2 = nullptr;
-      VulkanBuffer* readbackBuffer = nullptr;
       unique_ptr<vk_shader::ComputePipelines> pipelines;
 
       const auto cleanup = [&]() {
@@ -3660,18 +3669,14 @@ namespace {
         vk_helper::releaseVulkanBuffer(device, matrixA);
         vk_helper::releaseVulkanBuffer(device, matrixB);
         vk_helper::releaseVulkanBuffer(device, matrixC);
-        vk_helper::releaseVulkanBuffer(device, matrixD);
-        vk_helper::releaseVulkanBuffer(device, buffer);
-        vk_helper::releaseVulkanBuffer(device, buffer2);
-        vk_helper::releaseVulkanBuffer(device, readbackBuffer);
       };
       ScopeGuard cleanupGuard(std::move(cleanup));
 
       try {
         const int batchSize = 1;
-        const int mSize = 97;
-        const int kSize = 151;
-        const size_t outputElements = static_cast<size_t>(mSize) * kSize;
+        const int mSize = 128;
+        const int nSize = 128;
+        const int kSize = 128;
 
         VkResult result = VK_SUCCESS;
         VkCommandPoolCreateInfo commandPoolInfo = {};
@@ -3698,16 +3703,15 @@ namespace {
           throw StringError("could not create dummy fence: " + vk_helper::vkErrorToString(result));
 
         const VkDescriptorPoolSize descriptorPoolSize = {
-          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5
+          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3
         };
         descriptorPool = vk_helper::createDescriptorPool(
-          device, {descriptorPoolSize}, 2, &result
+          device, {descriptorPoolSize}, 1, &result
         );
         if(result != VK_SUCCESS)
           throw StringError("could not create dummy descriptor pool: " + vk_helper::vkErrorToString(result));
 
         XgemmDirectTuneParams xgemmParams;
-        AddPointWiseTuneParams pointwiseParams;
         VulkanParams vulkanParams;
         pipelines = make_unique<vk_shader::ComputePipelines>(device->device, device->info, nullptr);
         result = pipelines->createXgemmStridedBatched(
@@ -3715,11 +3719,6 @@ namespace {
         );
         if(result != VK_SUCCESS)
           throw StringError("could not create dummy XGEMM pipeline: " + vk_helper::vkErrorToString(result));
-        result = pipelines->createAddPointWise(
-          pipelines->addPointWise, pointwiseParams, vulkanParams
-        );
-        if(result != VK_SUCCESS)
-          throw StringError("could not create dummy addPointWise pipeline: " + vk_helper::vkErrorToString(result));
 
         Rand dataRand("dummyThreadData");
         const auto makeRandomVector = [&](size_t size, double scale) {
@@ -3732,39 +3731,22 @@ namespace {
           return vector<float>(size, 0.0f);
         };
         matrixA = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(static_cast<size_t>(kSize) * kSize, 1.2 / kSize), false, &result
+          device, makeRandomVector(static_cast<size_t>(mSize) * kSize, 1.2 / kSize), false, &result
         );
         if(result != VK_SUCCESS || matrixA == nullptr)
           throw StringError("could not create dummy matrix A: " + vk_helper::vkErrorToString(result));
         matrixB = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(static_cast<size_t>(kSize) * kSize, 1.2 / kSize), false, &result
+          device, makeRandomVector(static_cast<size_t>(nSize) * kSize, 1.2 / kSize), false, &result
         );
         if(result != VK_SUCCESS || matrixB == nullptr)
           throw StringError("could not create dummy matrix B: " + vk_helper::vkErrorToString(result));
-        matrixC = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(outputElements, 1.0), false, &result
+        matrixC = vk_helper::createReadWriteBuffer(
+          device, makeZeroVector(static_cast<size_t>(mSize) * nSize), false, &result
         );
         if(result != VK_SUCCESS || matrixC == nullptr)
           throw StringError("could not create dummy matrix C: " + vk_helper::vkErrorToString(result));
-        matrixD = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(outputElements, 1.0), false, &result
-        );
-        if(result != VK_SUCCESS || matrixD == nullptr)
-          throw StringError("could not create dummy matrix D: " + vk_helper::vkErrorToString(result));
-        buffer = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result);
-        if(result != VK_SUCCESS || buffer == nullptr)
-          throw StringError("could not create dummy buffer: " + vk_helper::vkErrorToString(result));
-        buffer2 = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result);
-        if(result != VK_SUCCESS || buffer2 == nullptr)
-          throw StringError("could not create second dummy buffer: " + vk_helper::vkErrorToString(result));
-        readbackBuffer = vk_helper::createReadbackBuffer(
-          device, outputElements * sizeof(float), &result
-        );
-        if(result != VK_SUCCESS || readbackBuffer == nullptr)
-          throw StringError("could not create dummy readback buffer: " + vk_helper::vkErrorToString(result));
 
         VkDescriptorSet xgemmDescriptorSet = VK_NULL_HANDLE;
-        VkDescriptorSet pointwiseDescriptorSet = VK_NULL_HANDLE;
         VkDescriptorSetAllocateInfo descriptorSetInfo = {};
         descriptorSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         descriptorSetInfo.descriptorPool = descriptorPool;
@@ -3773,136 +3755,62 @@ namespace {
         result = vkAllocateDescriptorSets(device->device, &descriptorSetInfo, &xgemmDescriptorSet);
         if(result != VK_SUCCESS)
           throw StringError("could not allocate dummy XGEMM descriptor set: " + vk_helper::vkErrorToString(result));
-        descriptorSetInfo.pSetLayouts = &pipelines->addPointWise.descriptorSetLayout;
-        result = vkAllocateDescriptorSets(device->device, &descriptorSetInfo, &pointwiseDescriptorSet);
+        result = vk_helper::updateDescriptorSets(device, {
+          vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 0, matrixA),
+          vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 1, matrixB),
+          vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 2, matrixC)
+        });
         if(result != VK_SUCCESS)
-          throw StringError("could not allocate dummy pointwise descriptor set: " + vk_helper::vkErrorToString(result));
+          throw StringError("could not update dummy XGEMM descriptors: " + vk_helper::vkErrorToString(result));
 
-        const auto updateXgemmDescriptors = [&](VulkanBuffer* input, VulkanBuffer* other, VulkanBuffer* output) {
-          return vk_helper::updateDescriptorSets(device, {
-            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 0, input),
-            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 1, other),
-            vk_helper::writeDescriptorSetBuffer(xgemmDescriptorSet, 2, output)
-          });
+        result = vk_helper::beginCommandBuffer(commandBuffer);
+        if(result != VK_SUCCESS)
+          throw StringError("could not begin dummy command buffer: " + vk_helper::vkErrorToString(result));
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, matrixA,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
+        );
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, matrixB,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
+        );
+        vk_helper::barrierCommandBufferForBuffer(
+          commandBuffer, matrixC,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
+        );
+        vkCmdBindPipeline(
+          commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+          pipelines->xgemmStridedBatchedFp32.pipeline
+        );
+        vkCmdBindDescriptorSets(
+          commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+          pipelines->xgemmStridedBatchedFp32.layout, 0, 1, &xgemmDescriptorSet, 0, nullptr
+        );
+        const vk_shader::push::XgemmStridedBatchedFp32Params params = {
+          static_cast<uint32_t>(mSize), static_cast<uint32_t>(nSize), static_cast<uint32_t>(kSize),
+          static_cast<uint32_t>(mSize), 0,
+          static_cast<uint32_t>(nSize), 0,
+          static_cast<uint32_t>(mSize), 0, 0
         };
-        const auto updatePointwiseDescriptors = [&](VulkanBuffer* input, VulkanBuffer* other) {
-          return vk_helper::updateDescriptorSets(device, {
-            vk_helper::writeDescriptorSetBuffer(pointwiseDescriptorSet, 0, input),
-            vk_helper::writeDescriptorSetBuffer(pointwiseDescriptorSet, 1, other)
-          });
-        };
-        const auto addReadWriteBarrier = [&](VulkanBuffer* target, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
-          vk_helper::barrierCommandBufferForBuffer(
-            commandBuffer, target,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-            dstStage, dstAccess
-          );
-        };
+        vkCmdPushConstants(
+          commandBuffer, pipelines->xgemmStridedBatchedFp32.layout,
+          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params
+        );
+        vkCmdDispatch(
+          commandBuffer,
+          mSize / xgemmParams.WGD,
+          nSize / xgemmParams.WGD,
+          batchSize
+        );
+        result = vk_helper::endCommandBuffer(commandBuffer);
+        if(result != VK_SUCCESS)
+          throw StringError("could not end dummy command buffer: " + vk_helper::vkErrorToString(result));
 
         signalInitializedOrDead();
-        Rand rand("dummyThreadLoop");
-        vector<float> output(outputElements, 0.0f);
-        double total = 0.0;
-        bool first = true;
         while(!shouldStop.load()) {
-          int which = rand.nextInt(0, 6);
-          if(first) {
-            which = 4;
-            first = false;
-          }
-
-          result = vkResetCommandBuffer(commandBuffer, 0);
-          if(result != VK_SUCCESS) {
-            reportFailure("could not reset dummy command buffer: " + vk_helper::vkErrorToString(result));
-            break;
-          }
-          result = vk_helper::beginCommandBuffer(commandBuffer);
-          if(result != VK_SUCCESS) {
-            reportFailure("could not begin dummy command buffer: " + vk_helper::vkErrorToString(result));
-            break;
-          }
-
-          if(which <= 3) {
-            VulkanBuffer* other = (which == 0 || which == 1) ? matrixA : matrixB;
-            result = updateXgemmDescriptors(buffer, other, buffer2);
-            if(result != VK_SUCCESS) {
-              reportFailure("could not update dummy XGEMM descriptors: " + vk_helper::vkErrorToString(result));
-              break;
-            }
-            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-            addReadWriteBarrier(other, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-            addReadWriteBarrier(buffer2, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-            vkCmdBindPipeline(
-              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-              pipelines->xgemmStridedBatchedFp32.pipeline
-            );
-            vkCmdBindDescriptorSets(
-              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-              pipelines->xgemmStridedBatchedFp32.layout, 0, 1, &xgemmDescriptorSet, 0, nullptr
-            );
-            const vk_shader::push::XgemmStridedBatchedFp32Params params = {
-              static_cast<uint32_t>(mSize), static_cast<uint32_t>(kSize), static_cast<uint32_t>(kSize),
-              static_cast<uint32_t>(mSize), 0,
-              static_cast<uint32_t>(kSize), 0,
-              static_cast<uint32_t>(mSize), 0, 0
-            };
-            vkCmdPushConstants(
-              commandBuffer, pipelines->xgemmStridedBatchedFp32.layout,
-              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params
-            );
-            vkCmdDispatch(
-              commandBuffer,
-              (mSize + xgemmParams.WGD - 1) / xgemmParams.WGD,
-              (kSize + xgemmParams.WGD - 1) / xgemmParams.WGD,
-              batchSize
-            );
-          }
-          else if(which == 4 || which == 5) {
-            VulkanBuffer* other = which == 4 ? matrixC : matrixD;
-            result = updatePointwiseDescriptors(buffer, other);
-            if(result != VK_SUCCESS) {
-              reportFailure("could not update dummy pointwise descriptors: " + vk_helper::vkErrorToString(result));
-              break;
-            }
-            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            addReadWriteBarrier(other, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-            vkCmdBindPipeline(
-              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines->addPointWise.pipeline
-            );
-            vkCmdBindDescriptorSets(
-              commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-              pipelines->addPointWise.layout, 0, 1, &pointwiseDescriptorSet, 0, nullptr
-            );
-            const vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(outputElements)};
-            vkCmdPushConstants(
-              commandBuffer, pipelines->addPointWise.layout,
-              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params
-            );
-            vkCmdDispatch(
-              commandBuffer,
-              (params.size + pointwiseParams.ELTS_PER_THREAD * pipelines->addPointWise.localSizeX - 1) /
-                (pointwiseParams.ELTS_PER_THREAD * pipelines->addPointWise.localSizeX),
-              1, 1
-            );
-          }
-          else {
-            addReadWriteBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-            VkBufferCopy copyRegion = {};
-            copyRegion.size = outputElements * sizeof(float);
-            vkCmdCopyBuffer(commandBuffer, buffer->buffer, readbackBuffer->buffer, 1, &copyRegion);
-            vk_helper::barrierCommandBufferForBuffer(
-              commandBuffer, readbackBuffer,
-              VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-              VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
-            );
-          }
-
-          result = vk_helper::endCommandBuffer(commandBuffer);
-          if(result != VK_SUCCESS) {
-            reportFailure("could not end dummy command buffer: " + vk_helper::vkErrorToString(result));
-            break;
-          }
           result = vkResetFences(device->device, 1, &fence);
           if(result != VK_SUCCESS) {
             reportFailure("could not reset dummy fence: " + vk_helper::vkErrorToString(result));
@@ -3922,31 +3830,7 @@ namespace {
             reportFailure("could not wait for dummy command buffer: " + vk_helper::vkErrorToString(result));
             break;
           }
-
-          if(which <= 3)
-            swap(buffer, buffer2);
-          else if(which > 5) {
-            result = vmaInvalidateAllocation(device->allocator, readbackBuffer->allocation, 0, VK_WHOLE_SIZE);
-            if(result != VK_SUCCESS) {
-              reportFailure("could not invalidate dummy readback buffer: " + vk_helper::vkErrorToString(result));
-              break;
-            }
-            void* mappedData = nullptr;
-            result = vmaMapMemory(device->allocator, readbackBuffer->allocation, &mappedData);
-            if(result != VK_SUCCESS) {
-              reportFailure("could not map dummy readback buffer: " + vk_helper::vkErrorToString(result));
-              break;
-            }
-            memcpy(output.data(), mappedData, output.size() * sizeof(float));
-            vmaUnmapMemory(device->allocator, readbackBuffer->allocation);
-            float subTotal = 0.0f;
-            for(float value: output)
-              subTotal += value;
-            total += static_cast<double>(subTotal);
-          }
         }
-        if(logger != nullptr)
-          logger->write("Tuning dummy thread numeric total: " + Global::doubleToString(total));
       }
       catch(const exception& e) {
         reportFailure(e.what());
@@ -4027,7 +3911,7 @@ namespace {
       const bool isReferenceCandidate = configIndex == 0;
       if(!isReferenceCandidate && !isValidTuningConfig<Tuner>(context, candidate))
         continue;
-      const size_t currentCandidateIndex = candidateIndex++;
+      const size_t currentCandidateIndex = ++candidateIndex;
       try {
         // The previous candidate has finished before the next pipeline is built.
         // Reuse the pipeline cache and avoid a device-idle wait for every candidate.
@@ -4116,11 +4000,11 @@ namespace {
         }
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
-        const bool cooperativeMatrixError =
-          (Tuner::name() == "hgemmCooperativeMatrix" || Tuner::name() == "hgemmCooperativeMatrixNCHW") &&
-          errorProp > plan.errorTolerance;
-        const double score = cooperativeMatrixError ? 0.0 :
-          VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
+        const bool isCooperativeMatrix =
+          Tuner::name() == "hgemmCooperativeMatrix" || Tuner::name() == "hgemmCooperativeMatrixNCHW";
+        const double score = isCooperativeMatrix
+          ? VulkanTuner::computeCooperativeMatrixTuningScore(callsPerSecond, errorProp, plan.errorTolerance)
+          : VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
         if(logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)) {
@@ -4129,6 +4013,8 @@ namespace {
             isBest
           );
         }
+        else if(context.printOnlyOnImprovement && isReferenceCandidate)
+          logTuningProgress(context, currentCandidateIndex, candidateCount, targets, Tuner::name(), true);
         if(isBest) {
           bestScore = score;
           lastBestCandidateIndex = currentCandidateIndex;
