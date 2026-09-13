@@ -4119,9 +4119,12 @@ namespace {
       }
       if(context.logger != nullptr) {
         context.logger->write(
-          "Vulkan tuner " + Tuner::name() + " screened " +
-          to_string(context.cooperativeMatrixTuneShapes.size()) + " cooperative-matrix shapes down to " +
-          to_string(detailContext.cooperativeMatrixTuneShapes.size())
+          "Vulkan tuner " + Tuner::name() + " property screening: mode=" +
+          (context.full ? "full" : "quick") + ", property_limit=" +
+          (context.full ? "all" : to_string(VulkanTuner::COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT)) +
+          ", supported_properties=" + to_string(context.cooperativeMatrixTuneShapes.size()) +
+          ", passing_properties=" + to_string(bestByShape.size()) +
+          ", detail_properties=" + to_string(detailContext.cooperativeMatrixTuneShapes.size())
         );
       }
 
@@ -4311,7 +4314,9 @@ namespace {
     }
     static vector<VulkanTuneParams> screeningCandidates(const VulkanTuneParams& current, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
+      size_t validPropertyCount = 0;
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+        const size_t previousConfigCount = configs.size();
         VulkanTuneParams config = current;
         HGemmCooperativeMatrixTuneParams& params = config.hgemmCooperativeMatrix;
         params.accType = shape.accType;
@@ -4333,6 +4338,11 @@ namespace {
             if(isValidCooperativeMatrixTuneParams(context, params))
               configs.push_back(config);
           }
+        }
+        if(configs.size() > previousConfigCount) {
+          validPropertyCount += 1;
+          if(!context.full && validPropertyCount >= VulkanTuner::COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT)
+            break;
         }
       }
       return configs;
@@ -4460,7 +4470,9 @@ namespace {
     }
     static vector<VulkanTuneParams> screeningCandidates(const VulkanTuneParams& current, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
+      size_t validPropertyCount = 0;
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+        const size_t previousConfigCount = configs.size();
         VulkanTuneParams config = current;
         HGemmCooperativeMatrixNCHWTuneParams& params = config.hgemmCooperativeMatrixNCHW;
         params.accType = shape.accType;
@@ -4481,6 +4493,11 @@ namespace {
             if(isValidCooperativeMatrixTuneParams(context, params))
               configs.push_back(config);
           }
+        }
+        if(configs.size() > previousConfigCount) {
+          validPropertyCount += 1;
+          if(!context.full && validPropertyCount >= VulkanTuner::COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT)
+            break;
         }
       }
       return configs;

@@ -151,7 +151,7 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 19);
+  testAssert(VulkanTuner::TUNER_VERSION == 20);
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
@@ -218,6 +218,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO == 0.90);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR == 3);
+  testAssert(VulkanTuner::COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT == 2);
 
   testAssert(VulkanTuner::defaultDirectory(false, "tests/scratch") == "tests/scratch/vulkantuning");
   testAssert(
