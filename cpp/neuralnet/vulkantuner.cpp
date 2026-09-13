@@ -3982,7 +3982,9 @@ namespace {
   TuningConfigMeasurements measureConfigs(
     const TuningContext& context,
     vector<VulkanTuneParams> configs,
-    const TuningMeasurementPlan& plan
+    const TuningMeasurementPlan& plan,
+    double* bestScoreAcrossCalls = nullptr,
+    bool logSuccessfulResults = true
   ) {
     TuningConfigMeasurements measurements;
     dedupCandidates(configs);
@@ -4009,11 +4011,14 @@ namespace {
 
     vk_shader::ComputePipelines pipelines(context.device->device, context.device->info, nullptr);
     vector<Pipeline*> previousTargets;
-    double bestScore = 0.0;
+    double localBestScore = 0.0;
+    double& bestScore = bestScoreAcrossCalls != nullptr ? *bestScoreAcrossCalls : localBestScore;
     vector<float> referenceReadback;
     size_t lastBestCandidateIndex = 0;
     size_t candidateIndex = 0;
     auto logProgressIfNeeded = [&](size_t currentCandidateIndex, const vector<const Pipeline*>& targets) {
+      if(context.printOnlyOnImprovement)
+        return;
       if(currentCandidateIndex % 20 == 0 && currentCandidateIndex >= lastBestCandidateIndex + 10)
         logTuningProgress(context, currentCandidateIndex, candidateCount, targets, Tuner::name());
     };
@@ -4118,7 +4123,7 @@ namespace {
           VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
-        if(!context.printOnlyOnImprovement || isBest) {
+        if(logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)) {
           logTuningResult(
             context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
             isBest
@@ -4158,7 +4163,8 @@ namespace {
       if(screeningConfigs.empty())
         return 0.0;
       const TuningConfigMeasurements screeningMeasurements = measureConfigs<Tuner>(
-        context, std::move(screeningConfigs), makeCooperativeMatrixScreeningMeasurementPlan(Tuner::name(), context)
+        context, std::move(screeningConfigs), makeCooperativeMatrixScreeningMeasurementPlan(Tuner::name(), context),
+        nullptr, !context.printOnlyOnImprovement
       );
       if(screeningMeasurements.values.empty())
         return 0.0;
@@ -4235,6 +4241,7 @@ namespace {
 
       const TuningMeasurementPlan detailPlan = makeMeasurementPlan(Tuner::name(), detailContext);
       vector<TuningConfigMeasurement> tunedShapes;
+      double detailBestScoreForLogging = 0.0;
       for(const TuningConfigMeasurement& selected: selectedShapes) {
         const size_t beamWidth = context.full ? 8 : 3;
         vector<TuningConfigMeasurement> beam = {selected};
@@ -4246,7 +4253,7 @@ namespace {
             configs.insert(configs.end(), expanded.begin(), expanded.end());
           }
           const TuningConfigMeasurements measurements = measureConfigs<Tuner>(
-            detailContext, std::move(configs), detailPlan
+            detailContext, std::move(configs), detailPlan, &detailBestScoreForLogging
           );
           if(measurements.values.empty())
             return false;
@@ -4293,8 +4300,12 @@ namespace {
         [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
       );
       currentConfig = best.config;
-      if(context.logger != nullptr)
-        context.logger->write("Vulkan tuner " + Tuner::name() + " selected a measured candidate");
+      if(context.logger != nullptr) {
+        context.logger->write(
+          "Vulkan tuner " + Tuner::name() + " selected Calls/sec " +
+          Global::doubleToString(best.callsPerSecond) + " " + describeTuningParams(Tuner::name(), best.config)
+        );
+      }
       return best.callsPerSecond;
     }
     vector<VulkanTuneParams> configs = Tuner::candidates(currentConfig, context.full, context);
