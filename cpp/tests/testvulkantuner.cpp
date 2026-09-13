@@ -151,7 +151,7 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 20);
+  testAssert(VulkanTuner::TUNER_VERSION == 21);
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
