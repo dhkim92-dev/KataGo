@@ -1038,7 +1038,7 @@ struct ConvLayer {
       );
       SHADER_PROFILE_END("HGEMM1x1", cb);
       CHECK_VK_MSG("Execute hgemmCooperativeMatrixNCHW for ConvLayer: " + name, res);
-      vk_helper::barrierCommandBuffer(cb);
+      vk_helper::barrierCommandBufferForBuffer(cb, output);
       return;
     }
 
@@ -4445,6 +4445,7 @@ struct Model {
   }
 
   void forward(
+    VkCommandBuffer forwardCB,
     int batchSize,
     ScratchBuffers *scratch,
     VulkanBuffer* input,
@@ -4461,18 +4462,11 @@ struct Model {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
-    VkCommandBuffer forwardCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = vk_helper::beginCommandBuffer(forwardCB);
-    CHECK_VK_MSG("Begin model forward command buffer", res);
     performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels,handle->paddedNNXYLen, false);
     computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, mask, maskSum, false);
     trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
     valueHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, value, scoreValue, ownership, convWorkspace, convWorkspace2);
-    vk_helper::endCommandBuffer(forwardCB);
-    vkResetFences(handle->vulkanDevice->device, 1, &fence);
-    vk_helper::submitCommandBuffers(handle->vulkanDevice, { forwardCB }, fence);
-    vkWaitForFences(handle->vulkanDevice->device, 1, &fence, VK_TRUE, UINT64_MAX);
   }
 
   void debug(
@@ -4602,7 +4596,11 @@ struct Buffers {
   size_t inputGlobalElts;
   size_t inputMetaElts;
 
-  VulkanBuffer* outputBuffer;
+  VulkanBuffer* uploadBuffer;
+  VkDeviceSize inputUploadOffset;
+  VkDeviceSize inputGlobalUploadOffset;
+  VkDeviceSize inputMetaUploadOffset;
+
   VulkanBuffer* mask;
   VulkanBuffer* maskSum;
   VulkanBuffer* trunk;
@@ -4617,6 +4615,13 @@ struct Buffers {
   size_t scoreValueElts;
   VulkanBuffer* ownership;
   size_t ownershipElts;
+
+  VulkanBuffer* readbackBuffer;
+  VkDeviceSize policyPassReadbackOffset;
+  VkDeviceSize policyReadbackOffset;
+  VkDeviceSize valueReadbackOffset;
+  VkDeviceSize scoreValueReadbackOffset;
+  VkDeviceSize ownershipReadbackOffset;
 
   VulkanBuffer* convWorkspace;
   VulkanBuffer* convWorkspace2;
@@ -4641,6 +4646,20 @@ struct Buffers {
 
     const size_t spatialDtypeSize = useFP16 ? sizeof(half_t) : sizeof(float);
     VkResult res = VK_SUCCESS;
+
+    const auto reserveTransferRange = [](VkDeviceSize& totalSize, VkDeviceSize size) {
+      totalSize = (totalSize + 3) & ~VkDeviceSize(3);
+      const VkDeviceSize offset = totalSize;
+      totalSize += size;
+      return offset;
+    };
+    VkDeviceSize uploadBytes = 0;
+    inputUploadOffset = reserveTransferRange(uploadBytes, spatialDtypeSize * inputElts);
+    inputGlobalUploadOffset = reserveTransferRange(uploadBytes, sizeof(float) * inputGlobalElts);
+    inputMetaUploadOffset = reserveTransferRange(uploadBytes, sizeof(float) * inputMetaElts);
+    uploadBuffer = vk_helper::createStagingBuffer(handle->vulkanDevice, static_cast<size_t>(uploadBytes), &res);
+    CHECK_VK_MSG("[Buffers::Buffers] Create persistent upload buffer", res);
+
     input = vk_helper::createDeviceBuffer(handle->vulkanDevice, spatialDtypeSize * inputElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input buffer", res);
     inputGlobal = vk_helper::createDeviceBuffer(handle->vulkanDevice, sizeof(float) * inputGlobalElts, false, &res);
@@ -4687,6 +4706,15 @@ struct Buffers {
     ownership = vk_helper::createDeviceBuffer(handle->vulkanDevice, ownershipElts * spatialDtypeSize, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create ownership buffer", res);
 
+    VkDeviceSize readbackBytes = 0;
+    policyPassReadbackOffset = reserveTransferRange(readbackBytes, policyPassElts * sizeof(float));
+    policyReadbackOffset = reserveTransferRange(readbackBytes, policyElts * spatialDtypeSize);
+    valueReadbackOffset = reserveTransferRange(readbackBytes, valueElts * sizeof(float));
+    scoreValueReadbackOffset = reserveTransferRange(readbackBytes, scoreValueElts * sizeof(float));
+    ownershipReadbackOffset = reserveTransferRange(readbackBytes, ownershipElts * spatialDtypeSize);
+    readbackBuffer = vk_helper::createReadbackBuffer(handle->vulkanDevice, static_cast<size_t>(readbackBytes), &res);
+    CHECK_VK_MSG("[Buffers::Buffers] Create persistent readback buffer", res);
+
     // TODO: Implement workspace allocation when winograd or other conv algorithms are added.
     ConvWorkspaceEltsNeeded convWorkspaceElts = m.requiredConvWorkspaceElts(handle);
 
@@ -4699,6 +4727,7 @@ struct Buffers {
   }
 
   ~Buffers() {
+    vk_helper::releaseVulkanBuffer(uploadBuffer->device, uploadBuffer);
     vk_helper::releaseVulkanBuffer(input->device, input);
     vk_helper::releaseVulkanBuffer(inputGlobal->device, inputGlobal);
     if(inputMeta != nullptr)
@@ -4711,6 +4740,7 @@ struct Buffers {
     vk_helper::releaseVulkanBuffer(value->device, value);
     vk_helper::releaseVulkanBuffer(scoreValue->device, scoreValue);
     vk_helper::releaseVulkanBuffer(ownership->device, ownership);
+    vk_helper::releaseVulkanBuffer(readbackBuffer->device, readbackBuffer);
     if(convWorkspace != nullptr)
       vk_helper::releaseVulkanBuffer(convWorkspace->device, convWorkspace);
     if(convWorkspace2 != nullptr)
@@ -5162,6 +5192,8 @@ void NeuralNet::getOutput(
   }
 
   VkResult res = VK_ERROR_UNKNOWN;
+  const void* spatialInputData = inputBuffers->userInputBuffer;
+  VkDeviceSize spatialInputBytes = static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputElts);
 
   if ( useFP16Storage ) {
     size_t paddedInputElts = static_cast<size_t>(numSpatialFeatures) * paddedNNXYLen * batchSize;
@@ -5183,58 +5215,110 @@ void NeuralNet::getOutput(
       }
     }
 
-    vk_helper::copyHostToDeviceBuffer(
-      handle->vulkanDevice,
-      inputBuffers->userInputBufferHalf,
-      buffers->input,
-      static_cast<VkDeviceSize>(paddedInputElts * sizeof(half_t)),
-      false,
-      &res
-    );
-    CHECK_VK_MSG("Copy FP16 input buffer to device", res);
-
+    spatialInputData = inputBuffers->userInputBufferHalf;
+    spatialInputBytes = static_cast<VkDeviceSize>(paddedInputElts * sizeof(half_t));
   } else {
-
-    if ( paddedNNXYLen == nnXYLen ) {
-      vk_helper::copyHostToDeviceBuffer(
-        handle->vulkanDevice,
-        inputBuffers->userInputBuffer, // Host pointer
-        buffers->input,
-        static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputElts),
-        false,
-        &res
-      );
-      CHECK_VK_MSG("Copy input buffer to device", res);
-    } else {
+    if ( paddedNNXYLen != nnXYLen ) {
       ASSERT_UNREACHABLE;
     }
   }
 
   {
-    vk_helper::copyHostToDeviceBuffer(
+    vk_helper::copyHostToStagingBuffer(
       handle->vulkanDevice,
-      inputBuffers->userInputGlobalBuffer, // Host pointer
-      buffers->inputGlobal,
-      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputGlobalElts),
-      false,
+      spatialInputData,
+      buffers->uploadBuffer,
+      buffers->inputUploadOffset,
+      spatialInputBytes,
       &res
     );
-    CHECK_VK_MSG("Copy input global buffer to device", res);
+    CHECK_VK_MSG("Copy spatial input to persistent upload buffer", res);
 
+    const VkDeviceSize inputGlobalBytes =
+      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputGlobalElts);
+    vk_helper::copyHostToStagingBuffer(
+      handle->vulkanDevice,
+      inputBuffers->userInputGlobalBuffer,
+      buffers->uploadBuffer,
+      buffers->inputGlobalUploadOffset,
+      inputGlobalBytes,
+      &res
+    );
+    CHECK_VK_MSG("Copy global input to persistent upload buffer", res);
+
+    VkDeviceSize inputMetaBytes = 0;
     if ( numMetaFeatures > 0 ) {
-      vk_helper::copyHostToDeviceBuffer(
+      inputMetaBytes = static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputMetaElts);
+      vk_helper::copyHostToStagingBuffer(
         handle->vulkanDevice,
-        inputBuffers->userInputMetaBuffer, // Host pointer
-        buffers->inputMeta,
-        static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleInputMetaElts),
-        true,
+        inputBuffers->userInputMetaBuffer,
+        buffers->uploadBuffer,
+        buffers->inputMetaUploadOffset,
+        inputMetaBytes,
         &res
       );
-      CHECK_VK_MSG("Copy input meta buffer to device", res);
+      CHECK_VK_MSG("Copy metadata input to persistent upload buffer", res);
     }
 
 
+    const VkDeviceSize policyPassBytes =
+      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singlePolicyPassResultElts);
+    const size_t paddedPolicyElts = static_cast<size_t>(numPolicyChannels) * paddedNNXYLen * batchSize;
+    const VkDeviceSize policyBytes = static_cast<VkDeviceSize>(
+      paddedPolicyElts * (useFP16Storage ? sizeof(half_t) : sizeof(float))
+    );
+    const VkDeviceSize valueBytes =
+      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleValueResultElts);
+    const VkDeviceSize scoreValueBytes =
+      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleScoreValueResultElts);
+    const size_t paddedOwnershipElts =
+      static_cast<size_t>(computeHandle->model->numOwnershipChannels) * paddedNNXYLen * batchSize;
+    const VkDeviceSize ownershipBytes = static_cast<VkDeviceSize>(
+      paddedOwnershipElts * (useFP16Storage ? sizeof(half_t) : sizeof(float))
+    );
+
+    const auto submitAndWait = [&](VkCommandBuffer commandBuffer) {
+      res = vk_helper::endCommandBuffer(commandBuffer);
+      CHECK_VK_MSG("End model evaluation command buffer", res);
+      res = vkResetFences(handle->vulkanDevice->device, 1, &computeHandle->model->fence);
+      CHECK_VK_MSG("Reset model evaluation fence", res);
+      res = vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, computeHandle->model->fence);
+      CHECK_VK_MSG("Submit model evaluation command buffer", res);
+      res = vkWaitForFences(
+        handle->vulkanDevice->device, 1, &computeHandle->model->fence, VK_TRUE, UINT64_MAX
+      );
+      CHECK_VK_MSG("Wait for model evaluation fence", res);
+    };
+
+    VkCommandBuffer evaluationCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    res = vk_helper::beginCommandBuffer(evaluationCB);
+    CHECK_VK_MSG("Begin model evaluation command buffer", res);
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->uploadBuffer, buffers->input,
+      buffers->inputUploadOffset, 0, spatialInputBytes
+    );
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->uploadBuffer, buffers->inputGlobal,
+      buffers->inputGlobalUploadOffset, 0, inputGlobalBytes
+    );
+    if(numMetaFeatures > 0) {
+      vk_helper::recordBufferCopy(
+        evaluationCB, buffers->uploadBuffer, buffers->inputMeta,
+        buffers->inputMetaUploadOffset, 0, inputMetaBytes
+      );
+    }
+    for(VulkanBuffer* inputBuffer: {buffers->input, buffers->inputGlobal, buffers->inputMeta}) {
+      if(inputBuffer != nullptr) {
+        vk_helper::barrierCommandBufferForBuffer(
+          evaluationCB, inputBuffer,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
+        );
+      }
+    }
+
     #ifdef VULKAN_DEBUG
+    submitAndWait(evaluationCB);
     VK_BENCHMARK("model->debug",
       computeHandle->model->debug(
         batchSize,
@@ -5254,8 +5338,12 @@ void NeuralNet::getOutput(
         buffers->convWorkspace2
       );
     );
+    evaluationCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    res = vk_helper::beginCommandBuffer(evaluationCB);
+    CHECK_VK_MSG("Begin model readback command buffer", res);
     #else
-    VK_BENCHMARK("model->forward", computeHandle->model->forward(
+    computeHandle->model->forward(
+      evaluationCB,
       batchSize,
       computeHandle->scratch.get(),
       buffers->input,
@@ -5271,19 +5359,65 @@ void NeuralNet::getOutput(
       buffers->ownership,
       buffers->convWorkspace,
       buffers->convWorkspace2
-    ););
+    );
     #endif
 
-    // Read back PolicyPass result
-    vk_helper::copyDeviceBufferToHost(
-      handle->vulkanDevice,
-      buffers->policyPass,
-      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singlePolicyPassResultElts),
-      inputBuffers->policyPassResults,
-      true,
-      &res
+    for(VulkanBuffer* outputBuffer: {
+      buffers->policyPass, buffers->policy, buffers->value, buffers->scoreValue, buffers->ownership
+    }) {
+      vk_helper::barrierCommandBufferForBuffer(
+        evaluationCB, outputBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+      );
+    }
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->policyPass, buffers->readbackBuffer,
+      0, buffers->policyPassReadbackOffset, policyPassBytes
     );
-    CHECK_VK_MSG("Copy policy pass results buffer to host", res);
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->policy, buffers->readbackBuffer,
+      0, buffers->policyReadbackOffset, policyBytes
+    );
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->value, buffers->readbackBuffer,
+      0, buffers->valueReadbackOffset, valueBytes
+    );
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->scoreValue, buffers->readbackBuffer,
+      0, buffers->scoreValueReadbackOffset, scoreValueBytes
+    );
+    vk_helper::recordBufferCopy(
+      evaluationCB, buffers->ownership, buffers->readbackBuffer,
+      0, buffers->ownershipReadbackOffset, ownershipBytes
+    );
+    submitAndWait(evaluationCB);
+
+    vk_helper::copyReadbackBufferToHost(
+      handle->vulkanDevice, buffers->readbackBuffer, buffers->policyPassReadbackOffset,
+      policyPassBytes, inputBuffers->policyPassResults, &res
+    );
+    CHECK_VK_MSG("Copy policy pass results from persistent readback buffer", res);
+    vk_helper::copyReadbackBufferToHost(
+      handle->vulkanDevice, buffers->readbackBuffer, buffers->policyReadbackOffset,
+      policyBytes, useFP16Storage ? static_cast<void*>(inputBuffers->policyResultsHalf) : inputBuffers->policyResults, &res
+    );
+    CHECK_VK_MSG("Copy policy results from persistent readback buffer", res);
+    vk_helper::copyReadbackBufferToHost(
+      handle->vulkanDevice, buffers->readbackBuffer, buffers->valueReadbackOffset,
+      valueBytes, inputBuffers->valueResults, &res
+    );
+    CHECK_VK_MSG("Copy value results from persistent readback buffer", res);
+    vk_helper::copyReadbackBufferToHost(
+      handle->vulkanDevice, buffers->readbackBuffer, buffers->scoreValueReadbackOffset,
+      scoreValueBytes, inputBuffers->scoreValueResults, &res
+    );
+    CHECK_VK_MSG("Copy score value results from persistent readback buffer", res);
+    vk_helper::copyReadbackBufferToHost(
+      handle->vulkanDevice, buffers->readbackBuffer, buffers->ownershipReadbackOffset,
+      ownershipBytes, useFP16Storage ? static_cast<void*>(inputBuffers->ownershipResultsHalf) : inputBuffers->ownershipResults, &res
+    );
+    CHECK_VK_MSG("Copy ownership results from persistent readback buffer", res);
 
     #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
@@ -5296,18 +5430,7 @@ void NeuralNet::getOutput(
 
 
     // Read back Policy result
-    size_t paddedPolicyElts = static_cast<size_t>(numPolicyChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
-      vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice,
-        buffers->policy,
-        static_cast<VkDeviceSize>(paddedPolicyElts * sizeof(half_t)),
-        inputBuffers->policyResultsHalf,
-        true,
-        &res
-      );
-      CHECK_VK_MSG("Copy FP16 policy results buffer to host", res);
-
       size_t totalChannels = static_cast<size_t>(numPolicyChannels) * batchSize;
       if ( paddedNNXYLen == nnXYLen ) {
         for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
@@ -5318,17 +5441,7 @@ void NeuralNet::getOutput(
             inputBuffers->policyResults[c * nnXYLen + xy] = inputBuffers->policyResultsHalf[c * paddedNNXYLen + xy];
       }
     } else {
-      if ( paddedNNXYLen == nnXYLen ) {
-        vk_helper::copyDeviceBufferToHost(
-          handle->vulkanDevice,
-          buffers->policy,
-          static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singlePolicyResultElts)),
-          inputBuffers->policyResults,
-          true,
-          &res
-        );
-        CHECK_VK_MSG("Copy policy results buffer to host", res);
-      } else {
+      if ( paddedNNXYLen != nnXYLen ) {
         ASSERT_UNREACHABLE;
       }
       #ifdef VULKAN_DUMP_BUFFER
@@ -5340,18 +5453,6 @@ void NeuralNet::getOutput(
       #endif
     }
 
-    // Read back Value result
-    vk_helper::copyDeviceBufferToHost(
-      handle->vulkanDevice,
-      buffers->value,
-      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleValueResultElts),
-      inputBuffers->valueResults,
-      true,
-      &res
-    );
-    CHECK_VK_MSG("Copy value results buffer to host", res);
-    vkQueueWaitIdle(handle->queue);
-
     #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
       "[NeuralNet::getOutput] value results",
@@ -5359,17 +5460,6 @@ void NeuralNet::getOutput(
       batchSize * inputBuffers->singleValueResultElts
     );
     #endif
-
-    // Read back ScoreValue result
-    vk_helper::copyDeviceBufferToHost(
-      handle->vulkanDevice,
-      buffers->scoreValue,
-      static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputBuffers->singleScoreValueResultElts),
-      inputBuffers->scoreValueResults,
-      true,
-      &res
-    );
-    CHECK_VK_MSG("Copy score value results buffer to host", res);
 
     #ifdef VULKAN_DUMP_BUFFER
     printHostBuffer(
@@ -5380,18 +5470,7 @@ void NeuralNet::getOutput(
     #endif
 
     // Read back Ownership result
-    size_t paddedOwnershipElts = static_cast<size_t>(computeHandle->model->numOwnershipChannels) * paddedNNXYLen * batchSize;
     if ( useFP16Storage ) {
-      vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice,
-        buffers->ownership,
-        static_cast<VkDeviceSize>(paddedOwnershipElts * sizeof(half_t)),
-        inputBuffers->ownershipResultsHalf,
-        true,
-        &res
-      );
-      CHECK_VK_MSG("Copy FP16 ownership results buffer to host", res);
-
       size_t totalChannels = static_cast<size_t>(computeHandle->model->numOwnershipChannels) * batchSize;
       if ( paddedNNXYLen == nnXYLen ) {
         for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
@@ -5402,17 +5481,7 @@ void NeuralNet::getOutput(
             inputBuffers->ownershipResults[c * nnXYLen + xy] = inputBuffers->ownershipResultsHalf[c * paddedNNXYLen + xy];
       }
     } else {
-      if ( paddedNNXYLen == nnXYLen ) {
-        vk_helper::copyDeviceBufferToHost(
-          handle->vulkanDevice,
-          buffers->ownership,
-          static_cast<VkDeviceSize>(sizeof(float) * batchSize * (inputBuffers->singleOwnershipResultElts)),
-          inputBuffers->ownershipResults,
-          true,
-          &res
-        );
-        CHECK_VK_MSG("Copy ownership results buffer to host", res);
-      } else {
+      if ( paddedNNXYLen != nnXYLen ) {
         ASSERT_UNREACHABLE;
       }
       #ifdef VULKAN_DUMP_BUFFER

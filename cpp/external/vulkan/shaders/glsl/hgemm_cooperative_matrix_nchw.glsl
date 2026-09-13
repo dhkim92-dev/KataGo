@@ -90,7 +90,7 @@ layout(set = 0, binding = 1) readonly buffer Filter {
 };
 
 layout(set = 0, binding = 2) writeonly buffer Output {
-  float16_t d_output[];
+  realstoreM d_output[];
 };
 
 layout(push_constant) uniform HGemmCooperativeMatrixNCHWParams {
@@ -110,6 +110,8 @@ shared BTileStorage bTileStorage;
 #define bTile bTileStorage.values
 #endif
 // Keep the scalar accumulator tile 16-byte aligned for cooperative stores.
+// The cooperative store must retain scalar element offsets and strides. VWM
+// applies only to the explicit shared-to-global copy below.
 struct CTileStorage {
   uvec4 alignment;
   acc_dtype values[MWG * NWG];
@@ -248,6 +250,9 @@ void main() {
 
   barrier();
 
+  // Build a vector from the scalar cooperative-store tile. This keeps the
+  // cooperative pointer contract scalar while emitting one global vector
+  // store for each VWM consecutive spatial elements.
   // Match OpenCL's LocalToGlobalC{Complete,Edge}: use an unchecked vector
   // copy for complete tiles and only test bounds for the final edge tile.
   const int tid = LocalId0() + LocalSize0() * (LocalId1() + LocalSize1() * LocalId2());
@@ -255,24 +260,44 @@ void main() {
   const int tileVectorCount = (MWG * NWG) / VWM;
   if(groupMBase + MWG <= hwSize) {
     for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+      const int m = tileVector % (MWG / VWM);
+      const int n = tileVector / (MWG / VWM);
+      const int outputVector =
+        (batchOutputBase + (groupNBase + n) * hwSize + groupMBase + m * VWM) / VWM;
+#if VWM == 1
+      d_output[outputVector] = float16_t(cTile[tileVector]);
+#elif VWM == 2
       const int tileBase = tileVector * VWM;
-      for(int lane = 0; lane < VWM; lane++) {
-        const int tileIndex = tileBase + lane;
-        const int m = tileIndex % MWG;
-        const int n = tileIndex / MWG;
-        d_output[batchOutputBase + (groupNBase + n) * hwSize + groupMBase + m] =
-          float16_t(cTile[tileIndex]);
-      }
+      d_output[outputVector] = f16vec2(float16_t(cTile[tileBase]), float16_t(cTile[tileBase + 1]));
+#elif VWM == 4
+      const int tileBase = tileVector * VWM;
+      d_output[outputVector] = f16vec4(
+        float16_t(cTile[tileBase]), float16_t(cTile[tileBase + 1]),
+        float16_t(cTile[tileBase + 2]), float16_t(cTile[tileBase + 3])
+      );
+#endif
     }
   }
   else {
-    const int tileSize = MWG * NWG;
-    for(int tileIndex = tid; tileIndex < tileSize; tileIndex += numThreads) {
-      const int m = tileIndex % MWG;
-      const int n = tileIndex / MWG;
-      const int hw = groupMBase + m;
-      if(hw < hwSize)
-        d_output[batchOutputBase + (groupNBase + n) * hwSize + hw] = float16_t(cTile[tileIndex]);
+    for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+      const int m = tileVector % (MWG / VWM);
+      const int n = tileVector / (MWG / VWM);
+      const int hw = groupMBase + m * VWM;
+      if(hw + VWM <= hwSize) {
+        const int outputVector = (batchOutputBase + (groupNBase + n) * hwSize + hw) / VWM;
+#if VWM == 1
+        d_output[outputVector] = float16_t(cTile[tileVector]);
+#elif VWM == 2
+        const int tileBase = tileVector * VWM;
+        d_output[outputVector] = f16vec2(float16_t(cTile[tileBase]), float16_t(cTile[tileBase + 1]));
+#elif VWM == 4
+        const int tileBase = tileVector * VWM;
+        d_output[outputVector] = f16vec4(
+          float16_t(cTile[tileBase]), float16_t(cTile[tileBase + 1]),
+          float16_t(cTile[tileBase + 2]), float16_t(cTile[tileBase + 3])
+        );
+#endif
+      }
     }
   }
 }

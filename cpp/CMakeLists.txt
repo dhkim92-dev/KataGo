@@ -921,6 +921,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     add_custom_command(
       OUTPUT ${_out_spv}
       COMMAND ${GLSLC_EXECUTABLE}
+        -O
         --target-env=vulkan1.2
         --target-spv=spv1.5
         -fshader-stage=compute

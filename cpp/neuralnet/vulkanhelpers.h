@@ -298,6 +298,33 @@ namespace vk_helper {
     VkResult *result
   );
 
+  void copyHostToStagingBuffer(
+    const VulkanDevice* device,
+    const void* hostPtr,
+    VulkanBuffer* stagingBuffer,
+    VkDeviceSize stagingOffset,
+    VkDeviceSize copySize,
+    VkResult* result
+  );
+
+  void recordBufferCopy(
+    VkCommandBuffer commandBuffer,
+    VulkanBuffer* sourceBuffer,
+    VulkanBuffer* destinationBuffer,
+    VkDeviceSize sourceOffset,
+    VkDeviceSize destinationOffset,
+    VkDeviceSize copySize
+  );
+
+  void copyReadbackBufferToHost(
+    const VulkanDevice* device,
+    VulkanBuffer* readbackBuffer,
+    VkDeviceSize readbackOffset,
+    VkDeviceSize copySize,
+    void* hostPtr,
+    VkResult* result
+  );
+
   void copyDeviceBufferToHost(
     const VulkanDevice* device,
     VulkanBuffer* deviceBuffer,

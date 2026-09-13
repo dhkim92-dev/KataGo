@@ -1093,6 +1093,7 @@ VulkanBuffer* vk_helper::createReadbackBuffer(
   bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VmaAllocationCreateInfo allocCI = {};
   allocCI.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+  allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
   VkResult res = vmaCreateBuffer(
     device->allocator,
     &bufferCI,
@@ -1108,6 +1109,63 @@ VulkanBuffer* vk_helper::createReadbackBuffer(
     return nullptr;
   }
   return buffer;
+}
+
+void vk_helper::copyHostToStagingBuffer(
+  const VulkanDevice* device,
+  const void* hostPtr,
+  VulkanBuffer* stagingBuffer,
+  VkDeviceSize stagingOffset,
+  VkDeviceSize copySize,
+  VkResult* result
+) {
+  if(stagingOffset + copySize > stagingBuffer->requestedSize || stagingBuffer->allocationInfo.pMappedData == nullptr) {
+    *result = VK_ERROR_MEMORY_MAP_FAILED;
+    return;
+  }
+  memcpy(
+    static_cast<char*>(stagingBuffer->allocationInfo.pMappedData) + stagingOffset,
+    hostPtr,
+    static_cast<size_t>(copySize)
+  );
+  *result = vmaFlushAllocation(device->allocator, stagingBuffer->allocation, stagingOffset, copySize);
+}
+
+void vk_helper::recordBufferCopy(
+  VkCommandBuffer commandBuffer,
+  VulkanBuffer* sourceBuffer,
+  VulkanBuffer* destinationBuffer,
+  VkDeviceSize sourceOffset,
+  VkDeviceSize destinationOffset,
+  VkDeviceSize copySize
+) {
+  VkBufferCopy copyRegion = {};
+  copyRegion.srcOffset = sourceOffset;
+  copyRegion.dstOffset = destinationOffset;
+  copyRegion.size = copySize;
+  vkCmdCopyBuffer(commandBuffer, sourceBuffer->buffer, destinationBuffer->buffer, 1, &copyRegion);
+}
+
+void vk_helper::copyReadbackBufferToHost(
+  const VulkanDevice* device,
+  VulkanBuffer* readbackBuffer,
+  VkDeviceSize readbackOffset,
+  VkDeviceSize copySize,
+  void* hostPtr,
+  VkResult* result
+) {
+  if(readbackOffset + copySize > readbackBuffer->requestedSize || readbackBuffer->allocationInfo.pMappedData == nullptr) {
+    *result = VK_ERROR_MEMORY_MAP_FAILED;
+    return;
+  }
+  *result = vmaInvalidateAllocation(device->allocator, readbackBuffer->allocation, readbackOffset, copySize);
+  if(*result != VK_SUCCESS)
+    return;
+  memcpy(
+    hostPtr,
+    static_cast<const char*>(readbackBuffer->allocationInfo.pMappedData) + readbackOffset,
+    static_cast<size_t>(copySize)
+  );
 }
 
 /**
@@ -1127,6 +1185,7 @@ void vk_helper::copyDeviceBufferToHost(
   bool waitForIdle,
   VkResult *result
 ) {
+  (void)waitForIdle;
   // Create readback buffer
   VulkanBuffer* readbackBuffer = vk_helper::createReadbackBuffer(
     device,
@@ -1156,40 +1215,7 @@ void vk_helper::copyDeviceBufferToHost(
     commandBuffer
   );
 
-  *result = vmaInvalidateAllocation(
-    device->allocator,
-    readbackBuffer->allocation,
-    0,
-    VK_WHOLE_SIZE
-  );
-  if(*result != VK_SUCCESS) {
-    vk_helper::releaseVulkanBuffer(
-      device,
-      readbackBuffer
-    );
-    return;
-  }
-
-  // Map readback buffer and copy data to hostPtr
-  void* mappedData = nullptr;
-  *result = vmaMapMemory(
-    device->allocator,
-    readbackBuffer->allocation,
-    &mappedData
-  );
-
-  if ( *result != VK_SUCCESS ) {
-    vk_helper::releaseVulkanBuffer(
-      device,
-      readbackBuffer
-    );
-    return;
-  }
-  memcpy(hostPtr, mappedData, static_cast<size_t>(copySize));
-  vmaUnmapMemory(
-    device->allocator,
-    readbackBuffer->allocation
-  );
+  copyReadbackBufferToHost(device, readbackBuffer, 0, copySize, hostPtr, result);
 
   // Release readback buffer
   vk_helper::releaseVulkanBuffer(

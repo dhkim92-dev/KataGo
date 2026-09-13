@@ -1068,24 +1068,39 @@ namespace {
     maxConvChannels = std::max(context.modelInfo.regularNumChannels, maxConvChannels);
     maxConvChannels = std::max(context.modelInfo.gpoolNumChannels, maxConvChannels);
 
-    vector<GemmTuneCase> cases = {
-      {context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 0},
-      {context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 1},
-      {context.modelInfo.midNumChannels, context.modelInfo.trunkNumChannels, 1},
-      {context.modelInfo.trunkNumChannels, context.modelInfo.regularNumChannels, 0.2},
-      {context.modelInfo.trunkNumChannels, context.modelInfo.gpoolNumChannels, 0.2},
-      {maxConvChannels, maxConvChannels, 1}
+    vector<GemmTuneCase> cases;
+    const auto addCase = [&](int inChannels, int outChannels, double weight) {
+      if(inChannels <= 0 || outChannels <= 0 || weight <= 0.0)
+        return;
+      const auto existing = find_if(cases.begin(), cases.end(), [&](const GemmTuneCase& tuneCase) {
+        return tuneCase.inChannels == inChannels && tuneCase.outChannels == outChannels;
+      });
+      if(existing == cases.end())
+        cases.push_back({inChannels, outChannels, weight});
+      else
+        existing->weight += weight;
     };
+    addCase(context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 1.0);
+    addCase(context.modelInfo.midNumChannels, context.modelInfo.trunkNumChannels, 1.0);
+    addCase(context.modelInfo.trunkNumChannels, context.modelInfo.trunkNumChannels, 1.0);
+    addCase(context.modelInfo.trunkNumChannels, context.modelInfo.regularNumChannels, 0.2);
+    addCase(context.modelInfo.regularNumChannels, context.modelInfo.trunkNumChannels, 0.2);
+    addCase(context.modelInfo.trunkNumChannels, context.modelInfo.gpoolNumChannels, 0.2);
+    addCase(maxConvChannels, maxConvChannels, 1.0);
     if(includeTransformerCases &&
        context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
        context.modelInfo.transformerNumHeads > 0 && context.modelInfo.transformerNumKVHeads > 0) {
       const int transformerQKC = context.modelInfo.transformerNumHeads * context.modelInfo.transformerHeadDim;
+      const int transformerKC = context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerHeadDim;
       const int transformerVC = context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim;
+      const int transformerOutC = context.modelInfo.transformerNumHeads * context.modelInfo.transformerVHeadDim;
       const int transformerFFNC = context.modelInfo.transformerFFNChannels;
-      cases.push_back({context.modelInfo.midNumChannels, transformerQKC, 1});
-      cases.push_back({transformerVC, context.modelInfo.midNumChannels, 1});
-      cases.push_back({context.modelInfo.midNumChannels, transformerFFNC, 1});
-      cases.push_back({transformerFFNC, context.modelInfo.midNumChannels, 1});
+      addCase(context.modelInfo.midNumChannels, transformerQKC, 1.0);
+      addCase(context.modelInfo.midNumChannels, transformerKC, 1.0);
+      addCase(context.modelInfo.midNumChannels, transformerVC, 1.0);
+      addCase(transformerOutC, context.modelInfo.midNumChannels, 1.0);
+      addCase(context.modelInfo.midNumChannels, transformerFFNC, 2.0);
+      addCase(transformerFFNC, context.modelInfo.midNumChannels, 1.0);
     }
     return cases;
   }
@@ -1186,11 +1201,12 @@ namespace {
     const vector<double> workloadWeights = getWorkloadWeights(tunerName, context);
     const size_t workloadCaseCount = workloadWeights.size();
     if(isGemm) {
-      const size_t totalRuns = 3 * workloadCaseCount * batchSizes.size();
+      const size_t warmupRuns = workloadCaseCount * batchSizes.size();
+      const size_t totalRuns = 6 * workloadCaseCount * batchSizes.size();
       const double tolerance = tunerName == "xgemmDirect" ? 0.01 :
                                (tunerName == "xgemm" || tunerName == "xgemm16") ? 0.005 : 0.002;
       return {
-        tunerName, totalRuns, 0, tolerance, tolerance * 5.0,
+        tunerName, totalRuns, warmupRuns, tolerance, tolerance * 5.0,
         batchSizes, gemmCases, workloadWeights
       };
     }
@@ -1218,13 +1234,22 @@ namespace {
     // largest available case. The selected shape is always remeasured with the
     // complete plan before it can be saved.
     vector<GemmTuneCase> cases;
-    cases.push_back(plan.gemmCases[std::min<size_t>(1, plan.gemmCases.size() - 1)]);
-    if(plan.gemmCases.back().inChannels != cases.front().inChannels ||
-       plan.gemmCases.back().outChannels != cases.front().outChannels)
-      cases.push_back(plan.gemmCases.back());
+    const auto addScreeningCase = [&](const GemmTuneCase& candidate) {
+      const bool duplicate = any_of(cases.begin(), cases.end(), [&](const GemmTuneCase& existing) {
+        return existing.inChannels == candidate.inChannels && existing.outChannels == candidate.outChannels;
+      });
+      if(!duplicate)
+        cases.push_back(candidate);
+    };
+    addScreeningCase(plan.gemmCases.front());
+    addScreeningCase(plan.gemmCases[std::min<size_t>(1, plan.gemmCases.size() - 1)]);
+    addScreeningCase(plan.gemmCases.back());
     plan.gemmCases = cases;
-    plan.workloadWeights.assign(cases.size(), 1.0);
-    plan.totalRuns = cases.size();
+    plan.workloadWeights.clear();
+    for(const GemmTuneCase& tuneCase: cases)
+      plan.workloadWeights.push_back(tuneCase.weight);
+    plan.warmupRuns = cases.size();
+    plan.totalRuns = 3 * cases.size();
     return plan;
   }
 
@@ -2512,12 +2537,21 @@ namespace {
                          context.modelInfo.trunkNumChannels)
           : std::max(1, context.modelInfo.trunkNumChannels);
         const size_t lastPipeline = std::min(pipelines.size(), firstPipeline + pipelineCount);
+        size_t firstBuffer = 0;
+        for(size_t i = 0; i < firstPipeline; i++)
+          firstBuffer += pipelines[i]->bindingCount;
         for(size_t i = firstPipeline; i < lastPipeline; i++) {
           const Pipeline* pipeline = pipelines[i];
           recordPipeline(
             targetCommandBuffer, pipeline, descriptorSets[i], runBatchSize, runChannels,
             runGemm.gemmM, runGemm.gemmN, runGemm.gemmK
           );
+          if(plan.kernelName == "hgemmCooperativeMatrixNCHW") {
+            vk_helper::barrierCommandBufferForBuffer(
+              targetCommandBuffer, tuningBuffers[firstBuffer + outputBinding(pipeline)]
+            );
+          }
+          firstBuffer += pipeline->bindingCount;
           if(i + 1 < lastPipeline)
             vk_helper::barrierCommandBuffer(targetCommandBuffer);
         }
@@ -4202,34 +4236,55 @@ namespace {
       const TuningMeasurementPlan detailPlan = makeMeasurementPlan(Tuner::name(), detailContext);
       vector<TuningConfigMeasurement> tunedShapes;
       for(const TuningConfigMeasurement& selected: selectedShapes) {
-        VulkanTuneParams seed = selected.config;
-        TuningConfigMeasurement stageBest = selected;
-        const auto runStage = [&](vector<VulkanTuneParams> configs) {
-          configs.insert(configs.begin(), seed);
+        const size_t beamWidth = context.full ? 8 : 3;
+        vector<TuningConfigMeasurement> beam = {selected};
+        const auto runStage = [&](const auto& makeCandidates) {
+          vector<VulkanTuneParams> configs;
+          for(const TuningConfigMeasurement& seed: beam) {
+            configs.push_back(seed.config);
+            vector<VulkanTuneParams> expanded = makeCandidates(seed.config);
+            configs.insert(configs.end(), expanded.begin(), expanded.end());
+          }
           const TuningConfigMeasurements measurements = measureConfigs<Tuner>(
             detailContext, std::move(configs), detailPlan
           );
           if(measurements.values.empty())
             return false;
-          const auto best = max_element(
-            measurements.values.begin(), measurements.values.end(),
-            [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
+          vector<TuningConfigMeasurement> ranked = measurements.values;
+          sort(
+            ranked.begin(), ranked.end(),
+            [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score > b.score; }
           );
-          if(best == measurements.values.end() || best->score <= 0.0)
+          ranked.erase(
+            remove_if(ranked.begin(), ranked.end(), [](const TuningConfigMeasurement& measurement) {
+              return measurement.score <= 0.0;
+            }),
+            ranked.end()
+          );
+          if(ranked.empty())
             return false;
-          stageBest = *best;
-          seed = best->config;
+          if(ranked.size() > beamWidth)
+            ranked.resize(beamWidth);
+          beam = std::move(ranked);
           return true;
         };
-        if(!runStage(Tuner::subgroupCandidates(seed, context.full, detailContext)))
+        if(!runStage([&](const VulkanTuneParams& seed) {
+             return Tuner::subgroupCandidates(seed, context.full, detailContext);
+           }))
           continue;
-        if(!runStage(Tuner::reuseCandidates(seed, context.full, detailContext)))
+        if(!runStage([&](const VulkanTuneParams& seed) {
+             return Tuner::reuseCandidates(seed, context.full, detailContext);
+           }))
           continue;
-        if(!runStage(Tuner::sharedMemoryCandidates(seed, context.full, detailContext)))
+        if(!runStage([&](const VulkanTuneParams& seed) {
+             return Tuner::sharedMemoryCandidates(seed, context.full, detailContext);
+           }))
           continue;
-        if(!runStage(Tuner::vectorCandidates(seed, context.full, detailContext)))
+        if(!runStage([&](const VulkanTuneParams& seed) {
+             return Tuner::vectorCandidates(seed, context.full, detailContext);
+           }))
           continue;
-        tunedShapes.push_back(stageBest);
+        tunedShapes.push_back(beam.front());
       }
       if(tunedShapes.empty())
         return 0.0;
