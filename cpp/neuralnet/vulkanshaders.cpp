@@ -338,6 +338,12 @@ namespace vk_shader {
   const unsigned char* spirv_transformer_scale_dot_product_p16s16 = _binary_transformer_scale_dot_product_p16s16_start;
   size_t spirv_transformer_scale_dot_product_p16s16_size = _binary_transformer_scale_dot_product_p16s16_size;
 
+  // transformer_scale_dot_product_cooperative
+  const unsigned char* spirv_transformer_scale_dot_product_cooperative_p32s16 = _binary_transformer_scale_dot_product_cooperative_p32s16_start;
+  size_t spirv_transformer_scale_dot_product_cooperative_p32s16_size = _binary_transformer_scale_dot_product_cooperative_p32s16_size;
+  const unsigned char* spirv_transformer_scale_dot_product_cooperative_p16s16 = _binary_transformer_scale_dot_product_cooperative_p16s16_start;
+  size_t spirv_transformer_scale_dot_product_cooperative_p16s16_size = _binary_transformer_scale_dot_product_cooperative_p16s16_size;
+
   // transformer_scale_dot_product_naive_fp32
   const unsigned char* spirv_transformer_scale_dot_product_naive_fp32 = _binary_transformer_scale_dot_product_naive_fp32_start;
   size_t spirv_transformer_scale_dot_product_naive_fp32_size = _binary_transformer_scale_dot_product_naive_fp32_size;
@@ -493,6 +499,8 @@ namespace vk_shader {
       {spirv_transformer_scale_dot_product_naive_p32s16, spirv_transformer_scale_dot_product_naive_p32s16_size, &shaderModule_transformer_scale_dot_product_naive_p32s16},
       {spirv_transformer_scale_dot_product_p16s16, spirv_transformer_scale_dot_product_p16s16_size, &shaderModule_transformer_scale_dot_product_p16s16},
       {spirv_transformer_scale_dot_product_p32s16, spirv_transformer_scale_dot_product_p32s16_size, &shaderModule_transformer_scale_dot_product_p32s16},
+      {spirv_transformer_scale_dot_product_cooperative_p16s16, spirv_transformer_scale_dot_product_cooperative_p16s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p16s16},
+      {spirv_transformer_scale_dot_product_cooperative_p32s16, spirv_transformer_scale_dot_product_cooperative_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p32s16},
       {spirv_transformer_spatial_rms_norm_apply_fp32, spirv_transformer_spatial_rms_norm_apply_fp32_size, &shaderModule_transformer_spatial_rms_norm_apply_fp32},
       {spirv_transformer_spatial_rms_norm_apply_p16s16, spirv_transformer_spatial_rms_norm_apply_p16s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p16s16},
       {spirv_transformer_spatial_rms_norm_apply_p32s16, spirv_transformer_spatial_rms_norm_apply_p32s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p32s16},
@@ -550,8 +558,8 @@ namespace vk_shader {
   }
 
   ComputePipelines::ComputePipelines(
-    VkDevice device_, const VulkanDeviceInfo& deviceInfo_, Logger* logger_
-  ): device(device_), deviceInfo(deviceInfo_), logger(logger_) {
+    VkDevice device_, const VulkanDeviceInfo& deviceInfo_, Logger* logger_, bool waitForDeviceIdle_
+  ): device(device_), deviceInfo(deviceInfo_), logger(logger_), waitForDeviceIdle(waitForDeviceIdle_) {
     VkResult res = VK_ERROR_UNKNOWN;
     cache = vk_helper::createPipelineCache(device, &res);
     if(res != VK_SUCCESS)
@@ -566,7 +574,8 @@ namespace vk_shader {
   }
 
   ComputePipelines::~ComputePipelines() {
-    vkDeviceWaitIdle(device);
+    if(waitForDeviceIdle)
+      vkDeviceWaitIdle(device);
     destroyPipelines();
     destroyShaderModules();
     if( cache != VK_NULL_HANDLE ) {
@@ -663,6 +672,9 @@ namespace vk_shader {
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      if(tuneParams.transformer.USE_COOPERATIVE_ATTN) {
+        if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      }
       if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }
     return VK_SUCCESS;
@@ -716,6 +728,7 @@ namespace vk_shader {
     destroyPipeline(transformerRmsNorm);
     destroyPipeline(transformerApplyRoPE);
     destroyPipeline(transformerScaleDotProduct);
+    destroyPipeline(transformerScaleDotProductCooperative);
     destroyPipeline(transformerScaleDotProductNaive);
     destroyPipeline(transformerSwiGLU);
     destroyPipeline(transformerSpatialRMSNormApply);
@@ -1369,6 +1382,51 @@ namespace vk_shader {
       return createPipeline("transformer_scale_dot_product_p32s16", shaderModule_transformer_scale_dot_product_p32s16, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
     return createPipeline("transformer_scale_dot_product_fp32", shaderModule_transformer_scale_dot_product_fp32, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  VkResult ComputePipelines::createTransformerScaleDotProductCooperative(
+    Pipeline& pipeline,
+    const TransformerTuneParams& tuneParams,
+    int qHeadDim,
+    int vHeadDim,
+    const VulkanParams& vulkanParams
+  ) {
+    if(!tuneParams.USE_COOPERATIVE_ATTN ||
+       !vulkanParams.canUseCooperativeMatrix ||
+       !vulkanParams.canUseFP16Storage ||
+       !vulkanParams.canUseFP16Compute ||
+       !vulkanParams.shouldUseFP16Storage ||
+       !isValidCooperativeMatrixConfig(deviceInfo, tuneParams, qHeadDim, vHeadDim))
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+    ScaleDotProductCooperativeSpec spec;
+    spec.localSizeX = tuneParams.COOP_SUBGROUP_SIZE * tuneParams.COOP_Q_TILES_PER_WORKGROUP;
+    spec.localSizeY = 1;
+    spec.localSizeZ = 1;
+    spec.COOP_M_SIZE = tuneParams.COOP_M_SIZE;
+    spec.COOP_N_SIZE = tuneParams.COOP_N_SIZE;
+    spec.COOP_K_SIZE = tuneParams.COOP_K_SIZE;
+    spec.ATTN_HEAD_DIM = qHeadDim;
+    spec.ATTN_V_HEAD_DIM = vHeadDim;
+    spec.COOP_Q_TILES_PER_WORKGROUP = tuneParams.COOP_Q_TILES_PER_WORKGROUP;
+    SpecializationData specData(spec);
+
+    if(tuneParams.COOP_ACC_TYPE == 16) {
+      return createPipeline(
+        "transformer_scale_dot_product_cooperative_p16s16",
+        shaderModule_transformer_scale_dot_product_cooperative_p16s16,
+        7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info,
+        spec.localSizeX, spec.localSizeY, spec.localSizeZ,
+        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      );
+    }
+    return createPipeline(
+      "transformer_scale_dot_product_cooperative_p32s16",
+      shaderModule_transformer_scale_dot_product_cooperative_p32s16,
+      7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info,
+      spec.localSizeX, spec.localSizeY, spec.localSizeZ,
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+    );
   }
 
   VkResult ComputePipelines::createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {

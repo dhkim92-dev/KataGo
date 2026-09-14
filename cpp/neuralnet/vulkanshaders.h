@@ -371,6 +371,15 @@ extern "C" {
   extern const unsigned char* _binary_transformer_scale_dot_product_p16s16_end;
   extern const size_t _binary_transformer_scale_dot_product_p16s16_size;
 
+  // transformer_scale_dot_product_cooperative
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_cooperative_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_cooperative_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_p16s16_size;
+
   // transformer_swiglu_fp32
   extern const unsigned char _binary_transformer_swiglu_fp32_start[];
   extern const unsigned char* _binary_transformer_swiglu_fp32_end;
@@ -681,6 +690,12 @@ namespace vk_shader {
   extern const unsigned char* spirv_transformer_scale_dot_product_p16s16;
   extern size_t spirv_transformer_scale_dot_product_p16s16_size;
 
+  // Transformer scale dot product with cooperative-matrix QK and PV
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_p16s16_size;
+
   // Transformer SwiGLU fp32
   extern const unsigned char* spirv_transformer_swiglu_fp32;
   extern size_t spirv_transformer_swiglu_fp32_size;
@@ -955,6 +970,18 @@ struct LocalDimHash {
       int Q_PER_THREAD = 1;
       int ATTN_HEAD_DIM = 1;
       int ATTN_V_HEAD_DIM = 1;
+    };
+
+    struct ScaleDotProductCooperativeSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int COOP_M_SIZE = 16;
+      int COOP_N_SIZE = 16;
+      int COOP_K_SIZE = 16;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+      int COOP_Q_TILES_PER_WORKGROUP = 1;
     };
 
     struct ScaleDotProductNaiveSpec {
@@ -1379,9 +1406,23 @@ struct LocalDimHash {
       int ATTN_BLOCK_KV=32;
       int Q_PER_THREAD=1;
       int USE_TILED_ATTN=1;
+      int USE_COOPERATIVE_ATTN=0;
+      int COOP_ACC_TYPE=32;
+      int COOP_M_SIZE=16;
+      int COOP_N_SIZE=16;
+      int COOP_K_SIZE=16;
+      uint32_t COOP_SUBGROUP_SIZE=32;
+      uint32_t COOP_Q_TILES_PER_WORKGROUP=1;
 
       bool isValid() const;
     };
+
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const TransformerTuneParams& params,
+      int qHeadDim,
+      int vHeadDim
+    );
 
     struct TransformerRMSNormTuneParms {
       int WG_C_SIZE = 64;
@@ -1573,6 +1614,8 @@ struct LocalDimHash {
     VkShaderModule shaderModule_transformer_scale_dot_product_naive_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_scale_dot_product_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_scale_dot_product_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p32s16 = VK_NULL_HANDLE;
@@ -1664,13 +1707,19 @@ struct LocalDimHash {
     Pipeline transformerRmsNorm;
     Pipeline transformerApplyRoPE;
     Pipeline transformerScaleDotProduct;
+    Pipeline transformerScaleDotProductCooperative;
     Pipeline transformerScaleDotProductNaive;
     Pipeline transformerSwiGLU;
     Pipeline transformerSpatialRMSNormApply;
     Pipeline transformerSpatialRMSNormReduce;
     Pipeline transformerSpatialRMSNormSumSq;
 
-    ComputePipelines(VkDevice device_, const VulkanDeviceInfo& deviceInfo_, Logger* logger_);
+    ComputePipelines(
+      VkDevice device_,
+      const VulkanDeviceInfo& deviceInfo_,
+      Logger* logger_,
+      bool waitForDeviceIdle_ = true
+    );
     ComputePipelines() = delete;
     ComputePipelines(const ComputePipelines&) = delete;
     ComputePipelines& operator=(const ComputePipelines&) = delete;
@@ -1710,6 +1759,7 @@ struct LocalDimHash {
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
@@ -1730,6 +1780,7 @@ struct LocalDimHash {
     );
 
   private :
+    bool waitForDeviceIdle;
     VkResult createShaderModules();
     void destroyShaderModules();
     void destroyPipelines();

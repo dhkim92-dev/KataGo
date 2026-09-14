@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <mutex>
 #include <vulkan/vulkan.h>
 #include <vector>
 #include "../external/half-2.2.0/include/half.hpp"
@@ -46,6 +47,9 @@ struct VulkanDevice {
   VkDescriptorPool descriptorPool;
   VkCommandPool commandPool;
   VmaAllocator allocator;
+  // vkQueueSubmit is externally synchronized for each VkQueue handle. Keep
+  // submits serialized when the tuner and dummy thread share a device.
+  mutable std::mutex queueSubmitMutex;
   bool skipWaitOnDestruction = false;
   ~VulkanDevice();
 };
@@ -128,7 +132,8 @@ namespace vk_helper {
     VkInstance instance,
     VulkanDeviceInfo deviceInfo,
     std::vector<const char *> requiredExtensions,
-    Logger* logger
+    Logger* logger,
+    float dummyQueuePriority = 0.5f
   );
 
   VkShaderModule createShaderModuleFromSPIRVBytes(

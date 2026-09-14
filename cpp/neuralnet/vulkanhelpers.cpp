@@ -444,7 +444,8 @@ VulkanDevice* vk_helper::createVulkanDevice(
   VkInstance instance,
   VulkanDeviceInfo deviceInfo,
   std::vector<const char *> requiredExtensions,
-  Logger* logger
+  Logger* logger,
+  float dummyQueuePriority
 ) {
   if ( logger ) {
     logger->write("Creating Vulkan Logical Device for " + deviceInfo.deviceName);
@@ -480,10 +481,10 @@ VulkanDevice* vk_helper::createVulkanDevice(
     }
   }
 
-  const bool subgroupSizeControlCore =
-    VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) > 1 ||
-    (VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
-     VK_VERSION_MINOR(deviceInfo.properties.apiVersion) >= 3);
+  // The instance is created with VK_API_VERSION_1_2 above. A physical device
+  // advertising Vulkan 1.3 does not make promoted features core to this
+  // Vulkan 1.2 instance; use the extension path in that case.
+  const bool subgroupSizeControlCore = false;
   const bool subgroupSizeControlExtensionAvailable = std::any_of(
     availableExtensions.begin(), availableExtensions.end(), [](const VkExtensionProperties& extension) {
       return std::string(extension.extensionName) == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
@@ -499,7 +500,7 @@ VulkanDevice* vk_helper::createVulkanDevice(
      !subgroupSizeControlAlreadyRequested)
     requiredExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 
-  const float queuePriorities[2] = {1.0f, 1.0f};
+  const float queuePriorities[2] = {1.0f, dummyQueuePriority};
   uint32_t queueFamilyPropertyCount = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyPropertyCount, nullptr);
   std::vector<VkQueueFamilyProperties> queueFamilyProperties(queueFamilyPropertyCount);
@@ -847,6 +848,7 @@ VkResult vk_helper::submitCommandBuffers(
   const std::vector<VkCommandBuffer>& commandBuffers,
   VkFence fence
 ) {
+  std::lock_guard<std::mutex> lock(device->queueSubmitMutex);
   VkSubmitInfo submitInfo = {};
   submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submitInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());

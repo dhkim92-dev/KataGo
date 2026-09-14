@@ -2361,9 +2361,12 @@ struct TransformerApplyRoPELayer {
 struct TransformerAttentionLayer {
   ComputeHandleInternal* handle;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet scalarDescriptorSet = VK_NULL_HANDLE;
   Pipeline pipeline;
+  Pipeline scalarPipeline;
   ScaleDotProductPushParam params;
   const bool useTiled;
+  const bool useCooperative;
 
   explicit TransformerAttentionLayer(
     ComputeHandleInternal* handle,
@@ -2371,7 +2374,8 @@ struct TransformerAttentionLayer {
     const int numKVHeads
   ): 
     handle(handle),
-    useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0)
+    useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0),
+    useCooperative(handle->tuneParams.transformer.USE_COOPERATIVE_ATTN != 0)
   {
 
     const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
@@ -2379,7 +2383,10 @@ struct TransformerAttentionLayer {
     params.numHeads = numHeads;
     params.numKVHeads = numKVHeads;
     params.scale = 1.0f / sqrtf(static_cast<float>(handle->qHeadDim));
-    if(useTiled) {
+    if(useCooperative) {
+      pipeline = pipelines->transformerScaleDotProductCooperative;
+      scalarPipeline = pipelines->transformerScaleDotProduct;
+    } else if(useTiled) {
       pipeline = pipelines->transformerScaleDotProduct;
     } else {
       pipeline = pipelines->transformerScaleDotProductNaive;
@@ -2387,6 +2394,12 @@ struct TransformerAttentionLayer {
     VkResult res = VK_SUCCESS;
     descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create descriptor set", res);
+    if(useCooperative) {
+      scalarDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, scalarPipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create scalar fallback descriptor set", res);
+    }
   }
 
   ~TransformerAttentionLayer()=default;
@@ -2407,14 +2420,20 @@ struct TransformerAttentionLayer {
     const bool learnableRope,
     const int ropeNumPairs
   ) {
+    // Cooperative matrix operands are FP16 on the supported devices. With
+    // integrated RoPE this rounds Q/K after rotation before the matrix
+    // operation, unlike the FP32 baseline attention shader.
+    const bool useCooperativeDispatch = useCooperative && !useRope;
+    const Pipeline& activePipeline = useCooperativeDispatch ? pipeline : (useCooperative ? scalarPipeline : pipeline);
+    const VkDescriptorSet activeDescriptorSet = useCooperativeDispatch ? descriptorSet : (useCooperative ? scalarDescriptorSet : descriptorSet);
     auto writeDescriptors = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, packedQKV),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, packedQKV),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, packedQKV),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, output),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 5, ropeCosTable),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 6, ropeSinTable),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 0, packedQKV),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 1, packedQKV),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 2, packedQKV),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 3, output),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 4, mask),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 5, ropeCosTable),
+      vk_helper::writeDescriptorSetBuffer(activeDescriptorSet, 6, ropeSinTable),
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
 
@@ -2429,20 +2448,21 @@ struct TransformerAttentionLayer {
     params.ropeNumPairs = ropeNumPairs;
     params.ropeReserved = 0;
 
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, activePipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, activePipeline.layout, 0, 1, &activeDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cb, activePipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
     if (useTiled) {
       auto tuneParams = handle->tuneParams.transformer;
       uint32_t qPerThread = tuneParams.Q_PER_THREAD;
-      uint32_t totalQPerWG = pipeline.localSizeX * qPerThread;
+      uint32_t totalQPerWG = useCooperativeDispatch
+        ? static_cast<uint32_t>(tuneParams.ATTN_BLOCK_Q) * qPerThread
+        : activePipeline.localSizeX * qPerThread;
       uint32_t numQGroups = (params.seqLen + totalQPerWG - 1) / totalQPerWG;
-      uint32_t gs[3] = {numQGroups * pipeline.localSizeX, (uint32_t)batchSize * params.numHeads, 1};
       uint32_t wgCount[3] = {
-        (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
-        (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
-        (gs[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ
+        numQGroups,
+        (static_cast<uint32_t>(batchSize) * params.numHeads + activePipeline.localSizeY - 1) / activePipeline.localSizeY,
+        (1 + activePipeline.localSizeZ - 1) / activePipeline.localSizeZ
       };
       SHADER_PROFILE_START("scaleDotProductAttention", cb);
       vkCmdDispatch(cb, wgCount[0], wgCount[1], wgCount[2]);
@@ -2453,9 +2473,9 @@ struct TransformerAttentionLayer {
         static_cast<uint32_t>(batchSize) * params.numHeads
       };
       uint32_t wgCount[3] = {
-        (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
-        (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
-        (1 + pipeline.localSizeZ - 1) / pipeline.localSizeZ
+        (gs[0] + activePipeline.localSizeX - 1) / activePipeline.localSizeX,
+        (gs[1] + activePipeline.localSizeY - 1) / activePipeline.localSizeY,
+        (1 + activePipeline.localSizeZ - 1) / activePipeline.localSizeZ
       };
       SHADER_PROFILE_START("scaleDotProductAttentionNaive", cb);
       vkCmdDispatch(cb, wgCount[0], wgCount[1], wgCount[2]);

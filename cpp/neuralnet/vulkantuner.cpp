@@ -329,6 +329,48 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
          );
 }
 
+bool vk_shader::tune::isValidCooperativeMatrixConfig(
+  const VulkanDeviceInfo& deviceInfo,
+  const TransformerTuneParams& params,
+  int qHeadDim,
+  int vHeadDim
+) {
+  if(!params.USE_COOPERATIVE_ATTN || !params.isValid() ||
+     params.COOP_ACC_TYPE != 32 ||
+     qHeadDim <= 0 || vHeadDim <= 0 ||
+     params.COOP_M_SIZE > static_cast<int>(params.COOP_SUBGROUP_SIZE))
+    return false;
+  if(!isSupportedCooperativeMatrixShape(
+       deviceInfo,
+       params.COOP_ACC_TYPE,
+       params.COOP_M_SIZE,
+       params.COOP_N_SIZE,
+       params.COOP_K_SIZE,
+       params.COOP_SUBGROUP_SIZE
+     ))
+    return false;
+
+  const int headDimPad = ((qHeadDim + params.COOP_K_SIZE - 1) / params.COOP_K_SIZE) * params.COOP_K_SIZE;
+  const int kvPad = ((params.COOP_N_SIZE + params.COOP_K_SIZE - 1) / params.COOP_K_SIZE) * params.COOP_K_SIZE;
+  const int vHeadDimPad = ((vHeadDim + params.COOP_N_SIZE - 1) / params.COOP_N_SIZE) * params.COOP_N_SIZE;
+  const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
+  const uint64_t localSize = static_cast<uint64_t>(params.COOP_SUBGROUP_SIZE) * params.COOP_Q_TILES_PER_WORKGROUP;
+  const uint64_t sharedBytes =
+    5 * 16ull +
+    2ull * (
+      static_cast<uint64_t>(headDimPad) * qBlock +
+      static_cast<uint64_t>(headDimPad) * params.COOP_N_SIZE +
+      static_cast<uint64_t>(kvPad) * vHeadDimPad
+    ) +
+    static_cast<uint64_t>(params.COOP_ACC_TYPE == 32 ? 4 : 2) *
+      qBlock * params.COOP_N_SIZE +
+    4ull * params.COOP_N_SIZE;
+  const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
+  return localSize <= limits.maxComputeWorkGroupSize[0] &&
+         localSize <= limits.maxComputeWorkGroupInvocations &&
+         sharedBytes <= limits.maxComputeSharedMemorySize;
+}
+
 namespace {
   const string VERSION_LINE = Global::strprintf("VERSION=%d", VulkanTuner::TUNER_VERSION);
 
@@ -542,6 +584,15 @@ bool HGemmCooperativeMatrixNCHWTuneParams::isSimple() const {
 bool TransformerTuneParams::isValid() const {
   if(USE_TILED_ATTN != 0 && USE_TILED_ATTN != 1)
     return false;
+  if(USE_COOPERATIVE_ATTN != 0 && USE_COOPERATIVE_ATTN != 1)
+    return false;
+  if(USE_COOPERATIVE_ATTN && COOP_ACC_TYPE != 32)
+    return false;
+  if(COOP_M_SIZE <= 0 || COOP_N_SIZE <= 0 || COOP_K_SIZE <= 0 || COOP_SUBGROUP_SIZE == 0)
+    return false;
+  if(COOP_Q_TILES_PER_WORKGROUP == 0 ||
+     (COOP_Q_TILES_PER_WORKGROUP & (COOP_Q_TILES_PER_WORKGROUP - 1)) != 0)
+    return false;
   if(ATTN_BLOCK_Q <= 0 || ATTN_BLOCK_KV <= 0)
     return false;
   if((ATTN_BLOCK_Q & (ATTN_BLOCK_Q - 1)) != 0 ||
@@ -550,6 +601,11 @@ bool TransformerTuneParams::isValid() const {
   if(ATTN_BLOCK_Q > 256 || ATTN_BLOCK_KV > 128)
     return false;
   if(Q_PER_THREAD < 1 || Q_PER_THREAD > 8 || (Q_PER_THREAD & (Q_PER_THREAD - 1)) != 0)
+    return false;
+  if(USE_COOPERATIVE_ATTN &&
+     (USE_TILED_ATTN != 1 ||
+      ATTN_BLOCK_Q != COOP_M_SIZE * static_cast<int>(COOP_Q_TILES_PER_WORKGROUP) ||
+      ATTN_BLOCK_KV != COOP_N_SIZE || Q_PER_THREAD != 1))
     return false;
   return true;
 }
@@ -645,6 +701,13 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          transformer.ATTN_BLOCK_KV == other.transformer.ATTN_BLOCK_KV &&
          transformer.Q_PER_THREAD == other.transformer.Q_PER_THREAD &&
          transformer.USE_TILED_ATTN == other.transformer.USE_TILED_ATTN &&
+         transformer.USE_COOPERATIVE_ATTN == other.transformer.USE_COOPERATIVE_ATTN &&
+         transformer.COOP_ACC_TYPE == other.transformer.COOP_ACC_TYPE &&
+         transformer.COOP_M_SIZE == other.transformer.COOP_M_SIZE &&
+         transformer.COOP_N_SIZE == other.transformer.COOP_N_SIZE &&
+         transformer.COOP_K_SIZE == other.transformer.COOP_K_SIZE &&
+         transformer.COOP_SUBGROUP_SIZE == other.transformer.COOP_SUBGROUP_SIZE &&
+         transformer.COOP_Q_TILES_PER_WORKGROUP == other.transformer.COOP_Q_TILES_PER_WORKGROUP &&
          rmsNorm.WG_C_SIZE == other.rmsNorm.WG_C_SIZE &&
          rmsNorm.WG_XY_SIZE == other.rmsNorm.WG_XY_SIZE &&
          rmsNorm.C_PER_THREAD == other.rmsNorm.C_PER_THREAD &&
@@ -715,7 +778,7 @@ namespace {
     WRITE_CONV("conv3x3", profile.conv3x3); WRITE_CONV("conv5x5", profile.conv5x5);
 #undef WRITE_CONV
     WRITE("gPool.XYSTRIDE", profile.gPool.XYSTRIDE); WRITE("gPool.CHANNELSTRIDE", profile.gPool.CHANNELSTRIDE); WRITE("gPool.BATCHSTRIDE", profile.gPool.BATCHSTRIDE);
-    WRITE("transformer.ATTN_BLOCK_Q", profile.transformer.ATTN_BLOCK_Q); WRITE("transformer.ATTN_BLOCK_KV", profile.transformer.ATTN_BLOCK_KV); WRITE("transformer.Q_PER_THREAD", profile.transformer.Q_PER_THREAD); WRITE("transformer.USE_TILED_ATTN", profile.transformer.USE_TILED_ATTN);
+    WRITE("transformer.ATTN_BLOCK_Q", profile.transformer.ATTN_BLOCK_Q); WRITE("transformer.ATTN_BLOCK_KV", profile.transformer.ATTN_BLOCK_KV); WRITE("transformer.Q_PER_THREAD", profile.transformer.Q_PER_THREAD); WRITE("transformer.USE_TILED_ATTN", profile.transformer.USE_TILED_ATTN); WRITE("transformer.USE_COOPERATIVE_ATTN", profile.transformer.USE_COOPERATIVE_ATTN); WRITE("transformer.COOP_ACC_TYPE", profile.transformer.COOP_ACC_TYPE); WRITE("transformer.COOP_M_SIZE", profile.transformer.COOP_M_SIZE); WRITE("transformer.COOP_N_SIZE", profile.transformer.COOP_N_SIZE); WRITE("transformer.COOP_K_SIZE", profile.transformer.COOP_K_SIZE); WRITE("transformer.COOP_SUBGROUP_SIZE", profile.transformer.COOP_SUBGROUP_SIZE); WRITE("transformer.COOP_Q_TILES_PER_WORKGROUP", profile.transformer.COOP_Q_TILES_PER_WORKGROUP);
     WRITE("rmsNorm.WG_C_SIZE", profile.rmsNorm.WG_C_SIZE); WRITE("rmsNorm.WG_XY_SIZE", profile.rmsNorm.WG_XY_SIZE); WRITE("rmsNorm.C_PER_THREAD", profile.rmsNorm.C_PER_THREAD);
     WRITE("pointwise.ELTS_PER_THREAD", profile.pointwise.ELTS_PER_THREAD); WRITE("pointwise.LOCAL_SIZE", profile.pointwise.LOCAL_SIZE);
     WRITE("addChannelBiases.XY_ELTS_PER_THREAD", profile.addChannelBiases.XY_ELTS_PER_THREAD); WRITE("addChannelBiases.NC_ELTS_PER_THREAD", profile.addChannelBiases.NC_ELTS_PER_THREAD);
@@ -767,7 +830,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 100)
+  if(values.size() != 107)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -795,7 +858,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
     READ_CONV("conv3x3", profile.conv3x3); READ_CONV("conv5x5", profile.conv5x5);
 #undef READ_CONV
     profile.gPool.XYSTRIDE = read("gPool.XYSTRIDE"); profile.gPool.CHANNELSTRIDE = read("gPool.CHANNELSTRIDE"); profile.gPool.BATCHSTRIDE = read("gPool.BATCHSTRIDE");
-    profile.transformer.ATTN_BLOCK_Q = read("transformer.ATTN_BLOCK_Q"); profile.transformer.ATTN_BLOCK_KV = read("transformer.ATTN_BLOCK_KV"); profile.transformer.Q_PER_THREAD = read("transformer.Q_PER_THREAD"); profile.transformer.USE_TILED_ATTN = read("transformer.USE_TILED_ATTN");
+    profile.transformer.ATTN_BLOCK_Q = read("transformer.ATTN_BLOCK_Q"); profile.transformer.ATTN_BLOCK_KV = read("transformer.ATTN_BLOCK_KV"); profile.transformer.Q_PER_THREAD = read("transformer.Q_PER_THREAD"); profile.transformer.USE_TILED_ATTN = read("transformer.USE_TILED_ATTN"); profile.transformer.USE_COOPERATIVE_ATTN = read("transformer.USE_COOPERATIVE_ATTN"); profile.transformer.COOP_ACC_TYPE = read("transformer.COOP_ACC_TYPE"); profile.transformer.COOP_M_SIZE = read("transformer.COOP_M_SIZE"); profile.transformer.COOP_N_SIZE = read("transformer.COOP_N_SIZE"); profile.transformer.COOP_K_SIZE = read("transformer.COOP_K_SIZE"); profile.transformer.COOP_SUBGROUP_SIZE = read("transformer.COOP_SUBGROUP_SIZE"); profile.transformer.COOP_Q_TILES_PER_WORKGROUP = read("transformer.COOP_Q_TILES_PER_WORKGROUP");
     profile.rmsNorm.WG_C_SIZE = read("rmsNorm.WG_C_SIZE"); profile.rmsNorm.WG_XY_SIZE = read("rmsNorm.WG_XY_SIZE"); profile.rmsNorm.C_PER_THREAD = read("rmsNorm.C_PER_THREAD");
     profile.pointwise.ELTS_PER_THREAD = read("pointwise.ELTS_PER_THREAD"); profile.pointwise.LOCAL_SIZE = read("pointwise.LOCAL_SIZE");
     profile.addChannelBiases.XY_ELTS_PER_THREAD = read("addChannelBiases.XY_ELTS_PER_THREAD"); profile.addChannelBiases.NC_ELTS_PER_THREAD = read("addChannelBiases.NC_ELTS_PER_THREAD");
@@ -1464,6 +1527,13 @@ namespace {
       add("ATTN_BLOCK_KV", config.transformer.ATTN_BLOCK_KV);
       add("Q_PER_THREAD", config.transformer.Q_PER_THREAD);
       add("USE_TILED_ATTN", config.transformer.USE_TILED_ATTN);
+      add("USE_COOPERATIVE_ATTN", config.transformer.USE_COOPERATIVE_ATTN);
+      add("COOP_ACC_TYPE", config.transformer.COOP_ACC_TYPE);
+      add("COOP_M_SIZE", config.transformer.COOP_M_SIZE);
+      add("COOP_N_SIZE", config.transformer.COOP_N_SIZE);
+      add("COOP_K_SIZE", config.transformer.COOP_K_SIZE);
+      add("COOP_SUBGROUP_SIZE", config.transformer.COOP_SUBGROUP_SIZE);
+      add("COOP_Q_TILES_PER_WORKGROUP", config.transformer.COOP_Q_TILES_PER_WORKGROUP);
     }
     else if(tunerName == "transformerRMSNorm") {
       add("WG_C_SIZE", config.rmsNorm.WG_C_SIZE);
@@ -1549,6 +1619,10 @@ namespace {
         (isReference ? " (reference)" : "") + " ..."
     );
   }
+
+  // Keep each tuning submission short enough that a large model cannot turn a
+  // complete warmup/measurement plan into one long-running GPU submission.
+  constexpr size_t MAX_TUNER_RUNS_PER_SUBMISSION = 1;
 
   class VulkanTimestampTimer {
    public:
@@ -2622,6 +2696,52 @@ namespace {
         cleanup();
         return false;
       }
+      const auto submitCommandBuffer = [&](bool beginNext) -> bool {
+        vk_helper::barrierCommandBuffer(
+          commandBuffer,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          VK_ACCESS_SHADER_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_TRANSFER_READ_BIT
+        );
+        result = vk_helper::endCommandBuffer(commandBuffer);
+        if(result != VK_SUCCESS) {
+          error = "could not end tuning command buffer: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        result = vkResetFences(device->device, 1, &fence);
+        if(result != VK_SUCCESS) {
+          error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
+        if(result != VK_SUCCESS) {
+          error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        commandBufferSubmitted = true;
+        result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
+        if(result != VK_SUCCESS) {
+          error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        commandBufferSubmitted = false;
+        if(!beginNext)
+          return true;
+
+        result = vkResetCommandBuffer(commandBuffer, 0);
+        if(result != VK_SUCCESS) {
+          error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        result = vk_helper::beginCommandBuffer(commandBuffer);
+        if(result != VK_SUCCESS) {
+          error = "could not begin tuning command buffer: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        vk_helper::barrierCommandBuffer(commandBuffer);
+        return true;
+      };
       const auto zeroBuffer = [&](VulkanBuffer* buffer) {
         vkCmdFillBuffer(commandBuffer, buffer->buffer, 0, VK_WHOLE_SIZE, 0);
         vk_helper::barrierCommandBufferForBuffer(
@@ -2685,6 +2805,10 @@ namespace {
           vk_helper::barrierCommandBuffer(commandBuffer);
         }
         recordDispatches(commandBuffer, repeat, firstTimedPipeline, timedPipelineCount);
+        if((repeat + 1) < plan.warmupRuns &&
+           (repeat + 1) % MAX_TUNER_RUNS_PER_SUBMISSION == 0 &&
+           !submitCommandBuffer(true))
+          return false;
       }
       const size_t timedRuns = plan.timedRuns();
       vkCmdResetQueryPool(
@@ -2925,40 +3049,13 @@ namespace {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT
           );
         }
+        if((timedRepeat + 1) < timedRuns &&
+           (timedRepeat + 1) % MAX_TUNER_RUNS_PER_SUBMISSION == 0 &&
+           !submitCommandBuffer(true))
+          return false;
       }
-      vk_helper::barrierCommandBuffer(
-        commandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT
-      );
-      result = vk_helper::endCommandBuffer(commandBuffer);
-      if(result != VK_SUCCESS) {
-        error = "could not end tuning command buffer: " + vk_helper::vkErrorToString(result);
-        cleanup();
+      if(!submitCommandBuffer(false))
         return false;
-      }
-      result = vkResetFences(device->device, 1, &fence);
-      if(result != VK_SUCCESS) {
-        error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
-      if(result != VK_SUCCESS) {
-        error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      commandBufferSubmitted = true;
-      result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
-      if(result != VK_SUCCESS) {
-        error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      commandBufferSubmitted = false;
       if(timedRuns == 0) {
         error = "tuning measurement plan has no timed runs";
         cleanup();
@@ -3756,7 +3853,9 @@ namespace {
         xgemmParams.VWND = 1;
         AddPointWiseTuneParams pointwiseParams;
         VulkanParams vulkanParams;
-        pipelines = make_unique<vk_shader::ComputePipelines>(device->device, device->info, nullptr);
+        pipelines = make_unique<vk_shader::ComputePipelines>(
+          device->device, device->info, nullptr, false
+        );
         result = pipelines->createXgemmStridedBatched(
           pipelines->xgemmStridedBatchedFp32, xgemmParams, vulkanParams
         );
@@ -3960,7 +4059,10 @@ namespace {
           submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
           submitInfo.commandBufferCount = 1;
           submitInfo.pCommandBuffers = &commandBuffer;
-          result = vkQueueSubmit(device->dummyQueue, 1, &submitInfo, fence);
+          {
+            lock_guard<mutex> lock(device->queueSubmitMutex);
+            result = vkQueueSubmit(device->dummyQueue, 1, &submitInfo, fence);
+          }
           if(result != VK_SUCCESS) {
             reportFailure("dummy queue observed device loss at command submission: " + vk_helper::vkErrorToString(result));
             break;
@@ -4051,7 +4153,9 @@ namespace {
     }
     VulkanTimestampTimer& timer = *context.timer;
 
-    vk_shader::ComputePipelines pipelines(context.device->device, context.device->info, nullptr);
+    vk_shader::ComputePipelines pipelines(
+      context.device->device, context.device->info, nullptr, false
+    );
     vector<Pipeline*> previousTargets;
     double localBestScore = 0.0;
     double& bestScore = bestScoreAcrossCalls != nullptr ? *bestScoreAcrossCalls : localBestScore;
@@ -4159,7 +4263,8 @@ namespace {
         else
           validateReadback(referenceReadback, readback, plan, errorProp);
         const bool isCooperativeMatrix =
-          Tuner::name() == "hgemmCooperativeMatrix" || Tuner::name() == "hgemmCooperativeMatrixNCHW";
+          Tuner::name() == "hgemmCooperativeMatrix" || Tuner::name() == "hgemmCooperativeMatrixNCHW" ||
+          (Tuner::name() == "transformerAttention" && candidate.transformer.USE_COOPERATIVE_ATTN != 0);
         const double score = isCooperativeMatrix
           ? VulkanTuner::computeCooperativeMatrixTuningScore(callsPerSecond, errorProp, plan.errorTolerance)
           : VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
@@ -4366,10 +4471,36 @@ namespace {
       measurements.values.begin(), measurements.values.end(),
       [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
     );
-    currentConfig = best.config;
+    const TuningConfigMeasurement* selected = &best;
+    if(Tuner::name() == "transformerAttention" && best.config.transformer.USE_COOPERATIVE_ATTN) {
+      const TuningConfigMeasurement* scalarBest = nullptr;
+      for(const TuningConfigMeasurement& measurement: measurements.values) {
+        if(measurement.config.transformer.USE_COOPERATIVE_ATTN)
+          continue;
+        if(scalarBest == nullptr || measurement.score > scalarBest->score)
+          scalarBest = &measurement;
+      }
+      if(scalarBest != nullptr && !VulkanTuner::isFastEnough(
+           best.callsPerSecond,
+           scalarBest->callsPerSecond,
+           VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
+         )) {
+          selected = scalarBest;
+          if(context.logger != nullptr)
+            context.logger->write(
+              "Vulkan tuner transformerAttention cooperative candidate rejected: calls/sec=" +
+              Global::doubleToString(best.callsPerSecond) + ", scalar_fallback=" +
+              Global::doubleToString(scalarBest->callsPerSecond)
+            );
+      }
+    }
+    currentConfig = selected->config;
     if(context.logger != nullptr)
-      context.logger->write("Vulkan tuner " + Tuner::name() + " selected a measured candidate");
-    return best.callsPerSecond;
+      context.logger->write(
+        "Vulkan tuner " + Tuner::name() + " selected a measured candidate" +
+        (selected->config.transformer.USE_COOPERATIVE_ATTN ? " (cooperative QK+PV)" : "")
+      );
+    return selected->callsPerSecond;
   }
 
   template<typename Tuner>
@@ -5083,19 +5214,44 @@ namespace {
     static string name() { return "transformerAttention"; }
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.transformer = defaults.transformer; return result; }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       VulkanTuneParams defaults;
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
+      naive.transformer.USE_COOPERATIVE_ATTN = 0;
       naive.transformer.ATTN_BLOCK_Q = defaults.transformer.ATTN_BLOCK_Q;
       naive.transformer.ATTN_BLOCK_KV = defaults.transformer.ATTN_BLOCK_KV;
       naive.transformer.Q_PER_THREAD = defaults.transformer.Q_PER_THREAD;
       VulkanTuneParams tiled = current;
       tiled.transformer.USE_TILED_ATTN = 1;
+      tiled.transformer.USE_COOPERATIVE_ATTN = 0;
       vector<VulkanTuneParams> configs = {tiled};
       addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{8,16,32,64,128,256}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; });
       addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{8,16,32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
+      if(context.device != nullptr && context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0) {
+        for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+          if(shape.accType != 32 || shape.MSize > 256 || shape.NSize > 128 || shape.MSize > static_cast<int>(shape.subgroupSize))
+            continue;
+          for(int qTiles: {1, 2, 4, 8, 16}) {
+            if(shape.MSize * qTiles > 256)
+              break;
+            VulkanTuneParams cooperative = current;
+            cooperative.transformer.USE_TILED_ATTN = 1;
+            cooperative.transformer.USE_COOPERATIVE_ATTN = 1;
+            cooperative.transformer.Q_PER_THREAD = 1;
+            cooperative.transformer.ATTN_BLOCK_Q = shape.MSize * qTiles;
+            cooperative.transformer.ATTN_BLOCK_KV = shape.NSize;
+            cooperative.transformer.COOP_ACC_TYPE = shape.accType;
+            cooperative.transformer.COOP_M_SIZE = shape.MSize;
+            cooperative.transformer.COOP_N_SIZE = shape.NSize;
+            cooperative.transformer.COOP_K_SIZE = shape.KSize;
+            cooperative.transformer.COOP_SUBGROUP_SIZE = shape.subgroupSize;
+            cooperative.transformer.COOP_Q_TILES_PER_WORKGROUP = qTiles;
+            configs.push_back(cooperative);
+          }
+        }
+      }
       configs.erase(remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& config) { return !isValid(config); }), configs.end());
       configs.insert(configs.begin(), naive);
       return configs;
@@ -5104,7 +5260,18 @@ namespace {
       if(context.modelInfo.transformerHeadDim <= 0 || context.modelInfo.transformerVHeadDim <= 0)
         return VK_ERROR_FEATURE_NOT_PRESENT;
       VkResult result;
-      if(config.transformer.USE_TILED_ATTN) {
+      if(config.transformer.USE_COOPERATIVE_ATTN) {
+        result = pipelines.createTransformerScaleDotProductCooperative(
+          pipelines.transformerScaleDotProductCooperative,
+          config.transformer,
+          context.modelInfo.transformerHeadDim,
+          context.modelInfo.transformerVHeadDim,
+          config.vulkan
+        );
+        if(result == VK_SUCCESS)
+          targets.push_back(&pipelines.transformerScaleDotProductCooperative);
+      }
+      else if(config.transformer.USE_TILED_ATTN) {
         result = pipelines.createTransformerScaleDotProduct(pipelines.transformerScaleDotProduct, config.transformer, context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim, config.vulkan);
         if(result == VK_SUCCESS) targets.push_back(&pipelines.transformerScaleDotProduct);
       }
@@ -5115,6 +5282,27 @@ namespace {
       return result;
     }
   };
+
+  template<>
+  bool isValidTuningConfig<TransformerTuner>(
+    const TuningContext& context,
+    const VulkanTuneParams& config
+  ) {
+    if(!config.transformer.isValid())
+      return false;
+    if(!config.transformer.USE_COOPERATIVE_ATTN)
+      return true;
+    return context.device != nullptr &&
+           config.vulkan.canUseCooperativeMatrix &&
+           config.vulkan.canUseFP16Storage &&
+           config.vulkan.canUseFP16Compute &&
+           isValidCooperativeMatrixConfig(
+             context.device->info,
+             config.transformer,
+             context.modelInfo.transformerHeadDim,
+             context.modelInfo.transformerVHeadDim
+           );
+  }
 
   struct TransformerRMSNormTuner {
     static string name() { return "transformerRMSNorm"; }
@@ -5479,7 +5667,11 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
     if((loaded.vulkan.shouldUseCooperativeMatrix &&
         !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrix)) ||
        (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-        !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)))
+        !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)) ||
+       (loaded.transformer.USE_COOPERATIVE_ATTN &&
+        !isValidCooperativeMatrixConfig(
+          deviceInfo, loaded.transformer, modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
+        )))
       throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
     if(logger != nullptr)
       logger->write("Loaded Vulkan tuning parameters from: " + filename);
@@ -5525,7 +5717,11 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
       if((loaded.vulkan.shouldUseCooperativeMatrix &&
           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrix)) ||
          (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-          !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNCHW))) {
+          !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNCHW)) ||
+         (loaded.transformer.USE_COOPERATIVE_ATTN &&
+          !isValidCooperativeMatrixConfig(
+            device->info, loaded.transformer, modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
+          ))) {
         throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
       }
     }
