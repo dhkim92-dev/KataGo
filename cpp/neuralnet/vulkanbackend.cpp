@@ -2363,7 +2363,6 @@ struct TransformerAttentionLayer {
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
   Pipeline pipeline;
   ScaleDotProductPushParam params;
-  const bool useCooperativeMatrix;
   const bool useTiled;
 
   explicit TransformerAttentionLayer(
@@ -2372,7 +2371,6 @@ struct TransformerAttentionLayer {
     const int numKVHeads
   ): 
     handle(handle),
-    useCooperativeMatrix(handle->tuneParams.vulkan.shouldUseCooperativeMatrix),
     useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0)
   {
 
@@ -2381,10 +2379,7 @@ struct TransformerAttentionLayer {
     params.numHeads = numHeads;
     params.numKVHeads = numKVHeads;
     params.scale = 1.0f / sqrtf(static_cast<float>(handle->qHeadDim));
-    if(useCooperativeMatrix) {
-      pipeline = pipelines->transformerScaleDotProductCoopmat;
-    }
-    else if(useTiled) {
+    if(useTiled) {
       pipeline = pipelines->transformerScaleDotProduct;
     } else {
       pipeline = pipelines->transformerScaleDotProductNaive;
@@ -2427,12 +2422,7 @@ struct TransformerAttentionLayer {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
-    if (useCooperativeMatrix) {
-      const auto& coopmatParams = handle->tuneParams.transformerScaleDotProductCoopmat;
-      const uint32_t numQGroups = (params.seqLen + coopmatParams.MWG - 1) / coopmatParams.MWG;
-      vkCmdDispatch(cb, numQGroups, static_cast<uint32_t>(batchSize) * params.numHeads, 1);
-    }
-    else if (useTiled) {
+    if (useTiled) {
       auto tuneParams = handle->tuneParams.transformer;
       uint32_t qPerThread = tuneParams.Q_PER_THREAD;
       uint32_t totalQPerWG = pipeline.localSizeX * qPerThread;

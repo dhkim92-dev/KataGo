@@ -329,57 +329,6 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
          );
 }
 
-bool vk_shader::tune::isValidTransformerScaleDotProductCoopmatConfig(
-  const VulkanDeviceInfo& deviceInfo,
-  const TransformerScaleDotProductCoopmatTuneParams& params,
-  int qHeadDim,
-  int vHeadDim
-) {
-  if(qHeadDim <= 0 || vHeadDim <= 0 || !params.isValid())
-    return false;
-
-  HGemmCooperativeMatrixTuneParams matrixParams;
-  matrixParams.MWARP = params.MSize;
-  matrixParams.NWARP = params.NSize;
-  matrixParams.KDIM = params.KSize;
-  matrixParams.subgroupSize = params.subgroupSize;
-  matrixParams.MWG = params.MWG;
-  matrixParams.NWG = params.NWG;
-  matrixParams.KWG = params.KWG;
-  matrixParams.MWAVE = params.MWAVE;
-  matrixParams.NWAVE = params.NWAVE;
-  matrixParams.accType = params.accType;
-  matrixParams.VWM = 1;
-  matrixParams.VWN = 1;
-  if(!isValidCooperativeMatrixConfig(deviceInfo, matrixParams))
-    return false;
-
-  const uint64_t paddedHeadDim =
-    (static_cast<uint64_t>(qHeadDim) + params.KWG - 1) / params.KWG * params.KWG;
-  const uint64_t halfElements =
-    paddedHeadDim * params.MWG +
-    paddedHeadDim * params.NWG +
-    static_cast<uint64_t>(params.MWG) * params.NWG;
-  const uint64_t accumulatorElements = static_cast<uint64_t>(params.MWG) * params.NWG;
-  const uint64_t outputAccumulatorElements = static_cast<uint64_t>(params.MWG) * vHeadDim;
-  const uint64_t floatElements =
-    outputAccumulatorElements + 6ull * params.MWG + 2ull * params.NWG;
-  const uint64_t sharedBytes =
-    halfElements * sizeof(uint16_t) +
-    accumulatorElements * (params.accType == 32 ? sizeof(float) : sizeof(uint16_t)) +
-    floatElements * sizeof(float) +
-    5ull * 4ull * sizeof(uint32_t);
-  const uint64_t localSizeX =
-    static_cast<uint64_t>(params.MWAVE / params.MSize) *
-    (params.NWAVE / params.NSize) * params.subgroupSize;
-  const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
-  return localSizeX <= limits.maxComputeWorkGroupSize[0] &&
-         1 <= limits.maxComputeWorkGroupSize[1] &&
-         1 <= limits.maxComputeWorkGroupSize[2] &&
-         localSizeX <= limits.maxComputeWorkGroupInvocations &&
-         sharedBytes <= limits.maxComputeSharedMemorySize;
-}
-
 namespace {
   const string VERSION_LINE = Global::strprintf("VERSION=%d", VulkanTuner::TUNER_VERSION);
 
@@ -605,30 +554,6 @@ bool TransformerTuneParams::isValid() const {
   return true;
 }
 
-bool TransformerScaleDotProductCoopmatTuneParams::isValid() const {
-  if(MSize <= 0 || NSize <= 0 || KSize <= 0 || subgroupSize == 0 ||
-     MWG <= 0 || NWG <= 0 || KWG <= 0 || MWAVE <= 0 || NWAVE <= 0 ||
-     (accType != 16 && accType != 32))
-    return false;
-  if(!isPositivePowerOfTwo(MSize) || !isPositivePowerOfTwo(NSize) || !isPositivePowerOfTwo(KSize))
-    return false;
-  if(!isMultipleOf(MWAVE, MSize) || !isMultipleOf(NWAVE, NSize) ||
-     !isMultipleOf(MWG, MWAVE) || !isMultipleOf(NWG, NWAVE) ||
-     !isMultipleOf(KWG, KSize))
-    return false;
-  const int subgroupCountM = MWAVE / MSize;
-  const int subgroupCountN = NWAVE / NSize;
-  const int reuseM = MWG / MWAVE;
-  const int reuseN = NWG / NWAVE;
-  const int reuseK = KWG / KSize;
-  if(!isPositivePowerOfTwo(subgroupCountM) || !isPositivePowerOfTwo(subgroupCountN) ||
-     !isPositivePowerOfTwo(reuseM) || !isPositivePowerOfTwo(reuseN) ||
-     !isPositivePowerOfTwo(reuseK))
-    return false;
-  const uint64_t localSizeX = static_cast<uint64_t>(subgroupCountM) * subgroupCountN * subgroupSize;
-  return localSizeX > 0 && localSizeX <= 1024;
-}
-
 bool TransformerRMSNormTuneParms::isValid() const {
   if(WG_C_SIZE <= 0 || WG_C_SIZE > 1024) return false;
   if((WG_C_SIZE & (WG_C_SIZE - 1)) != 0) return false;
@@ -652,8 +577,7 @@ bool VulkanTuningProfile::isValid() const {
          conv3x3.isValid(3) && conv5x5.isValid(5) && hgemmCooperativeMatrix.isValid() &&
          hgemmCooperativeMatrixNCHW.isValid() &&
          xgemm.isValid() && xgemm16.isValid() && xgemmDirect.isValid() &&
-         transformer.isValid() && transformerScaleDotProductCoopmat.isValid() &&
-         rmsNorm.isValid() && spatialRMSNorm.isValid();
+         transformer.isValid() && rmsNorm.isValid() && spatialRMSNorm.isValid();
 }
 
 bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
@@ -721,16 +645,6 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          transformer.ATTN_BLOCK_KV == other.transformer.ATTN_BLOCK_KV &&
          transformer.Q_PER_THREAD == other.transformer.Q_PER_THREAD &&
          transformer.USE_TILED_ATTN == other.transformer.USE_TILED_ATTN &&
-         transformerScaleDotProductCoopmat.MSize == other.transformerScaleDotProductCoopmat.MSize &&
-         transformerScaleDotProductCoopmat.NSize == other.transformerScaleDotProductCoopmat.NSize &&
-         transformerScaleDotProductCoopmat.KSize == other.transformerScaleDotProductCoopmat.KSize &&
-         transformerScaleDotProductCoopmat.MWG == other.transformerScaleDotProductCoopmat.MWG &&
-         transformerScaleDotProductCoopmat.NWG == other.transformerScaleDotProductCoopmat.NWG &&
-         transformerScaleDotProductCoopmat.KWG == other.transformerScaleDotProductCoopmat.KWG &&
-         transformerScaleDotProductCoopmat.MWAVE == other.transformerScaleDotProductCoopmat.MWAVE &&
-         transformerScaleDotProductCoopmat.NWAVE == other.transformerScaleDotProductCoopmat.NWAVE &&
-         transformerScaleDotProductCoopmat.subgroupSize == other.transformerScaleDotProductCoopmat.subgroupSize &&
-         transformerScaleDotProductCoopmat.accType == other.transformerScaleDotProductCoopmat.accType &&
          rmsNorm.WG_C_SIZE == other.rmsNorm.WG_C_SIZE &&
          rmsNorm.WG_XY_SIZE == other.rmsNorm.WG_XY_SIZE &&
          rmsNorm.C_PER_THREAD == other.rmsNorm.C_PER_THREAD &&
@@ -745,10 +659,6 @@ bool VulkanTuneParams::isValid() const {
   if(vulkan.shouldUseFP16Compute && !vulkan.canUseFP16Compute)
     return false;
   if(vulkan.shouldUseCooperativeMatrix && !vulkan.canUseCooperativeMatrix)
-    return false;
-  if(vulkan.shouldUseCooperativeMatrix &&
-     (!vulkan.canUseFP16Storage || !vulkan.canUseFP16Compute ||
-      !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute))
     return false;
   if(vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
      (!vulkan.canUseCooperativeMatrix ||
@@ -806,10 +716,6 @@ namespace {
 #undef WRITE_CONV
     WRITE("gPool.XYSTRIDE", profile.gPool.XYSTRIDE); WRITE("gPool.CHANNELSTRIDE", profile.gPool.CHANNELSTRIDE); WRITE("gPool.BATCHSTRIDE", profile.gPool.BATCHSTRIDE);
     WRITE("transformer.ATTN_BLOCK_Q", profile.transformer.ATTN_BLOCK_Q); WRITE("transformer.ATTN_BLOCK_KV", profile.transformer.ATTN_BLOCK_KV); WRITE("transformer.Q_PER_THREAD", profile.transformer.Q_PER_THREAD); WRITE("transformer.USE_TILED_ATTN", profile.transformer.USE_TILED_ATTN);
-    WRITE("transformerScaleDotProductCoopmat.MSize", profile.transformerScaleDotProductCoopmat.MSize); WRITE("transformerScaleDotProductCoopmat.NSize", profile.transformerScaleDotProductCoopmat.NSize); WRITE("transformerScaleDotProductCoopmat.KSize", profile.transformerScaleDotProductCoopmat.KSize);
-    WRITE("transformerScaleDotProductCoopmat.MWG", profile.transformerScaleDotProductCoopmat.MWG); WRITE("transformerScaleDotProductCoopmat.NWG", profile.transformerScaleDotProductCoopmat.NWG); WRITE("transformerScaleDotProductCoopmat.KWG", profile.transformerScaleDotProductCoopmat.KWG);
-    WRITE("transformerScaleDotProductCoopmat.MWAVE", profile.transformerScaleDotProductCoopmat.MWAVE); WRITE("transformerScaleDotProductCoopmat.NWAVE", profile.transformerScaleDotProductCoopmat.NWAVE);
-    WRITE("transformerScaleDotProductCoopmat.subgroupSize", profile.transformerScaleDotProductCoopmat.subgroupSize); WRITE("transformerScaleDotProductCoopmat.accType", profile.transformerScaleDotProductCoopmat.accType);
     WRITE("rmsNorm.WG_C_SIZE", profile.rmsNorm.WG_C_SIZE); WRITE("rmsNorm.WG_XY_SIZE", profile.rmsNorm.WG_XY_SIZE); WRITE("rmsNorm.C_PER_THREAD", profile.rmsNorm.C_PER_THREAD);
     WRITE("pointwise.ELTS_PER_THREAD", profile.pointwise.ELTS_PER_THREAD); WRITE("pointwise.LOCAL_SIZE", profile.pointwise.LOCAL_SIZE);
     WRITE("addChannelBiases.XY_ELTS_PER_THREAD", profile.addChannelBiases.XY_ELTS_PER_THREAD); WRITE("addChannelBiases.NC_ELTS_PER_THREAD", profile.addChannelBiases.NC_ELTS_PER_THREAD);
@@ -861,7 +767,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 110)
+  if(values.size() != 100)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -890,10 +796,6 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
 #undef READ_CONV
     profile.gPool.XYSTRIDE = read("gPool.XYSTRIDE"); profile.gPool.CHANNELSTRIDE = read("gPool.CHANNELSTRIDE"); profile.gPool.BATCHSTRIDE = read("gPool.BATCHSTRIDE");
     profile.transformer.ATTN_BLOCK_Q = read("transformer.ATTN_BLOCK_Q"); profile.transformer.ATTN_BLOCK_KV = read("transformer.ATTN_BLOCK_KV"); profile.transformer.Q_PER_THREAD = read("transformer.Q_PER_THREAD"); profile.transformer.USE_TILED_ATTN = read("transformer.USE_TILED_ATTN");
-    profile.transformerScaleDotProductCoopmat.MSize = read("transformerScaleDotProductCoopmat.MSize"); profile.transformerScaleDotProductCoopmat.NSize = read("transformerScaleDotProductCoopmat.NSize"); profile.transformerScaleDotProductCoopmat.KSize = read("transformerScaleDotProductCoopmat.KSize");
-    profile.transformerScaleDotProductCoopmat.MWG = read("transformerScaleDotProductCoopmat.MWG"); profile.transformerScaleDotProductCoopmat.NWG = read("transformerScaleDotProductCoopmat.NWG"); profile.transformerScaleDotProductCoopmat.KWG = read("transformerScaleDotProductCoopmat.KWG");
-    profile.transformerScaleDotProductCoopmat.MWAVE = read("transformerScaleDotProductCoopmat.MWAVE"); profile.transformerScaleDotProductCoopmat.NWAVE = read("transformerScaleDotProductCoopmat.NWAVE");
-    profile.transformerScaleDotProductCoopmat.subgroupSize = read("transformerScaleDotProductCoopmat.subgroupSize"); profile.transformerScaleDotProductCoopmat.accType = read("transformerScaleDotProductCoopmat.accType");
     profile.rmsNorm.WG_C_SIZE = read("rmsNorm.WG_C_SIZE"); profile.rmsNorm.WG_XY_SIZE = read("rmsNorm.WG_XY_SIZE"); profile.rmsNorm.C_PER_THREAD = read("rmsNorm.C_PER_THREAD");
     profile.pointwise.ELTS_PER_THREAD = read("pointwise.ELTS_PER_THREAD"); profile.pointwise.LOCAL_SIZE = read("pointwise.LOCAL_SIZE");
     profile.addChannelBiases.XY_ELTS_PER_THREAD = read("addChannelBiases.XY_ELTS_PER_THREAD"); profile.addChannelBiases.NC_ELTS_PER_THREAD = read("addChannelBiases.NC_ELTS_PER_THREAD");
@@ -1153,27 +1055,6 @@ namespace {
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
            isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
-  }
-
-  bool isValidTransformerScaleDotProductCoopmatTuneParams(
-    const TuningContext& context,
-    const TransformerScaleDotProductCoopmatTuneParams& params
-  ) {
-    return context.device != nullptr &&
-           isSupportedCooperativeMatrixShape(
-             context,
-             params.accType,
-             params.MSize,
-             params.NSize,
-             params.KSize,
-             params.subgroupSize
-           ) &&
-           isValidTransformerScaleDotProductCoopmatConfig(
-             context.device->info,
-             params,
-             context.modelInfo.transformerHeadDim,
-             context.modelInfo.transformerVHeadDim
-           );
   }
 
   template<typename Tuner>
@@ -1583,17 +1464,6 @@ namespace {
       add("ATTN_BLOCK_KV", config.transformer.ATTN_BLOCK_KV);
       add("Q_PER_THREAD", config.transformer.Q_PER_THREAD);
       add("USE_TILED_ATTN", config.transformer.USE_TILED_ATTN);
-      if(config.vulkan.shouldUseCooperativeMatrix) {
-        add("coop.MSize", config.transformerScaleDotProductCoopmat.MSize);
-        add("coop.NSize", config.transformerScaleDotProductCoopmat.NSize);
-        add("coop.KSize", config.transformerScaleDotProductCoopmat.KSize);
-        add("coop.MWG", config.transformerScaleDotProductCoopmat.MWG);
-        add("coop.NWG", config.transformerScaleDotProductCoopmat.NWG);
-        add("coop.KWG", config.transformerScaleDotProductCoopmat.KWG);
-        add("coop.MWAVE", config.transformerScaleDotProductCoopmat.MWAVE);
-        add("coop.NWAVE", config.transformerScaleDotProductCoopmat.NWAVE);
-        add("coop.accType", config.transformerScaleDotProductCoopmat.accType);
-      }
     }
     else if(tunerName == "transformerRMSNorm") {
       add("WG_C_SIZE", config.rmsNorm.WG_C_SIZE);
@@ -2623,13 +2493,7 @@ namespace {
             vBatchStride
           };
           push(params);
-          if(pipeline->name == "transformer_scale_dot_product_coopmat")
-            dispatch(
-              (pipelineXYSize + config.transformerScaleDotProductCoopmat.MWG - 1) /
-                config.transformerScaleDotProductCoopmat.MWG,
-              static_cast<uint32_t>(batchSize * heads)
-            );
-          else if(config.transformer.USE_TILED_ATTN && pipeline->name.find("naive") == string::npos)
+          if(config.transformer.USE_TILED_ATTN && pipeline->name.find("naive") == string::npos)
             dispatch((pipelineXYSize + config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD - 1) /
                        (config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD), static_cast<uint32_t>(batchSize * heads));
           else
@@ -5211,36 +5075,9 @@ namespace {
 
   struct TransformerTuner {
     static string name() { return "transformerAttention"; }
-    static bool isValid(const VulkanTuneParams& config) {
-      return config.vulkan.shouldUseCooperativeMatrix
-        ? config.transformerScaleDotProductCoopmat.isValid()
-        : config.transformer.isValid();
-    }
-    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
-      VulkanTuneParams result = current;
-      if(!current.vulkan.shouldUseCooperativeMatrix)
-        result.transformer = defaults.transformer;
-      return result;
-    }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
-      if(current.vulkan.shouldUseCooperativeMatrix) {
-        vector<VulkanTuneParams> configs = {current};
-        const vector<int> reuse = full ? vector<int>{1, 2, 4} : vector<int>{1, 2};
-        for(int reuseM: reuse) {
-          for(int reuseN: reuse) {
-            for(int reuseK: reuse) {
-              VulkanTuneParams config = current;
-              TransformerScaleDotProductCoopmatTuneParams& params = config.transformerScaleDotProductCoopmat;
-              params.MWG = params.MWAVE * reuseM;
-              params.NWG = params.NWAVE * reuseN;
-              params.KWG = params.KSize * reuseK;
-              if(isValidTransformerScaleDotProductCoopmatTuneParams(context, params))
-                configs.push_back(config);
-            }
-          }
-        }
-        return configs;
-      }
+    static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
+    static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) { VulkanTuneParams result = current; result.transformer = defaults.transformer; return result; }
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       VulkanTuneParams defaults;
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
@@ -5261,18 +5098,7 @@ namespace {
       if(context.modelInfo.transformerHeadDim <= 0 || context.modelInfo.transformerVHeadDim <= 0)
         return VK_ERROR_FEATURE_NOT_PRESENT;
       VkResult result;
-      if(config.vulkan.shouldUseCooperativeMatrix) {
-        result = pipelines.createTransformerScaleDotProductCoopmat(
-          pipelines.transformerScaleDotProductCoopmat,
-          config.transformerScaleDotProductCoopmat,
-          context.modelInfo.transformerHeadDim,
-          context.modelInfo.transformerVHeadDim,
-          config.vulkan
-        );
-        if(result == VK_SUCCESS)
-          targets.push_back(&pipelines.transformerScaleDotProductCoopmat);
-      }
-      else if(config.transformer.USE_TILED_ATTN) {
+      if(config.transformer.USE_TILED_ATTN) {
         result = pipelines.createTransformerScaleDotProduct(pipelines.transformerScaleDotProduct, config.transformer, context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim, config.vulkan);
         if(result == VK_SUCCESS) targets.push_back(&pipelines.transformerScaleDotProduct);
       }
@@ -5484,16 +5310,6 @@ namespace {
     );
     if(useHgemm) {
       config.hgemmCooperativeMatrix = cooperativeConfig.hgemmCooperativeMatrix;
-      config.transformerScaleDotProductCoopmat.MSize = config.hgemmCooperativeMatrix.MWARP;
-      config.transformerScaleDotProductCoopmat.NSize = config.hgemmCooperativeMatrix.NWARP;
-      config.transformerScaleDotProductCoopmat.KSize = config.hgemmCooperativeMatrix.KDIM;
-      config.transformerScaleDotProductCoopmat.MWG = config.hgemmCooperativeMatrix.MWG;
-      config.transformerScaleDotProductCoopmat.NWG = config.hgemmCooperativeMatrix.NWG;
-      config.transformerScaleDotProductCoopmat.KWG = config.hgemmCooperativeMatrix.KWG;
-      config.transformerScaleDotProductCoopmat.MWAVE = config.hgemmCooperativeMatrix.MWAVE;
-      config.transformerScaleDotProductCoopmat.NWAVE = config.hgemmCooperativeMatrix.NWAVE;
-      config.transformerScaleDotProductCoopmat.subgroupSize = config.hgemmCooperativeMatrix.subgroupSize;
-      config.transformerScaleDotProductCoopmat.accType = config.hgemmCooperativeMatrix.accType;
       config.vulkan.shouldUseCooperativeMatrix = true;
       config.vulkan.shouldUseFP16Compute = true;
     }
@@ -5655,13 +5471,7 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
        loaded.vulkan.canUseSubgroup != available.canUseSubgroup)
       throw IOError("Vulkan tuning capabilities changed for " + filename);
     if((loaded.vulkan.shouldUseCooperativeMatrix &&
-        (!isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrix) ||
-         !isValidTransformerScaleDotProductCoopmatConfig(
-           deviceInfo,
-           loaded.transformerScaleDotProductCoopmat,
-           modelInfo.transformerHeadDim,
-           modelInfo.transformerVHeadDim
-         ))) ||
+        !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrix)) ||
        (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)))
       throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
@@ -5707,13 +5517,7 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
         throw IOError("Vulkan tuning capabilities changed for " + filename);
       }
       if((loaded.vulkan.shouldUseCooperativeMatrix &&
-          (!isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrix) ||
-           !isValidTransformerScaleDotProductCoopmatConfig(
-             device->info,
-             loaded.transformerScaleDotProductCoopmat,
-             modelInfo.transformerHeadDim,
-             modelInfo.transformerVHeadDim
-           ))) ||
+          !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrix)) ||
          (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNCHW))) {
         throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
