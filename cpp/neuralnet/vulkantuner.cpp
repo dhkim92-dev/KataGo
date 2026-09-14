@@ -5087,8 +5087,8 @@ namespace {
       VulkanTuneParams tiled = current;
       tiled.transformer.USE_TILED_ATTN = 1;
       vector<VulkanTuneParams> configs = {tiled};
-      addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{16,32,64,128,256}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; });
-      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{16,32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128,256} : vector<int>{8,16,32,64,128,256}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_Q = v; });
+      addCandidates(configs, full ? vector<int>{8,16,32,64,128} : vector<int>{8,16,32,64,128}, [](VulkanTuneParams& p, int v) { p.transformer.ATTN_BLOCK_KV = v; });
       addCandidates(configs, full ? vector<int>{1,2,4,8} : vector<int>{1,2,4}, [](VulkanTuneParams& p, int v) { p.transformer.Q_PER_THREAD = v; });
       configs.erase(remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& config) { return !isValid(config); }), configs.end());
       configs.insert(configs.begin(), naive);

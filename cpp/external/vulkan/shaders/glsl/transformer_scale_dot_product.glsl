@@ -161,7 +161,11 @@ void main() {
       }
     }
 
-    barrier();
+    // The next iteration overwrites the shared tiles. Synchronize only when
+    // another iteration will actually read them; the final tile has no later
+    // shared-memory consumer before this workgroup exits.
+    if(kvStart + ATTN_BLOCK_KV < seqLen)
+      barrier();
   }
 
   // Write output for all Q_PER_THREAD positions
