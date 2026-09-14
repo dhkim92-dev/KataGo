@@ -1792,6 +1792,8 @@ namespace {
           return binding < 2;
         if(name.find("transformer_spatial_rms_norm_reduce") == 0)
           return false;
+        if(name.find("transformer_scale_dot_product") == 0 && binding >= 5)
+          return false;
         return config.vulkan.shouldUseFP16Storage;
       };
       vector<float> gemmInput, gemmFilter;
@@ -2490,7 +2492,11 @@ namespace {
             0,
             qBatchStride,
             kBatchStride,
-            vBatchStride
+            vBatchStride,
+            0,
+            0,
+            std::max(1, context.modelInfo.transformerHeadDim) / 2,
+            0
           };
           push(params);
           if(config.transformer.USE_TILED_ATTN && pipeline->name.find("naive") == string::npos)

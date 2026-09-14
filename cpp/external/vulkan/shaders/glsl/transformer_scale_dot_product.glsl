@@ -1,4 +1,5 @@
 #include "common.glsl"
+#include "transformer_rope.glsl"
 
 layout(constant_id=3) const int ATTN_BLOCK_Q = 32;
 layout(constant_id=4) const int ATTN_BLOCK_KV = 32;
@@ -27,6 +28,14 @@ layout(set = 0, binding = 4) readonly buffer Mask {
     realstore mask[];
 };
 
+layout(set = 0, binding = 5) readonly buffer RopeCosine {
+    float ropeCosTable[];
+};
+
+layout(set = 0, binding = 6) readonly buffer RopeSine {
+    float ropeSinTable[];
+};
+
 layout(push_constant) uniform ScaleDotProductAttentionParams {
     int seqLen;
     int numHeads;
@@ -38,10 +47,15 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
     int qBatchStride;
     int kBatchStride;
     int vBatchStride;
+    int useRope;
+    int learnableRope;
+    int ropeNumPairs;
+    int ropeReserved;
 };
 
-// Store tiles as [dimension][key position]. This preserves coalesced global
-// loads while making cooperative shared-memory stores linear in t.
+// Store tiles as [dimension][key position]. This preserves the original
+// coalesced global-load mapping. RoPE is applied after the complete K tile is
+// visible to the workgroup, so paired dimensions do not change the load map.
 shared float kTile[ATTN_HEAD_DIM * ATTN_BLOCK_KV];
 shared float vTile[ATTN_V_HEAD_DIM * ATTN_BLOCK_KV];
 shared float kMaskTile[ATTN_BLOCK_KV];
@@ -74,6 +88,23 @@ void main() {
         for(int d = 0; d < ATTN_HEAD_DIM; d++) {
           q[qi * ATTN_HEAD_DIM + d] = LOAD(Q, qBatchBase + qOffset + (h * ATTN_HEAD_DIM + d) * seqLen + qPos);
         }
+        if(useRope != 0) {
+          int ropeTableHead = h * numKVHeads / numHeads;
+          for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
+            int d0 = pairIdx * 2;
+            int d1 = d0 + 1;
+            int tableIdx = learnableRope != 0
+              ? (ropeTableHead * ropeNumPairs + pairIdx) * seqLen + qPos
+              : pairIdx * seqLen + qPos;
+            float cosVal = ropeCosTable[tableIdx];
+            float sinVal = ropeSinTable[tableIdx];
+            float q0 = q[qi * ATTN_HEAD_DIM + d0];
+            float q1 = q[qi * ATTN_HEAD_DIM + d1];
+            applyTransformerRoPE(q0, q1, cosVal, sinVal);
+            q[qi * ATTN_HEAD_DIM + d0] = q0;
+            q[qi * ATTN_HEAD_DIM + d1] = q1;
+          }
+        }
       }
     }
     runningMax[qi] = -1e30f;
@@ -90,7 +121,7 @@ void main() {
       // The global buffers are laid out as [head, dim, sequence]. Map the
       // linear load so neighboring invocations read neighboring sequence
       // positions for the same dimension. The shared tile is laid out as
-      // [dimension, sequence] so each invocation stores a linear element.
+      // [dimension, sequence].
       int tileD = t / ATTN_BLOCK_KV;
       int tileKPos = t % ATTN_BLOCK_KV;
       int globalKPos = kvStart + tileKPos;
@@ -125,6 +156,28 @@ void main() {
     }
 
     barrier();
+
+    if(useRope != 0) {
+      int ropeAwarePairCount = min(ropeNumPairs, ATTN_HEAD_DIM / 2);
+      for(int t = localIdx; t < ATTN_BLOCK_KV * ropeAwarePairCount; t += ATTN_BLOCK_Q) {
+        int pairIdx = t / ATTN_BLOCK_KV;
+        int tileKPos = t % ATTN_BLOCK_KV;
+        int globalKPos = kvStart + tileKPos;
+        if(globalKPos < seqLen) {
+          int d0 = pairIdx * 2;
+          int d1 = d0 + 1;
+          float k0 = kTile[d0 * ATTN_BLOCK_KV + tileKPos];
+          float k1 = kTile[d1 * ATTN_BLOCK_KV + tileKPos];
+          int tableIdx = learnableRope != 0
+            ? (kvh * ropeNumPairs + pairIdx) * seqLen + globalKPos
+            : pairIdx * seqLen + globalKPos;
+          applyTransformerRoPE(k0, k1, ropeCosTable[tableIdx], ropeSinTable[tableIdx]);
+          kTile[d0 * ATTN_BLOCK_KV + tileKPos] = k0;
+          kTile[d1 * ATTN_BLOCK_KV + tileKPos] = k1;
+        }
+      }
+      barrier();
+    }
 
     int kvEnd = min(ATTN_BLOCK_KV, seqLen - kvStart);
 

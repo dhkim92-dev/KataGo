@@ -2397,10 +2397,15 @@ struct TransformerAttentionLayer {
     VulkanBuffer* packedQKV,
     VulkanBuffer* output,
     VulkanBuffer* mask,
+    VulkanBuffer* ropeCosTable,
+    VulkanBuffer* ropeSinTable,
     const int qOffset,
     const int kOffset,
     const int vOffset,
-    const int batchStride
+    const int batchStride,
+    const bool useRope,
+    const bool learnableRope,
+    const int ropeNumPairs
   ) {
     auto writeDescriptors = {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, packedQKV),
@@ -2408,6 +2413,8 @@ struct TransformerAttentionLayer {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, packedQKV),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, output),
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 5, ropeCosTable),
+      vk_helper::writeDescriptorSetBuffer(descriptorSet, 6, ropeSinTable),
     };
     vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
 
@@ -2417,6 +2424,10 @@ struct TransformerAttentionLayer {
     params.qBatchStride = batchStride;
     params.kBatchStride = batchStride;
     params.vBatchStride = batchStride;
+    params.useRope = useRope ? 1 : 0;
+    params.learnableRope = learnableRope ? 1 : 0;
+    params.ropeNumPairs = ropeNumPairs;
+    params.ropeReserved = 0;
 
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
@@ -2457,15 +2468,35 @@ struct TransformerAttentionLayer {
     VulkanBuffer* packedQKV,
     VulkanBuffer* output,
     VulkanBuffer* mask,
+    VulkanBuffer* ropeCosTable,
+    VulkanBuffer* ropeSinTable,
     const int qOffset,
     const int kOffset,
     const int vOffset,
-    const int batchStride
+    const int batchStride,
+    const bool useRope,
+    const bool learnableRope,
+    const int ropeNumPairs
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for TransformerAttentionLayer", res);
-    forward(commandBuffer, batchSize, packedQKV, output, mask, qOffset, kOffset, vOffset, batchStride);
+    forward(
+      commandBuffer,
+      batchSize,
+      packedQKV,
+      output,
+      mask,
+      ropeCosTable,
+      ropeSinTable,
+      qOffset,
+      kOffset,
+      vOffset,
+      batchStride,
+      useRope,
+      learnableRope,
+      ropeNumPairs
+    );
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerAttentionLayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
@@ -2939,8 +2970,6 @@ struct TransformerAttentionBlock {
   TransformerRMSNormLayer* preLN;
   TransformerMatMulLayer* qkvProj;
   TransformerMatMulLayer* outProj;
-  TransformerApplyRoPELayer* qRoPE;
-  TransformerApplyRoPELayer* kRoPE;
   TransformerAttentionLayer* attention;
 
   // RoPE data
@@ -2981,26 +3010,28 @@ struct TransformerAttentionBlock {
     ropeCosTable(nullptr),
     ropeSinTable(nullptr),
     ropeNumPairs(0),
-    qRoPE( useRope ? new TransformerApplyRoPELayer(handle) : nullptr ),
-    kRoPE( useRope ? new TransformerApplyRoPELayer(handle) : nullptr ),
     attention(new TransformerAttentionLayer(handle, numHeads, numKVHeads))
   {
     qkvProjDesc.releaseWeights();
+    ropeNumPairs = qHeadDim / 2;
+    vector<float> cosTableData;
+    vector<float> sinTableData;
     if ( useRope ) {
-      ropeNumPairs = qHeadDim/2;
-
-      vector<float> cosTableData;
-      vector<float> sinTableData;
       desc->computeRopeCosSin(nnXLen, nnYLen, paddedNNXYLen, cosTableData, sinTableData);
-      bool useFP16 = false;
-      VkResult res;
-      ropeCosTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, cosTableData, useFP16, &res);
-      CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeCosTalbe", res);
-      ropeSinTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, sinTableData, useFP16, &res);
-      CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeSinTalbe", res);
     }
-
+    else {
+      // Attention always has the RoPE descriptor bindings. These tables are
+      // never read when useRope is false, but still need valid descriptors.
+      cosTableData = {1.0f};
+      sinTableData = {0.0f};
+    }
+    bool useFP16 = false;
     VkResult res;
+    ropeCosTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, cosTableData, useFP16, &res);
+    CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeCosTable", res);
+    ropeSinTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, sinTableData, useFP16, &res);
+    CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeSinTable", res);
+
     pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock() allocate pointwise descriptorset]", res);
   }
@@ -3013,13 +3044,6 @@ struct TransformerAttentionBlock {
       vk_helper::releaseVulkanBuffer(handle->vulkanDevice, ropeSinTable);
     }
 
-    if ( kRoPE ) {
-      delete kRoPE;
-    }
-
-    if ( qRoPE) {
-      delete qRoPE;
-    }
     delete preLN;
     delete outProj;
     delete qkvProj;
@@ -3054,24 +3078,30 @@ struct TransformerAttentionBlock {
     );
     qkvProj->forward(cb, batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
-    // Step 3: Apply RoPE to Q and K
-    if(useRope) {
-      int learnableInt = learnableRope ? 1 : 0;
-
-      // Apply to Q - Q is (N, numHeads*qHeadDim, HW), reshape as (N*numHeads, qHeadDim, HW)
-      qRoPE->forward(cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, qOffset, packedBatchStride );
-      vk_helper::barrierCommandBufferForBuffer(cb, packedQKV.buf);
-      // Apply to K
-      kRoPE->forward(cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, kOffset, packedBatchStride);
-      vk_helper::barrierCommandBufferForBuffer(cb, packedQKV.buf);
-    }
-    // Step 4: Scaled dot product attention
+    // Step 3: Scaled dot product attention. Q/K RoPE is applied while the
+    // attention shader loads the values, avoiding two extra dispatches and
+    // in-place writes to packedQKV.
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
-    attention->forward(cb, batchSize, packedQKV.buf, attnOut.buf, mask, qOffset, kOffset, vOffset, packedBatchStride);
+    attention->forward(
+      cb,
+      batchSize,
+      packedQKV.buf,
+      attnOut.buf,
+      mask,
+      ropeCosTable,
+      ropeSinTable,
+      qOffset,
+      kOffset,
+      vOffset,
+      packedBatchStride,
+      useRope,
+      learnableRope,
+      ropeNumPairs
+    );
     vk_helper::barrierCommandBufferForBuffer(cb, attnOut.buf);
-    // Step 5: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
+    // Step 4: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
     outProj->forward(cb, batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
-    // Step 6: Add residual: trunk += trunkScratch
+    // Step 5: Add residual: trunk += trunkScratch
     performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"), false);
   }
 
@@ -3102,14 +3132,22 @@ struct TransformerAttentionBlock {
 
     qkvProj->debug(batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
-    if(useRope) {
-      int learnableInt = learnableRope ? 1 : 0;
-      qRoPE->debug(batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, qOffset, packedBatchStride);
-      kRoPE->debug(batchSize, packedQKV.buf, ropeCosTable, ropeSinTable, numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs, learnableInt, kOffset, packedBatchStride);
-    }
-
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
-    attention->debug(batchSize, packedQKV.buf, attnOut.buf, mask, qOffset, kOffset, vOffset, packedBatchStride);
+    attention->debug(
+      batchSize,
+      packedQKV.buf,
+      attnOut.buf,
+      mask,
+      ropeCosTable,
+      ropeSinTable,
+      qOffset,
+      kOffset,
+      vOffset,
+      packedBatchStride,
+      useRope,
+      learnableRope,
+      ropeNumPairs
+    );
     outProj->debug(batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
 
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;

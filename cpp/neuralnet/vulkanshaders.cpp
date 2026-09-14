@@ -1365,10 +1365,10 @@ namespace vk_shader {
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("transformer_scale_dot_product_p16s16", shaderModule_transformer_scale_dot_product_p16s16, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("transformer_scale_dot_product_p32s16", shaderModule_transformer_scale_dot_product_p32s16, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("transformer_scale_dot_product_p16s16", shaderModule_transformer_scale_dot_product_p16s16, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_scale_dot_product_p32s16", shaderModule_transformer_scale_dot_product_p32s16, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("transformer_scale_dot_product_fp32", shaderModule_transformer_scale_dot_product_fp32, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("transformer_scale_dot_product_fp32", shaderModule_transformer_scale_dot_product_fp32, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {
@@ -1381,10 +1381,10 @@ namespace vk_shader {
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("transformer_scale_dot_product_naive_p16s16", shaderModule_transformer_scale_dot_product_naive_p16s16, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("transformer_scale_dot_product_naive_p32s16", shaderModule_transformer_scale_dot_product_naive_p32s16, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("transformer_scale_dot_product_naive_p16s16", shaderModule_transformer_scale_dot_product_naive_p16s16, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_scale_dot_product_naive_p32s16", shaderModule_transformer_scale_dot_product_naive_p32s16, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("transformer_scale_dot_product_naive_fp32", shaderModule_transformer_scale_dot_product_naive_fp32, 5, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("transformer_scale_dot_product_naive_fp32", shaderModule_transformer_scale_dot_product_naive_fp32, 7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createTransformerSwiGLU(Pipeline& pipeline, const AddPointWiseTuneParams& tuneParams, const VulkanParams& vulkanParams) {

@@ -1216,6 +1216,10 @@ struct LocalDimHash {
       int qBatchStride;
       int kBatchStride;
       int vBatchStride;
+      int useRope;
+      int learnableRope;
+      int ropeNumPairs;
+      int ropeReserved;
     };
 
     struct TransformerSwiGLUPushParams {
