@@ -614,7 +614,10 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
     VulkanBuffer* mainProj,
     VulkanBuffer* gateProj,
     VulkanBuffer* output,
-    int totalSize
+    int totalSize,
+    int packedInputBatchStride,
+    int outputBatchStride,
+    int batchCount
   ) {
     auto writeDescriptorSets = {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mainProj),
@@ -624,22 +627,34 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
 
     vk_helper::updateDescriptorSets(device, writeDescriptorSets);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    auto params = vk_shader::push::TransformerSwiGLUPushParams();
-    params.size = totalSize;
-    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
-
     int eltsPerThread = tuneParams.pointwise.ELTS_PER_THREAD;
-    size_t numThreads = ((size_t)totalSize + eltsPerThread - 1) / eltsPerThread;
-
     static constexpr int nKernelDims = 1;
-    size_t globalSizes[nKernelDims] = {vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX)};
-    size_t localSizes[nKernelDims] = {pipeline.localSizeX};
-    uint32_t wgCountX = ( globalSizes[0] + localSizes[0] - 1 ) / localSizes[0];
-    uint32_t wgCountY = 1;
-    uint32_t wgCountZ = 1;
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    const bool usePackedBatches = packedInputBatchStride > 0;
+    const int dispatchSize = usePackedBatches ? outputBatchStride : totalSize;
+    const int dispatchCount = usePackedBatches ? batchCount : 1;
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
+    for(int batchIndex = 0; batchIndex < dispatchCount; batchIndex++) {
+      auto params = vk_shader::push::TransformerSwiGLUPushParams();
+      params.size = dispatchSize;
+      params.packedInputBatchStride = usePackedBatches ? packedInputBatchStride : 0;
+      params.outputBatchStride = usePackedBatches ? outputBatchStride : 0;
+      params.batchIndex = usePackedBatches ? batchIndex : 0;
+      vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+
+      size_t numThreads = ((size_t)dispatchSize + eltsPerThread - 1) / eltsPerThread;
+      size_t globalSizes[nKernelDims] = {vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX)};
+      size_t localSizes[nKernelDims] = {pipeline.localSizeX};
+      uint32_t wgCountX = ( globalSizes[0] + localSizes[0] - 1 ) / localSizes[0];
+      vkCmdDispatch(cb, wgCountX, 1, 1);
+      vk_helper::barrierCommandBufferForBuffer(
+        cb,
+        output,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+      );
+    }
   }
 
 

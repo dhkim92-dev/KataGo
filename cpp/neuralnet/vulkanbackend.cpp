@@ -2971,6 +2971,55 @@ static MatMulLayerDesc makePackedQKVDesc(
   return result;
 }
 
+static MatMulLayerDesc makePackedFFNDesc(
+  const TransformerFFNDesc* desc,
+  const int physicalOutChannels
+) {
+  if(!desc->useSwiGLU)
+    throw StringError("Non-SwiGLU transformer FFN is not yet supported in Vulkan backend");
+
+  const MatMulLayerDesc& linearDesc = desc->linear1;
+  const MatMulLayerDesc& gateDesc = desc->linearGate;
+  testAssert(linearDesc.inChannels == gateDesc.inChannels);
+  testAssert(linearDesc.outChannels == gateDesc.outChannels);
+  testAssert(linearDesc.inChannels == desc->numChannels);
+  testAssert(linearDesc.outChannels == desc->ffnChannels);
+  testAssert(linearDesc.weights.size() == static_cast<size_t>(linearDesc.inChannels * linearDesc.outChannels));
+  testAssert(gateDesc.weights.size() == static_cast<size_t>(gateDesc.inChannels * gateDesc.outChannels));
+  testAssert(physicalOutChannels >= linearDesc.outChannels + gateDesc.outChannels);
+
+  MatMulLayerDesc result;
+  result.name = linearDesc.name + "_packed_linear_gate";
+  result.inChannels = linearDesc.inChannels;
+  result.outChannels = physicalOutChannels;
+  result.weights.assign(
+    static_cast<size_t>(result.inChannels) * static_cast<size_t>(result.outChannels),
+    0.0f
+  );
+
+  for(int ic = 0; ic < result.inChannels; ic++) {
+    const size_t linearSrcBase = static_cast<size_t>(ic) * linearDesc.outChannels;
+    const size_t gateSrcBase = static_cast<size_t>(ic) * gateDesc.outChannels;
+    const size_t dstBase = static_cast<size_t>(ic) * result.outChannels;
+    for(int oc = 0; oc < linearDesc.outChannels; oc++)
+      result.weights[dstBase + oc] = linearDesc.weights[linearSrcBase + oc];
+    for(int oc = 0; oc < gateDesc.outChannels; oc++)
+      result.weights[dstBase + linearDesc.outChannels + oc] = gateDesc.weights[gateSrcBase + oc];
+  }
+  return result;
+}
+
+static int getPackedFFNOutChannels(
+  const ComputeHandleInternal* handle,
+  const TransformerFFNDesc* desc
+) {
+  return getPackedQKVOutChannels(
+    handle,
+    desc->linear1.inChannels,
+    desc->linear1.outChannels + desc->linearGate.outChannels
+  );
+}
+
 struct TransformerAttentionBlock {
   ComputeHandleInternal *handle;
   const std::string name;
@@ -3192,12 +3241,12 @@ struct TransformerFFNBlock {
   const std::string name;
   const int numChannels;
   const int ffnChannels;
-  const bool useSwiGLU;
   const int paddedNNXYLen;
+  const int packedOutChannels;
 
+  MatMulLayerDesc packedLinearDesc;
   TransformerRMSNormLayer* preLN;
-  TransformerMatMulLayer* linear1;
-  std::unique_ptr<TransformerMatMulLayer> linearGate;
+  TransformerMatMulLayer* linear1AndGate;
   TransformerMatMulLayer* linear2;
 
   VkDescriptorSet pointwiseDS;
@@ -3211,18 +3260,16 @@ struct TransformerFFNBlock {
     name(desc->name),
     numChannels(desc->numChannels),
     ffnChannels(desc->ffnChannels),
-    useSwiGLU(desc->useSwiGLU),
     paddedNNXYLen(handle->paddedNNXYLen),
+    packedOutChannels(getPackedFFNOutChannels(handle, desc)),
+    packedLinearDesc(makePackedFFNDesc(desc, packedOutChannels)),
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
-    linear1(new TransformerMatMulLayer(handle, &desc->linear1)),
+    linear1AndGate(new TransformerMatMulLayer(handle, &packedLinearDesc)),
     linear2(new TransformerMatMulLayer(handle, &desc->linear2)),
     pointwiseDS(VK_NULL_HANDLE),
     swigluDS(VK_NULL_HANDLE)
   {
-    if(!useSwiGLU) {
-      throw StringError("Non-SwiGLU transformer FFN is not yet supported in Vulkan backend");
-    }
-    linearGate = std::make_unique<TransformerMatMulLayer>(handle, &desc->linearGate);
+    packedLinearDesc.releaseWeights();
     VkResult res;
     pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate pointwiseDS", res);
@@ -3233,9 +3280,8 @@ struct TransformerFFNBlock {
 
    ~TransformerFFNBlock() {
     delete preLN;
-    delete linear1;
+    delete linear1AndGate;
     delete linear2;
-    linearGate.reset();
   }
 
   void forward(
@@ -3251,18 +3297,19 @@ struct TransformerFFNBlock {
      // Step 1: RMSNorm
     preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
 
-    // Step 2: linear1 projection -> ffn buffer
-    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
-    linear1->forward(cb, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+    // Step 2: compute the linear and gate projections together into [linear | gate | padding].
+    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
+    linear1AndGate->forward(cb, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
 
-    // Non-SwiGLU FFN is rejected at construction, so useSwiGLU is guaranteed true here.
-    // Step 2b: gate projection
-    SizedBuf<VulkanBuffer*> gateBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
-    linearGate->forward(cb, batchSize, trunkScratch, gateBuf.buf, mask, convWorkspace);
-
-    // Step 3: SwiGLU: output = SiLU(linear1) * gate (no mask needed, inputs already masked)
+    // Step 3: apply SwiGLU in place and compact the batch outputs for linear2.
     int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-    vkcompute::doSwiGLU(handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU, handle->tuneParams, ffnBuf.buf, gateBuf.buf, ffnBuf.buf, totalSize);
+    int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
+    int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+    vkcompute::doSwiGLU(
+      handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU,
+      handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnBuf.buf, totalSize,
+      packedInputBatchStride, outputBatchStride, batchSize
+    );
     // Step 4: linear2 projection: ffnBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
     linear2->forward(cb, batchSize, ffnBuf.buf, trunkScratch, mask, convWorkspace);
 
@@ -3282,17 +3329,20 @@ struct TransformerFFNBlock {
     (void)maskSum;
     preLN->debug(batchSize, trunk, trunkScratch, mask);
 
-    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
-    linear1->debug(batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
-
-    SizedBuf<VulkanBuffer*> gateBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
-    linearGate->debug(batchSize, trunkScratch, gateBuf.buf, mask, convWorkspace);
+    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
+    linear1AndGate->debug(batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
 
     int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+    int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
+    int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
     VkCommandBuffer swigluCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(swigluCB);
     CHECK_VK_MSG("Begin command buffer for TransformerFFNBlock SwiGLU", res);
-    vkcompute::doSwiGLU(handle->vulkanDevice, swigluCB, swigluDS, handle->pipelines->transformerSwiGLU, handle->tuneParams, ffnBuf.buf, gateBuf.buf, ffnBuf.buf, totalSize);
+    vkcompute::doSwiGLU(
+      handle->vulkanDevice, swigluCB, swigluDS, handle->pipelines->transformerSwiGLU,
+      handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnBuf.buf, totalSize,
+      packedInputBatchStride, outputBatchStride, batchSize
+    );
     res = vk_helper::endCommandBuffer(swigluCB);
     CHECK_VK_MSG("End command buffer for TransformerFFNBlock SwiGLU", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {swigluCB});
@@ -3306,9 +3356,7 @@ struct TransformerFFNBlock {
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
     ConvWorkspaceEltsNeeded maxElts;
-    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linear1->requiredConvWorkspaceElts(handle, maxBatchSize));
-    if(linearGate)
-      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linearGate->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linear1AndGate->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, linear2->requiredConvWorkspaceElts(handle, maxBatchSize));
     return maxElts;
   }

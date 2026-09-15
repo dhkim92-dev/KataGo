@@ -165,7 +165,10 @@ namespace vkcompute {
     VulkanBuffer* mainProj,
     VulkanBuffer* gateProj,
     VulkanBuffer* output,
-    int totalSize
+    int totalSize,
+    int packedInputBatchStride = 0,
+    int outputBatchStride = 0,
+    int batchCount = 0
   );
 }
 

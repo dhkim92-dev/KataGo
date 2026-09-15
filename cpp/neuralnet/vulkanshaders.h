@@ -1252,6 +1252,9 @@ struct LocalDimHash {
 
     struct TransformerSwiGLUPushParams {
       int size;
+      int packedInputBatchStride;
+      int outputBatchStride;
+      int batchIndex;
     };
 
     struct TransformerSpatialRMSNormApplyPushParams {
