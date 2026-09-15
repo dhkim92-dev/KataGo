@@ -101,6 +101,10 @@ namespace vk_shader {
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+  DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
+  DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
+  DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
+  DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DEFINE_HGEMM_WIDTH_VARIANTS
 #undef DEFINE_HGEMM_VARIANT
@@ -485,6 +489,10 @@ namespace vk_shader {
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1, hgemm_cooperative_matrix_acc_fp32_sa1_sb1)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0, hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1, hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
+      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1},
       {spirv_sum_channels_fp32, spirv_sum_channels_fp32_size, &shaderModule_sum_channels_fp32},
       {spirv_sum_channels_p32s16, spirv_sum_channels_p32s16_size, &shaderModule_sum_channels_p32s16},
       {spirv_transformer_apply_rope_fp32, spirv_transformer_apply_rope_fp32_size, &shaderModule_transformer_apply_rope_fp32},
@@ -607,6 +615,18 @@ namespace vk_shader {
        tuneParams.vulkan.shouldUseFP16Compute &&
        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
       if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
+    }
+    if(tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU) {
+      if(!tuneParams.vulkan.canUseCooperativeMatrix ||
+         !tuneParams.vulkan.canUseFP16Storage ||
+         !tuneParams.vulkan.canUseFP16Compute ||
+         !tuneParams.vulkan.shouldUseFP16Storage ||
+         !tuneParams.vulkan.shouldUseFP16Compute)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      if((result = createTransformerDualGemmSwiGLU(
+           transformerDualGemmSwiGLU, tuneParams.transformerDualGemmSwiGLU
+         )) != VK_SUCCESS)
+        return result;
     }
     // Tile base conv no longer used.
     // createConv2dFp32();
@@ -731,6 +751,7 @@ namespace vk_shader {
     destroyPipeline(transformerScaleDotProductCooperative);
     destroyPipeline(transformerScaleDotProductNaive);
     destroyPipeline(transformerSwiGLU);
+    destroyPipeline(transformerDualGemmSwiGLU);
     destroyPipeline(transformerSpatialRMSNormApply);
     destroyPipeline(transformerSpatialRMSNormReduce);
     destroyPipeline(transformerSpatialRMSNormSumSq);
@@ -1081,6 +1102,76 @@ namespace vk_shader {
       shaderModules[variant],
       3,
       sizeof(HGemmCooperativeMatrixNCHWParams),
+      pipeline,
+      &specData.info,
+      spec.localSizeX,
+      spec.localSizeY,
+      spec.localSizeZ,
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+    );
+  }
+
+  VkResult ComputePipelines::createTransformerDualGemmSwiGLU(
+    Pipeline& pipeline,
+    const TransformerDualGemmSwiGLUTuneParams& tuneParams
+  ) {
+    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams) ||
+       (tuneParams.accType != 16 && tuneParams.accType != 32) ||
+       (tuneParams.SB != 0 && tuneParams.SB != 1) ||
+       tuneParams.VWM != 1 || tuneParams.VWN != 1)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+    const uint64_t accumulatorTileBytes =
+      2ull * static_cast<uint64_t>(tuneParams.MWG) * tuneParams.NWG *
+      (tuneParams.accType == 32 ? sizeof(float) : sizeof(uint16_t));
+    const uint64_t sharedFilterBytes = tuneParams.SB == 1
+      ? 2ull * static_cast<uint64_t>(tuneParams.KWG) * tuneParams.NWG * sizeof(uint16_t)
+      : 0;
+    const uint64_t sharedAlignmentBytes = 16ull * (2 + 2 * tuneParams.SB);
+    if(accumulatorTileBytes + sharedFilterBytes + sharedAlignmentBytes >
+       deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+    HGemmCooperativeMatrixNCHWSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MWARP;
+    spec.NSize = tuneParams.NWARP;
+    spec.KSize = tuneParams.KDIM;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    SpecializationData specData(spec);
+
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    const char* shaderName = nullptr;
+    if(tuneParams.accType == 32) {
+      if(tuneParams.SB == 1) {
+        shaderName = "transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1";
+        shaderModule = shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1;
+      }
+      else {
+        shaderName = "transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0";
+        shaderModule = shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0;
+      }
+    }
+    else if(tuneParams.SB == 1) {
+      shaderName = "transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1";
+      shaderModule = shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1;
+    }
+    else {
+      shaderName = "transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0";
+      shaderModule = shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0;
+    }
+
+    return createPipeline(
+      shaderName,
+      shaderModule,
+      3,
+      sizeof(TransformerDualGemmSwiGLUPushParams),
       pipeline,
       &specData.info,
       spec.localSizeX,

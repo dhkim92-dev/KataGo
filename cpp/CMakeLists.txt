@@ -902,7 +902,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
   file(MAKE_DIRECTORY ${GENERATED_DIR})
 
   # Collect GLSL compute shader files (.comp)
-  file(GLOB VK_GLSL_FILES "${VK_SHADER_SRC_DIR}/*.comp")
+  file(GLOB VK_GLSL_FILES CONFIGURE_DEPENDS "${VK_SHADER_SRC_DIR}/*.comp")
   # Collect header dependencies for proper rebuilds
   file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.glsl")
 

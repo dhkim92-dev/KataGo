@@ -1,4 +1,4 @@
-// The packed FFN path binds all three descriptors to the same buffer.
+// The packed FFN path binds the main and gate descriptors to the same input buffer.
 #extension GL_EXT_spirv_intrinsics : require
 #define SPV_DECORATION_ALIASED 20
 
@@ -28,26 +28,22 @@ layout(push_constant) uniform TransformerSwiGLUParams {
   int size;
   int packedInputBatchStride;
   int outputBatchStride;
-  int batchIndex;
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
   const int tileStart = int(gl_WorkGroupID.x) * int(gl_WorkGroupSize.x) * ELTS_PER_THREAD;
   const int lid = int(gl_LocalInvocationID.x);
+  const int batchIndex = packedInputBatchStride > 0 ? int(gl_WorkGroupID.y) : 0;
+  const int inputBase = batchIndex * packedInputBatchStride;
+  const int outputBase = batchIndex * outputBatchStride;
 
   for ( int d = 0 ; d < ELTS_PER_THREAD ; d++ ) {
     int s = tileStart + d * int(gl_WorkGroupSize.x) + lid;
     if ( s < size ) {
-      int mainIndex = s;
-      int gateIndex = s;
-      int outputIndex = s;
-      if ( packedInputBatchStride > 0 ) {
-        int inputBase = batchIndex * packedInputBatchStride;
-        mainIndex = inputBase + s;
-        gateIndex = inputBase + outputBatchStride + s;
-        outputIndex = batchIndex * outputBatchStride + s;
-      }
+      int mainIndex = inputBase + s;
+      int gateIndex = packedInputBatchStride > 0 ? inputBase + outputBatchStride + s : s;
+      int outputIndex = outputBase + s;
       float a = LOAD(main_proj, mainIndex);
       float b = LOAD(gate_proj, gateIndex);
       float silu_a = a / (1.0f + exp(-a));

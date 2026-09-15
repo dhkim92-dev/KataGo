@@ -31,6 +31,7 @@ const int HEAD_DIM_PAD = ((ATTN_HEAD_DIM + COOP_K_SIZE - 1) / COOP_K_SIZE) * COO
 const int KV_PAD = ((COOP_N_SIZE + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
 const int V_HEAD_DIM_PAD = ((ATTN_V_HEAD_DIM + COOP_PV_N_SIZE - 1) / COOP_PV_N_SIZE) * COOP_PV_N_SIZE;
 const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
+const int Q_FRAGMENTS = HEAD_DIM_PAD / COOP_K_SIZE;
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
@@ -288,9 +289,12 @@ void main() {
     applyQueryRope(qBlockStart, head);
   subgroupBarrier();
 
-  coopmat<float16_t, gl_ScopeSubgroup, COOP_M_SIZE, COOP_K_SIZE, gl_MatrixUseA> qFrag;
+  coopmat<float16_t, gl_ScopeSubgroup, COOP_M_SIZE, COOP_K_SIZE, gl_MatrixUseA> qFrags[Q_FRAGMENTS];
   coopmat<float16_t, gl_ScopeSubgroup, COOP_K_SIZE, COOP_N_SIZE, gl_MatrixUseB> kFrag;
   coopmat<coop_acc_dtype, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseAccumulator> scoreFrag;
+
+  for(int kFragIdx = 0; kFragIdx < Q_FRAGMENTS; kFragIdx++)
+    coopMatLoad(qFrags[kFragIdx], qTile, kFragIdx * COOP_K_SIZE * Q_BLOCK + qBase, Q_BLOCK, gl_CooperativeMatrixLayoutColumnMajor);
 
   for(int kvStart = 0; kvStart < seqLen; kvStart += COOP_N_SIZE) {
     loadKeyTile(kvStart, batch, kBatchBase, kvHead);
@@ -303,9 +307,9 @@ void main() {
 
     scoreFrag = coopmat<coop_acc_dtype, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseAccumulator>(coop_acc_dtype(0.0));
     for(int kOffset = 0; kOffset < HEAD_DIM_PAD; kOffset += COOP_K_SIZE) {
-      coopMatLoad(qFrag, qTile, kOffset * Q_BLOCK + qBase, Q_BLOCK, gl_CooperativeMatrixLayoutColumnMajor);
+      const int kFragIdx = kOffset / COOP_K_SIZE;
       coopMatLoad(kFrag, kTile, kOffset * COOP_N_SIZE, COOP_N_SIZE, gl_CooperativeMatrixLayoutRowMajor);
-      scoreFrag = coopMatMulAdd(qFrag, kFrag, scoreFrag);
+      scoreFrag = coopMatMulAdd(qFrags[kFragIdx], kFrag, scoreFrag);
     }
     storeScoreTile(scoreFrag, qBase);
     subgroupBarrier();

@@ -590,6 +590,64 @@ void doHgemmCooperativeMatrixNCHW(
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
+void doTransformerDualGemmSwiGLU(
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  const VkCommandBuffer cb,
+  const VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  const VulkanBuffer* packedFilter,
+  VulkanBuffer* output,
+  const int batchSize,
+  const int hwSize,
+  const int ffnSize,
+  const int cSize,
+  const int packedOCSize,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && packedFilter != nullptr && output != nullptr);
+  assert(result != nullptr);
+
+  const auto& params = tuneParams.transformerDualGemmSwiGLU;
+  if(batchSize <= 0 || hwSize <= 0 || ffnSize <= 0 || cSize <= 0 || packedOCSize < 2 * ffnSize ||
+     !params.isValid() || hwSize % params.getRequiredSpatialAlignment() != 0 ||
+     ffnSize % params.NWG != 0 || cSize % params.KWG != 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, packedFilter),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for transformerDualGemmSwiGLU", *result);
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+  const vk_shader::push::TransformerDualGemmSwiGLUPushParams pushParams = {
+    cSize, hwSize, packedOCSize, ffnSize
+  };
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+  SHADER_PROFILE_START("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
+  vkCmdDispatch(
+    cb,
+    static_cast<uint32_t>((hwSize + params.MWG - 1) / params.MWG),
+    static_cast<uint32_t>(ffnSize / params.NWG),
+    static_cast<uint32_t>(batchSize)
+  );
+  SHADER_PROFILE_END("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
 SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
   SpatialRMSNormSizing sizing;
   // Choose numCHWWorkgroups for pass 1 such that:
@@ -616,8 +674,7 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
     VulkanBuffer* output,
     int totalSize,
     int packedInputBatchStride,
-    int outputBatchStride,
-    int batchCount
+    int outputBatchStride
   ) {
     auto writeDescriptorSets = {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mainProj),
@@ -628,33 +685,23 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
     vk_helper::updateDescriptorSets(device, writeDescriptorSets);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     int eltsPerThread = tuneParams.pointwise.ELTS_PER_THREAD;
-    static constexpr int nKernelDims = 1;
     const bool usePackedBatches = packedInputBatchStride > 0;
     const int dispatchSize = usePackedBatches ? outputBatchStride : totalSize;
-    const int dispatchCount = usePackedBatches ? batchCount : 1;
+    const uint32_t batchCount = usePackedBatches
+      ? static_cast<uint32_t>(totalSize / outputBatchStride)
+      : 1;
+    auto params = vk_shader::push::TransformerSwiGLUPushParams();
+    params.size = dispatchSize;
+    params.packedInputBatchStride = usePackedBatches ? packedInputBatchStride : 0;
+    params.outputBatchStride = usePackedBatches ? outputBatchStride : 0;
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    for(int batchIndex = 0; batchIndex < dispatchCount; batchIndex++) {
-      auto params = vk_shader::push::TransformerSwiGLUPushParams();
-      params.size = dispatchSize;
-      params.packedInputBatchStride = usePackedBatches ? packedInputBatchStride : 0;
-      params.outputBatchStride = usePackedBatches ? outputBatchStride : 0;
-      params.batchIndex = usePackedBatches ? batchIndex : 0;
-      vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
-      size_t numThreads = ((size_t)dispatchSize + eltsPerThread - 1) / eltsPerThread;
-      size_t globalSizes[nKernelDims] = {vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX)};
-      size_t localSizes[nKernelDims] = {pipeline.localSizeX};
-      uint32_t wgCountX = ( globalSizes[0] + localSizes[0] - 1 ) / localSizes[0];
-      vkCmdDispatch(cb, wgCountX, 1, 1);
-      vk_helper::barrierCommandBufferForBuffer(
-        cb,
-        output,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
-      );
-    }
+    size_t numThreads = ((size_t)dispatchSize + eltsPerThread - 1) / eltsPerThread;
+    size_t globalSize = vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX);
+    uint32_t wgCountX = (globalSize + pipeline.localSizeX - 1) / pipeline.localSizeX;
+    vkCmdDispatch(cb, wgCountX, batchCount, 1);
+    vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 
 

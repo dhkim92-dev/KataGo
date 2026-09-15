@@ -151,7 +151,26 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 21);
+  testAssert(VulkanTuner::TUNER_VERSION == 23);
+  testAssert(VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO == 1.10);
+  testAssert(VulkanTuner::TRANSFORMER_DUAL_GEMM_ERROR_TOLERANCE == 0.002);
+  VulkanTuner::ModelInfoForTuning dualModelInfo;
+  dualModelInfo.trunkNumChannels = 3;
+  dualModelInfo.midNumChannels = 2;
+  const int dualInputChannels = VulkanTuner::getTransformerFFNInputChannelsForTuning(dualModelInfo);
+  testAssert(dualInputChannels == 2 && dualInputChannels != dualModelInfo.trunkNumChannels);
+  const vector<float> packedDualFilter = VulkanTuner::packTransformerDualGemmSwiGLUFilter(
+    {2.0f, -1.0f}, {0.5f, 3.0f}, dualInputChannels, 1, 4
+  );
+  testAssert(packedDualFilter == vector<float>({2.0f, 0.5f, 0.0f, 0.0f, -1.0f, 3.0f, 0.0f, 0.0f}));
+  const vector<float> dualReference = VulkanTuner::computeTransformerDualGemmSwiGLUReference(
+    {1.0f, 2.0f, 3.0f, 4.0f}, packedDualFilter, 1, 2, dualInputChannels, 4, 1
+  );
+  testAssert(dualReference.size() == 2);
+  testAssert(fabs(dualReference[0] - (-2.555f)) < 0.003f);
+  testAssert(dualReference[1] == 0.0f);
+  testAssert(VulkanTuner::isFastEnough(110.0, 100.0, VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO));
+  testAssert(!VulkanTuner::isFastEnough(109.99, 100.0, VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO));
   const float nan = numeric_limits<float>::quiet_NaN();
   const float inf = numeric_limits<float>::infinity();
   testAssert(VulkanTuner::computeErrorProp({}, {}) == 0.0);
@@ -316,6 +335,18 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(isValidCooperativeMatrixConfig(
     accumulatorMemoryLimitedDeviceInfo, float32AccumulatorNCHWParams
   ));
+  TransformerDualGemmSwiGLUTuneParams dualGemmFloat32Params;
+  dualGemmFloat32Params.accType = 32;
+  VulkanDeviceInfo dualGemmMemoryLimitedDeviceInfo = float32AccumulatorDevice.info;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 2079;
+  testAssert(!isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 2080;
+  testAssert(isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmFloat32Params.SB = 1;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3135;
+  testAssert(!isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3136;
+  testAssert(isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
   VulkanDevice incompletePropertyDevice = {};
   incompletePropertyDevice.info = deviceInfo;
   incompletePropertyDevice.info.cooperativeMatrixPropertiesFn = fakeIncompleteCooperativeMatrixProperties;
@@ -521,6 +552,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaults.hgemmCooperativeMatrix.VWN == 4);
   testAssert(defaults.hgemmCooperativeMatrixNCHW.VWM == 4);
   testAssert(defaults.hgemmCooperativeMatrixNCHW.VWN == 4);
+  testAssert(defaults.transformerDualGemmSwiGLU.VWM == 1);
+  testAssert(defaults.transformerDualGemmSwiGLU.VWN == 1);
   testAssert(defaults.spatialRMSNorm.TILE_SIZE == 32);
   testAssert(defaults.spatialRMSNorm.APPLY_ELTS_PER_THREAD == 1);
   testAssert(defaults.rmsNorm.WG_C_SIZE == 64);
@@ -543,6 +576,22 @@ void Tests::runVulkanTunerPersistenceTests() {
     deviceLimitedFilename, "", "", 19, 19, modelInfo, limitedDeviceInfo, nullptr
   );
   testAssert(!revalidatedConfig.vulkan.shouldUseCooperativeMatrix);
+  const string dualGemmDeviceLimitedFilename = "tests/scratch/vulkantuner-dual-gemm-device-limited.txt";
+  VulkanTuneParams dualGemmDeviceLimitedConfig = defaults;
+  dualGemmDeviceLimitedConfig.vulkan.canUseFP16Storage = true;
+  dualGemmDeviceLimitedConfig.vulkan.canUseFP16Compute = true;
+  dualGemmDeviceLimitedConfig.vulkan.canUseCooperativeMatrix = true;
+  dualGemmDeviceLimitedConfig.vulkan.shouldUseFP16Storage = true;
+  dualGemmDeviceLimitedConfig.vulkan.shouldUseFP16Compute = true;
+  dualGemmDeviceLimitedConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = true;
+  dualGemmDeviceLimitedConfig.transformerDualGemmSwiGLU.accType = 32;
+  VulkanTuneParams::save(dualGemmDeviceLimitedFilename, dualGemmDeviceLimitedConfig);
+  VulkanDeviceInfo dualGemmLimitedDeviceInfo = deviceInfo;
+  dualGemmLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 2079;
+  const VulkanTuneParams revalidatedDualGemmConfig = VulkanTuner::loadOrCreate(
+    dualGemmDeviceLimitedFilename, "", "", 19, 19, modelInfo, dualGemmLimitedDeviceInfo, nullptr
+  );
+  testAssert(!revalidatedDualGemmConfig.vulkan.shouldUseTransformerDualGemmSwiGLU);
   vector<string> defaultLines = FileUtils::readFileLines(defaultsFilename, '\n');
   testAssert(defaultLines[0] == "VERSION=" + to_string(VulkanTuner::TUNER_VERSION));
   testAssert(defaultLines[1] == "vulkan.canUseFP16Storage=1");
@@ -554,7 +603,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
   testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
-  testAssert(defaultLines.size() == 101);
+  testAssert(defaultLines[10] == "vulkan.shouldUseTransformerDualGemmSwiGLU=0");
+  testAssert(defaultLines.size() == 123);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -580,6 +630,8 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("rmsNorm.WG_C_SIZE=") < lineIndex("pointwise.ELTS_PER_THREAD="));
   testAssert(lineIndex("pointwise.ELTS_PER_THREAD=") < lineIndex("addChannelBiases.XY_ELTS_PER_THREAD="));
   testAssert(lineIndex("addChannelBiases.XY_ELTS_PER_THREAD=") < lineIndex("spatialRMSNorm.TILE_SIZE="));
+  testAssert(lineIndex("spatialRMSNorm.APPLY_ELTS_PER_THREAD=") < lineIndex("transformerDualGemmSwiGLU.MWG="));
+  testAssert(lineIndex("transformerDualGemmSwiGLU.VWM=") < lineIndex("transformerDualGemmSwiGLU.SB="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
   const string staleDefaultsFilename = "tests/scratch/vulkantuner-stale-defaults.txt";
   VulkanTuneParams staleDefaults = defaults;
@@ -636,6 +688,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.hgemmCooperativeMatrixNCHW.VWM = 1;
   params.hgemmCooperativeMatrixNCHW.VWN = 2;
   params.hgemmCooperativeMatrixNCHW.accType = 32;
+  params.transformerDualGemmSwiGLU.NWG = 32;
+  params.transformerDualGemmSwiGLU.KWG = 32;
+  params.transformerDualGemmSwiGLU.accType = 32;
   params.vulkan.canUseFP16Storage = true;
   params.vulkan.canUseFP16Compute = true;
   params.vulkan.canUseCooperativeMatrix = true;
@@ -643,6 +698,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   params.vulkan.shouldUseFP16Compute = true;
   params.vulkan.shouldUseCooperativeMatrix = true;
   params.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
+  params.vulkan.shouldUseTransformerDualGemmSwiGLU = true;
   params.vulkan.canUseSubgroup = true;
   params.vulkan.shouldUseSubgroup = true;
   testAssert(params.isValid());
@@ -654,8 +710,11 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(loaded.xgemm16.MWG == 64);
   testAssert(loaded.hgemmCooperativeMatrix.accType == 32);
   testAssert(loaded.hgemmCooperativeMatrixNCHW.accType == 32);
+  testAssert(loaded.transformerDualGemmSwiGLU.accType == 32);
 
   writeText(filename, "VERSION=999\n");
+  testAssert(loadThrows(filename));
+  writeText(filename, "VERSION=22\n");
   testAssert(loadThrows(filename));
   writeText(filename, "VERSION=" + to_string(VulkanTuner::TUNER_VERSION) + "\nvulkan.canUseFP16Storage=not-an-int\n");
   testAssert(loadThrows(filename));
@@ -683,6 +742,13 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.hgemmCooperativeMatrix.accType = 64;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.transformerDualGemmSwiGLU.VWM = 2;
+  testAssert(!invalid.isValid());
+  invalid = params;
+  invalid.vulkan.shouldUseTransformerDualGemmSwiGLU = true;
+  invalid.vulkan.shouldUseFP16Compute = false;
   testAssert(!invalid.isValid());
   invalid = params;
   invalid.xgemmDirect.VWND = 3;

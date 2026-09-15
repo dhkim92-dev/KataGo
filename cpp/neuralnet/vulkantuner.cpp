@@ -49,6 +49,69 @@ double VulkanTuner::computeErrorProp(const vector<float>& reference, const vecto
   return isfinite(errorProp) ? errorProp : 1.0;
 }
 
+vector<float> VulkanTuner::packTransformerDualGemmSwiGLUFilter(
+  const vector<float>& mainWeights,
+  const vector<float>& gateWeights,
+  int cSize,
+  int ffnSize,
+  int packedOCSize
+) {
+  if(cSize <= 0 || ffnSize <= 0 || packedOCSize < ffnSize || packedOCSize - ffnSize < ffnSize)
+    throw StringError("Invalid dimensions for Transformer dual-GEMM SwiGLU filter packing");
+  const size_t logicalWeightCount = static_cast<size_t>(cSize) * ffnSize;
+  if(mainWeights.size() < logicalWeightCount || gateWeights.size() < logicalWeightCount)
+    throw StringError("Transformer dual-GEMM SwiGLU weights are too small to pack");
+
+  vector<float> packed(static_cast<size_t>(cSize) * packedOCSize, 0.0f);
+  for(int ic = 0; ic < cSize; ic++) {
+    const size_t srcBase = static_cast<size_t>(ic) * ffnSize;
+    const size_t dstBase = static_cast<size_t>(ic) * packedOCSize;
+    copy_n(mainWeights.begin() + srcBase, ffnSize, packed.begin() + dstBase);
+    copy_n(gateWeights.begin() + srcBase, ffnSize, packed.begin() + dstBase + ffnSize);
+  }
+  return packed;
+}
+
+vector<float> VulkanTuner::computeTransformerDualGemmSwiGLUReference(
+  const vector<float>& input,
+  const vector<float>& packedFilter,
+  int batchSize,
+  int hwSize,
+  int cSize,
+  int packedOCSize,
+  int ffnSize
+) {
+  if(batchSize <= 0 || hwSize <= 0 || cSize <= 0 || ffnSize <= 0 ||
+     packedOCSize < ffnSize || packedOCSize - ffnSize < ffnSize)
+    throw StringError("Invalid dimensions for Transformer dual-GEMM SwiGLU reference");
+  const size_t inputSize = static_cast<size_t>(batchSize) * cSize * hwSize;
+  const size_t filterSize = static_cast<size_t>(cSize) * packedOCSize;
+  if(input.size() < inputSize || packedFilter.size() < filterSize)
+    throw StringError("Input or packed filter is too small for Transformer dual-GEMM SwiGLU reference");
+
+  vector<float> output(static_cast<size_t>(batchSize) * ffnSize * hwSize);
+  for(int batch = 0; batch < batchSize; batch++) {
+    const size_t inputBatchBase = static_cast<size_t>(batch) * cSize * hwSize;
+    const size_t outputBatchBase = static_cast<size_t>(batch) * ffnSize * hwSize;
+    for(int oc = 0; oc < ffnSize; oc++) {
+      for(int hw = 0; hw < hwSize; hw++) {
+        float mainValue = 0.0f;
+        float gateValue = 0.0f;
+        for(int ic = 0; ic < cSize; ic++) {
+          const float inputValue = input[inputBatchBase + static_cast<size_t>(ic) * hwSize + hw];
+          const size_t filterBase = static_cast<size_t>(ic) * packedOCSize;
+          mainValue += inputValue * packedFilter[filterBase + oc];
+          gateValue += inputValue * packedFilter[filterBase + ffnSize + oc];
+        }
+        const float siluMain = mainValue / (1.0f + expf(-mainValue));
+        output[outputBatchBase + static_cast<size_t>(oc) * hwSize + hw] =
+          half_float::half_cast<float>(half_float::half_cast<half_t>(siluMain * gateValue));
+      }
+    }
+  }
+  return output;
+}
+
 double VulkanTuner::computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale) {
   if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0 || !isfinite(errorProp) ||
      errorProp > std::min(0.5, 5.0 * errorToleranceScale))
@@ -294,6 +357,38 @@ namespace {
            localSizeX * localSizeY <= limits.maxComputeWorkGroupInvocations &&
            accumulatorTileBytes + sharedFilterBytes + sharedAlignmentBytes <= limits.maxComputeSharedMemorySize;
   }
+
+  bool isWithinCooperativeMatrixDeviceLimits(
+    const VulkanDeviceInfo& deviceInfo,
+    const TransformerDualGemmSwiGLUTuneParams& params
+  ) {
+    if(!params.isValid())
+      return false;
+    const uint64_t localSizeX = static_cast<uint64_t>(params.MWAVE / params.MWARP) * params.subgroupSize;
+    const uint64_t localSizeY = static_cast<uint64_t>(params.NWAVE / params.NWARP);
+    const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
+    if(localSizeX > limits.maxComputeWorkGroupSize[0] ||
+       localSizeY > limits.maxComputeWorkGroupSize[1] ||
+       limits.maxComputeWorkGroupSize[2] < 1 ||
+       localSizeX * localSizeY > limits.maxComputeWorkGroupInvocations)
+      return false;
+
+    const uint64_t sharedMemoryLimit = limits.maxComputeSharedMemorySize;
+    const uint64_t accumulatorElementBytes = params.accType == 32 ? sizeof(float) : sizeof(uint16_t);
+    const uint64_t accumulatorElements = 2ull * params.MWG * params.NWG;
+    if(accumulatorElements > sharedMemoryLimit / accumulatorElementBytes)
+      return false;
+    uint64_t sharedBytes = accumulatorElements * accumulatorElementBytes;
+    if(params.SB == 1) {
+      const uint64_t filterElements = 2ull * params.KWG * params.NWG;
+      const uint64_t filterElementLimit = (sharedMemoryLimit - sharedBytes) / sizeof(uint16_t);
+      if(filterElements > filterElementLimit)
+        return false;
+      sharedBytes += filterElements * sizeof(uint16_t);
+    }
+    const uint64_t alignmentBytes = 16ull * (2 + 2 * params.SB);
+    return alignmentBytes <= sharedMemoryLimit && sharedBytes <= sharedMemoryLimit - alignmentBytes;
+  }
 }
 
 VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) {
@@ -322,6 +417,16 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
 bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const VulkanDeviceInfo& deviceInfo,
   const HGemmCooperativeMatrixNCHWTuneParams& params
+) {
+  return isWithinCooperativeMatrixDeviceLimits(deviceInfo, params) &&
+         isSupportedCooperativeMatrixShape(
+           deviceInfo, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
+         );
+}
+
+bool vk_shader::tune::isValidCooperativeMatrixConfig(
+  const VulkanDeviceInfo& deviceInfo,
+  const TransformerDualGemmSwiGLUTuneParams& params
 ) {
   return isWithinCooperativeMatrixDeviceLimits(deviceInfo, params) &&
          isSupportedCooperativeMatrixShape(
@@ -644,6 +749,7 @@ bool VulkanTuningProfile::isValid() const {
   return addChannelBiases.isValid() && pointwise.isValid() && gPool.isValid() &&
          conv3x3.isValid(3) && conv5x5.isValid(5) && hgemmCooperativeMatrix.isValid() &&
          hgemmCooperativeMatrixNCHW.isValid() &&
+         transformerDualGemmSwiGLU.isValid() &&
          xgemm.isValid() && xgemm16.isValid() && xgemmDirect.isValid() &&
          transformer.isValid() && rmsNorm.isValid() && spatialRMSNorm.isValid();
 }
@@ -697,6 +803,19 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrixNCHW.SB == other.hgemmCooperativeMatrixNCHW.SB &&
          hgemmCooperativeMatrixNCHW.VWM == other.hgemmCooperativeMatrixNCHW.VWM &&
          hgemmCooperativeMatrixNCHW.VWN == other.hgemmCooperativeMatrixNCHW.VWN &&
+         transformerDualGemmSwiGLU.MWARP == other.transformerDualGemmSwiGLU.MWARP &&
+         transformerDualGemmSwiGLU.NWARP == other.transformerDualGemmSwiGLU.NWARP &&
+         transformerDualGemmSwiGLU.KDIM == other.transformerDualGemmSwiGLU.KDIM &&
+         transformerDualGemmSwiGLU.subgroupSize == other.transformerDualGemmSwiGLU.subgroupSize &&
+         transformerDualGemmSwiGLU.MWG == other.transformerDualGemmSwiGLU.MWG &&
+         transformerDualGemmSwiGLU.NWG == other.transformerDualGemmSwiGLU.NWG &&
+         transformerDualGemmSwiGLU.KWG == other.transformerDualGemmSwiGLU.KWG &&
+         transformerDualGemmSwiGLU.MWAVE == other.transformerDualGemmSwiGLU.MWAVE &&
+         transformerDualGemmSwiGLU.NWAVE == other.transformerDualGemmSwiGLU.NWAVE &&
+         transformerDualGemmSwiGLU.accType == other.transformerDualGemmSwiGLU.accType &&
+         transformerDualGemmSwiGLU.SB == other.transformerDualGemmSwiGLU.SB &&
+         transformerDualGemmSwiGLU.VWM == other.transformerDualGemmSwiGLU.VWM &&
+         transformerDualGemmSwiGLU.VWN == other.transformerDualGemmSwiGLU.VWN &&
          xgemm.MDIMC == other.xgemm.MDIMC && xgemm.NDIMC == other.xgemm.NDIMC && xgemm.MWG == other.xgemm.MWG &&
          xgemm.NWG == other.xgemm.NWG && xgemm.KWG == other.xgemm.KWG && xgemm.KWI == other.xgemm.KWI && xgemm.MDIMA == other.xgemm.MDIMA &&
          xgemm.NDIMB == other.xgemm.NDIMB && xgemm.VWM == other.xgemm.VWM && xgemm.VWN == other.xgemm.VWN &&
@@ -740,6 +859,11 @@ bool VulkanTuneParams::isValid() const {
      (!vulkan.canUseCooperativeMatrix ||
       !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute))
     return false;
+  if(vulkan.shouldUseTransformerDualGemmSwiGLU &&
+     (!vulkan.canUseCooperativeMatrix ||
+      !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute ||
+      !transformerDualGemmSwiGLU.isValid()))
+    return false;
   return VulkanTuningProfile::isValid();
 }
 
@@ -752,6 +876,7 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          vulkan.shouldUseFP16Compute == other.vulkan.shouldUseFP16Compute &&
          vulkan.shouldUseCooperativeMatrix == other.vulkan.shouldUseCooperativeMatrix &&
          vulkan.shouldUseHgemmCooperativeMatrixNCHW == other.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+         vulkan.shouldUseTransformerDualGemmSwiGLU == other.vulkan.shouldUseTransformerDualGemmSwiGLU &&
          vulkan.shouldUseSubgroup == other.vulkan.shouldUseSubgroup &&
          static_cast<const VulkanTuningProfile&>(*this) == static_cast<const VulkanTuningProfile&>(other);
 }
@@ -796,6 +921,19 @@ namespace {
     WRITE("pointwise.ELTS_PER_THREAD", profile.pointwise.ELTS_PER_THREAD); WRITE("pointwise.LOCAL_SIZE", profile.pointwise.LOCAL_SIZE);
     WRITE("addChannelBiases.XY_ELTS_PER_THREAD", profile.addChannelBiases.XY_ELTS_PER_THREAD); WRITE("addChannelBiases.NC_ELTS_PER_THREAD", profile.addChannelBiases.NC_ELTS_PER_THREAD);
     WRITE("spatialRMSNorm.TILE_SIZE", profile.spatialRMSNorm.TILE_SIZE); WRITE("spatialRMSNorm.APPLY_ELTS_PER_THREAD", profile.spatialRMSNorm.APPLY_ELTS_PER_THREAD);
+    writeParam(out, "transformerDualGemmSwiGLU.MWG", profile.transformerDualGemmSwiGLU.MWG);
+    writeParam(out, "transformerDualGemmSwiGLU.NWG", profile.transformerDualGemmSwiGLU.NWG);
+    writeParam(out, "transformerDualGemmSwiGLU.KWG", profile.transformerDualGemmSwiGLU.KWG);
+    writeParam(out, "transformerDualGemmSwiGLU.MWAVE", profile.transformerDualGemmSwiGLU.MWAVE);
+    writeParam(out, "transformerDualGemmSwiGLU.NWAVE", profile.transformerDualGemmSwiGLU.NWAVE);
+    writeParam(out, "transformerDualGemmSwiGLU.MWARP", profile.transformerDualGemmSwiGLU.MWARP);
+    writeParam(out, "transformerDualGemmSwiGLU.NWARP", profile.transformerDualGemmSwiGLU.NWARP);
+    writeParam(out, "transformerDualGemmSwiGLU.VWM", profile.transformerDualGemmSwiGLU.VWM);
+    writeParam(out, "transformerDualGemmSwiGLU.VWN", profile.transformerDualGemmSwiGLU.VWN);
+    writeParam(out, "transformerDualGemmSwiGLU.KDIM", profile.transformerDualGemmSwiGLU.KDIM);
+    writeParam(out, "transformerDualGemmSwiGLU.subgroupSize", profile.transformerDualGemmSwiGLU.subgroupSize);
+    writeParam(out, "transformerDualGemmSwiGLU.accType", profile.transformerDualGemmSwiGLU.accType);
+    writeParam(out, "transformerDualGemmSwiGLU.SB", profile.transformerDualGemmSwiGLU.SB);
 #undef WRITE
   }
 }
@@ -815,6 +953,7 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
   writeParam(out, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
   writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
+  writeParam(out, "vulkan.shouldUseTransformerDualGemmSwiGLU", config.vulkan.shouldUseTransformerDualGemmSwiGLU);
   writeTuningProfile(out, "", static_cast<const VulkanTuningProfile&>(config));
 }
 
@@ -843,7 +982,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 108)
+  if(values.size() != 122)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -876,6 +1015,19 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
     profile.pointwise.ELTS_PER_THREAD = read("pointwise.ELTS_PER_THREAD"); profile.pointwise.LOCAL_SIZE = read("pointwise.LOCAL_SIZE");
     profile.addChannelBiases.XY_ELTS_PER_THREAD = read("addChannelBiases.XY_ELTS_PER_THREAD"); profile.addChannelBiases.NC_ELTS_PER_THREAD = read("addChannelBiases.NC_ELTS_PER_THREAD");
     profile.spatialRMSNorm.TILE_SIZE = read("spatialRMSNorm.TILE_SIZE"); profile.spatialRMSNorm.APPLY_ELTS_PER_THREAD = read("spatialRMSNorm.APPLY_ELTS_PER_THREAD");
+    profile.transformerDualGemmSwiGLU.MWG = read("transformerDualGemmSwiGLU.MWG");
+    profile.transformerDualGemmSwiGLU.NWG = read("transformerDualGemmSwiGLU.NWG");
+    profile.transformerDualGemmSwiGLU.KWG = read("transformerDualGemmSwiGLU.KWG");
+    profile.transformerDualGemmSwiGLU.MWAVE = read("transformerDualGemmSwiGLU.MWAVE");
+    profile.transformerDualGemmSwiGLU.NWAVE = read("transformerDualGemmSwiGLU.NWAVE");
+    profile.transformerDualGemmSwiGLU.MWARP = read("transformerDualGemmSwiGLU.MWARP");
+    profile.transformerDualGemmSwiGLU.NWARP = read("transformerDualGemmSwiGLU.NWARP");
+    profile.transformerDualGemmSwiGLU.VWM = read("transformerDualGemmSwiGLU.VWM");
+    profile.transformerDualGemmSwiGLU.VWN = read("transformerDualGemmSwiGLU.VWN");
+    profile.transformerDualGemmSwiGLU.KDIM = read("transformerDualGemmSwiGLU.KDIM");
+    profile.transformerDualGemmSwiGLU.subgroupSize = read("transformerDualGemmSwiGLU.subgroupSize");
+    profile.transformerDualGemmSwiGLU.accType = read("transformerDualGemmSwiGLU.accType");
+    profile.transformerDualGemmSwiGLU.SB = read("transformerDualGemmSwiGLU.SB");
   };
 
   VulkanTuneParams config;
@@ -888,6 +1040,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   config.vulkan.shouldUseCooperativeMatrix = getBoolParam(values, "vulkan.shouldUseCooperativeMatrix", filename);
   config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = getBoolParam(values, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", filename);
   config.vulkan.shouldUseSubgroup = getBoolParam(values, "vulkan.shouldUseSubgroup", filename);
+  config.vulkan.shouldUseTransformerDualGemmSwiGLU = getBoolParam(values, "vulkan.shouldUseTransformerDualGemmSwiGLU", filename);
   readProfile("", static_cast<VulkanTuningProfile&>(config));
   if(!config.isValid())
     throw IOError("VulkanTuneParams::load: parameters are invalid in " + filename);
@@ -935,6 +1088,10 @@ VulkanTuner::ModelInfoForTuning VulkanTuner::ModelInfoForTuning::ofDesc(const Mo
   modelInfo.modelVersion = desc.modelVersion;
   findTransformerInfo(desc.trunk.blocks, modelInfo);
   return modelInfo;
+}
+
+int VulkanTuner::getTransformerFFNInputChannelsForTuning(const ModelInfoForTuning& modelInfo) {
+  return modelInfo.midNumChannels;
 }
 
 string VulkanTuner::defaultDirectory(bool makeDir, const string& homeDataDirOverride) {
@@ -1137,6 +1294,17 @@ namespace {
            isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
   }
 
+  bool isValidCooperativeMatrixTuneParams(
+    const TuningContext& context,
+    const TransformerDualGemmSwiGLUTuneParams& params
+  ) {
+    return context.device != nullptr &&
+           isSupportedCooperativeMatrixShape(
+             context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
+           ) &&
+           isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
+  }
+
   template<typename Tuner>
   bool isValidTuningConfig(const TuningContext&, const VulkanTuneParams& config) {
     return Tuner::isValid(config);
@@ -1146,6 +1314,7 @@ namespace {
     int inChannels;
     int outChannels;
     double weight;
+    bool padOutputForNCHW = false;
   };
 
   vector<GemmTuneCase> getGemmTuneCases(
@@ -1160,14 +1329,15 @@ namespace {
     maxConvChannels = std::max(context.modelInfo.gpoolNumChannels, maxConvChannels);
 
     vector<GemmTuneCase> cases;
-    const auto addCase = [&](int inChannels, int outChannels, double weight) {
+    const auto addCase = [&](int inChannels, int outChannels, double weight, bool padOutputForNCHW = false) {
       if(inChannels <= 0 || outChannels <= 0 || weight <= 0.0)
         return;
       const auto existing = find_if(cases.begin(), cases.end(), [&](const GemmTuneCase& tuneCase) {
-        return tuneCase.inChannels == inChannels && tuneCase.outChannels == outChannels;
+        return tuneCase.inChannels == inChannels && tuneCase.outChannels == outChannels &&
+               tuneCase.padOutputForNCHW == padOutputForNCHW;
       });
       if(existing == cases.end())
-        cases.push_back({inChannels, outChannels, weight});
+        cases.push_back({inChannels, outChannels, weight, padOutputForNCHW});
       else
         existing->weight += weight;
     };
@@ -1190,7 +1360,7 @@ namespace {
       addCase(context.modelInfo.midNumChannels, transformerKC, 1.0);
       addCase(context.modelInfo.midNumChannels, transformerVC, 1.0);
       addCase(transformerOutC, context.modelInfo.midNumChannels, 1.0);
-      addCase(context.modelInfo.midNumChannels, transformerFFNC, 2.0);
+      addCase(context.modelInfo.midNumChannels, 2 * transformerFFNC, 1.0, true);
       addCase(transformerFFNC, context.modelInfo.midNumChannels, 1.0);
     }
     return cases;
@@ -1260,7 +1430,7 @@ namespace {
       const double weight = plan.weightForRun(i);
       totalWeight += weight;
       if(plan.gemmCases[i].inChannels % params.KWG == 0 &&
-         plan.gemmCases[i].outChannels % params.NWG == 0)
+         (plan.gemmCases[i].padOutputForNCHW || plan.gemmCases[i].outChannels % params.NWG == 0))
         eligibleWeight += weight;
     }
     return {eligibleWeight, totalWeight};
@@ -3187,7 +3357,8 @@ namespace {
         if(plan.kernelName == "hgemmCooperativeMatrixNCHW" && !plan.gemmCases.empty()) {
           const GemmTuneCase& gemmCase = plan.gemmCases[planRun % plan.gemmCases.size()];
           if(gemmCase.inChannels % config.hgemmCooperativeMatrixNCHW.KWG != 0 ||
-             gemmCase.outChannels % config.hgemmCooperativeMatrixNCHW.NWG != 0)
+             (!gemmCase.padOutputForNCHW &&
+              gemmCase.outChannels % config.hgemmCooperativeMatrixNCHW.NWG != 0))
             weight = 0.0;
         }
         for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
@@ -3507,6 +3678,287 @@ namespace {
         firstBuffer += pipeline->bindingCount;
       }
       cleanup();
+      return true;
+    }
+
+    bool measureTransformerDualGemmSwiGLU(
+      const VulkanTuneParams& candidateConfig,
+      const VulkanTuneParams& legacyConfig,
+      const TuningContext& context,
+      const Pipeline* fusedPipeline,
+      const Pipeline* legacyGemmPipeline,
+      const Pipeline* swigluPipeline,
+      bool legacyNCHW,
+      int hwSize,
+      int packedOCSize,
+      double& fusedCallsPerSecond,
+      double& legacyCallsPerSecond,
+      double& errorProp,
+      vector<float>& readback,
+      string& error
+    ) {
+      if(!isUsable()) {
+        error = "compute timestamps are not supported";
+        return false;
+      }
+      const int batchSize = std::max(1, context.batchSize);
+      const int cSize = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
+      const int ffnSize = context.modelInfo.transformerFFNChannels;
+      if(fusedPipeline == nullptr || legacyGemmPipeline == nullptr || swigluPipeline == nullptr ||
+         batchSize <= 0 || hwSize <= 0 || cSize <= 0 || ffnSize <= 0 || packedOCSize < 2 * ffnSize) {
+        error = "invalid Transformer dual-GEMM measurement dimensions or pipelines";
+        return false;
+      }
+
+      VkResult result = VK_SUCCESS;
+      ReusableResources resources(device);
+      activeResources = &resources;
+      const auto activeResourcesGuard = makeScopeGuard([&]() { activeResources = nullptr; });
+      vector<VulkanBuffer*>& buffers = resources.tuningBuffers;
+      if(!ensureBuffers(buffers, 7, 4, result, error, "Transformer dual-GEMM buffer"))
+        return false;
+      const size_t inputElements = static_cast<size_t>(batchSize) * cSize * hwSize;
+      const size_t filterElements = static_cast<size_t>(cSize) * packedOCSize;
+      const size_t outputElements = static_cast<size_t>(batchSize) * ffnSize * hwSize;
+      const size_t legacyGemmElements = static_cast<size_t>(batchSize) * packedOCSize * hwSize;
+      const bool legacyStorageHalf =
+        legacyNCHW || (legacyConfig.vulkan.canUseFP16Storage && legacyConfig.vulkan.canUseFP16Compute &&
+                       legacyConfig.vulkan.shouldUseFP16Storage);
+      const size_t legacyElementBytes = legacyStorageHalf ? sizeof(half_t) : sizeof(float);
+      const VkDeviceSize candidateInputBytes = inputElements * sizeof(half_t);
+      const VkDeviceSize candidateFilterBytes = filterElements * sizeof(half_t);
+      const VkDeviceSize candidateOutputBytes = outputElements * sizeof(half_t);
+      const VkDeviceSize legacyInputBytes = inputElements * legacyElementBytes;
+      const VkDeviceSize legacyFilterBytes = filterElements * legacyElementBytes;
+      const VkDeviceSize legacyGemmBytes = legacyGemmElements * legacyElementBytes;
+      const VkDeviceSize legacyOutputBytes = outputElements * legacyElementBytes;
+      const VkDeviceSize requiredBytes[] = {
+        candidateInputBytes, candidateFilterBytes, candidateOutputBytes,
+        legacyInputBytes, legacyFilterBytes, legacyGemmBytes, legacyOutputBytes
+      };
+      for(size_t i = 0; i < 7; i++)
+        if(!ensureBuffer(buffers[i], requiredBytes[i], result, error, "Transformer dual-GEMM buffer"))
+          return false;
+
+      vector<float> inputSource(inputElements, 0.0f);
+      vector<float> mainWeights(static_cast<size_t>(cSize) * ffnSize);
+      vector<float> gateWeights(static_cast<size_t>(cSize) * ffnSize);
+      Rand rand("VulkanTransformerDualGemmSwiGLU:" + to_string(context.nnXLen) + ":" +
+                to_string(context.nnYLen) + ":" + to_string(cSize) + ":" + to_string(ffnSize));
+      const size_t logicalHW = static_cast<size_t>(context.nnXLen) * context.nnYLen;
+      const float weightScale = 1.0f / sqrtf(static_cast<float>(cSize));
+      for(int batch = 0; batch < batchSize; batch++) {
+        for(int ic = 0; ic < cSize; ic++) {
+          for(int hw = 0; hw < hwSize; hw++) {
+            if(static_cast<size_t>(hw) < logicalHW)
+              inputSource[(static_cast<size_t>(batch) * cSize + ic) * hwSize + hw] =
+                static_cast<float>(2.0 * rand.nextDouble() - 1.0);
+          }
+        }
+      }
+      for(size_t i = 0; i < mainWeights.size(); i++) {
+        mainWeights[i] = static_cast<float>(2.0 * rand.nextDouble() - 1.0) * weightScale;
+        gateWeights[i] = static_cast<float>(2.0 * rand.nextDouble() - 1.0) * weightScale;
+      }
+      const vector<float> packedFilter = VulkanTuner::packTransformerDualGemmSwiGLUFilter(
+        mainWeights, gateWeights, cSize, ffnSize, packedOCSize
+      );
+      vector<half_t> candidateInputHalf(inputElements);
+      vector<half_t> candidateFilterHalf(filterElements);
+      for(size_t i = 0; i < inputElements; i++)
+        candidateInputHalf[i] = half_float::half_cast<half_t>(inputSource[i]);
+      for(size_t i = 0; i < filterElements; i++)
+        candidateFilterHalf[i] = half_float::half_cast<half_t>(packedFilter[i]);
+      vector<float> reference = VulkanTuner::computeTransformerDualGemmSwiGLUReference(
+        vector<float>(candidateInputHalf.begin(), candidateInputHalf.end()),
+        vector<float>(candidateFilterHalf.begin(), candidateFilterHalf.end()),
+        batchSize, hwSize, cSize, packedOCSize, ffnSize
+      );
+      const auto upload = [&](const void* data, VkDeviceSize bytes, VulkanBuffer* destination, const string& name) {
+        vk_helper::copyHostToDeviceBuffer(device, data, destination, bytes, false, &result);
+        if(result != VK_SUCCESS) {
+          error = "could not upload " + name + ": " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        return true;
+      };
+      if(!upload(candidateInputHalf.data(), candidateInputBytes, buffers[0], "dual-GEMM input") ||
+         !upload(candidateFilterHalf.data(), candidateFilterBytes, buffers[1], "dual-GEMM packed filter"))
+        return false;
+
+      if(legacyStorageHalf) {
+        vector<half_t> legacyInputHalf(inputElements);
+        vector<half_t> legacyFilterHalf(filterElements);
+        for(size_t i = 0; i < inputElements; i++)
+          legacyInputHalf[i] = half_float::half_cast<half_t>(inputSource[i]);
+        for(size_t i = 0; i < filterElements; i++)
+          legacyFilterHalf[i] = half_float::half_cast<half_t>(packedFilter[i]);
+        if(!upload(legacyInputHalf.data(), legacyInputBytes, buffers[3], "legacy packed-GEMM input") ||
+           !upload(legacyFilterHalf.data(), legacyFilterBytes, buffers[4], "legacy packed-GEMM filter"))
+          return false;
+      }
+      else if(!upload(inputSource.data(), legacyInputBytes, buffers[3], "legacy packed-GEMM input") ||
+              !upload(packedFilter.data(), legacyFilterBytes, buffers[4], "legacy packed-GEMM filter"))
+        return false;
+
+      if(!ensureDescriptorPool(9, 3, result, error) || !ensureQueryPool(20, result, error) ||
+         !ensureCommandResources(result, error))
+        return false;
+      const auto allocateDescriptorSet = [&](const Pipeline* pipeline, VkDescriptorSet& descriptorSet) {
+        VkDescriptorSetAllocateInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        info.descriptorPool = resources.descriptorPool;
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &pipeline->descriptorSetLayout;
+        result = vkAllocateDescriptorSets(device->device, &info, &descriptorSet);
+        if(result != VK_SUCCESS)
+          error = "could not allocate Transformer dual-GEMM descriptor set: " + vk_helper::vkErrorToString(result);
+        return result == VK_SUCCESS;
+      };
+      VkDescriptorSet fusedDescriptorSet = VK_NULL_HANDLE;
+      VkDescriptorSet legacyGemmDescriptorSet = VK_NULL_HANDLE;
+      VkDescriptorSet swigluDescriptorSet = VK_NULL_HANDLE;
+      if(!allocateDescriptorSet(fusedPipeline, fusedDescriptorSet) ||
+         !allocateDescriptorSet(legacyGemmPipeline, legacyGemmDescriptorSet) ||
+         !allocateDescriptorSet(swigluPipeline, swigluDescriptorSet))
+        return false;
+
+      VkCommandBuffer commandBuffer = resources.commandBuffer;
+      VkFence fence = resources.fence;
+      const auto cleanup = [&]() noexcept {
+        if(commandBuffer != VK_NULL_HANDLE)
+          vkResetCommandBuffer(commandBuffer, 0);
+      };
+      const auto cleanupGuard = makeScopeGuard(cleanup);
+      result = vk_helper::beginCommandBuffer(commandBuffer);
+      if(result != VK_SUCCESS) {
+        error = "could not begin Transformer dual-GEMM measurement: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      const auto recordFused = [&]() {
+        vkcompute::doTransformerDualGemmSwiGLU(
+          device, candidateConfig, fusedPipeline, commandBuffer, fusedDescriptorSet,
+          buffers[0], buffers[1], buffers[2], batchSize, hwSize, ffnSize, cSize, packedOCSize, &result
+        );
+      };
+      const auto recordLegacy = [&]() {
+        if(legacyNCHW) {
+          vkcompute::doHgemmCooperativeMatrixNCHW(
+            device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
+            buffers[3], buffers[4], buffers[5], batchSize, hwSize, packedOCSize, cSize, &result
+          );
+        }
+        else {
+          vkcompute::xgemmStridedBatchedNN(
+            device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
+            hwSize, packedOCSize, cSize,
+            cSize * hwSize, 0, packedOCSize * hwSize,
+            buffers[3], buffers[4], buffers[5], batchSize, &result
+          );
+        }
+        if(result != VK_SUCCESS)
+          return;
+        vkcompute::doSwiGLU(
+          device, commandBuffer, swigluDescriptorSet, *swigluPipeline, legacyConfig,
+          buffers[5], buffers[5], buffers[6], batchSize * ffnSize * hwSize,
+          packedOCSize * hwSize, ffnSize * hwSize
+        );
+      };
+      recordFused();
+      if(result != VK_SUCCESS) {
+        error = "could not dispatch Transformer dual-GEMM candidate: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      vk_helper::barrierCommandBuffer(commandBuffer);
+      recordLegacy();
+      if(result != VK_SUCCESS) {
+        error = "could not dispatch legacy packed-GEMM plus SwiGLU: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      vkCmdResetQueryPool(commandBuffer, resources.queryPool, 0, 20);
+      constexpr size_t timedRuns = 5;
+      for(size_t repeat = 0; repeat < timedRuns; repeat++) {
+        const uint32_t queryStart = static_cast<uint32_t>(4 * repeat);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, queryStart);
+        recordFused();
+        if(result != VK_SUCCESS) {
+          error = "could not dispatch timed Transformer dual-GEMM candidate: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, queryStart + 1);
+        vk_helper::barrierCommandBuffer(commandBuffer);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, queryStart + 2);
+        recordLegacy();
+        if(result != VK_SUCCESS) {
+          error = "could not dispatch timed legacy packed-GEMM plus SwiGLU: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, queryStart + 3);
+        vk_helper::barrierCommandBuffer(commandBuffer);
+      }
+      result = vk_helper::endCommandBuffer(commandBuffer);
+      if(result != VK_SUCCESS) {
+        error = "could not end Transformer dual-GEMM measurement: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vkResetFences(device->device, 1, &fence);
+      if(result != VK_SUCCESS) {
+        error = "could not reset Transformer dual-GEMM measurement fence: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
+      if(result != VK_SUCCESS) {
+        error = "could not submit Transformer dual-GEMM measurement: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      result = vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
+      if(result != VK_SUCCESS) {
+        error = "could not wait for Transformer dual-GEMM measurement: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+
+      vector<uint64_t> timestamps(4 * timedRuns, 0);
+      result = vkGetQueryPoolResults(
+        device->device, resources.queryPool, 0, static_cast<uint32_t>(timestamps.size()),
+        timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
+      );
+      if(result != VK_SUCCESS) {
+        error = "could not read Transformer dual-GEMM timestamps: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      double fusedSeconds = 0.0;
+      double legacySeconds = 0.0;
+      for(size_t repeat = 0; repeat < timedRuns; repeat++) {
+        const uint64_t fusedStart = timestamps[4 * repeat];
+        const uint64_t fusedEnd = timestamps[4 * repeat + 1];
+        const uint64_t legacyStart = timestamps[4 * repeat + 2];
+        const uint64_t legacyEnd = timestamps[4 * repeat + 3];
+        if(fusedEnd <= fusedStart || legacyEnd <= legacyStart) {
+          error = "could not read valid Transformer dual-GEMM timestamps";
+          return false;
+        }
+        fusedSeconds += (fusedEnd - fusedStart) * timestampPeriod * 1e-9;
+        legacySeconds += (legacyEnd - legacyStart) * timestampPeriod * 1e-9;
+      }
+      if(fusedSeconds <= 0.0 || legacySeconds <= 0.0) {
+        error = "Transformer dual-GEMM timing returned a non-positive duration";
+        return false;
+      }
+      fusedCallsPerSecond = timedRuns / fusedSeconds;
+      legacyCallsPerSecond = timedRuns / legacySeconds;
+
+      vector<half_t> outputHalf(outputElements);
+      vk_helper::copyDeviceBufferToHost(
+        device, buffers[2], candidateOutputBytes, outputHalf.data(), true, &result
+      );
+      if(result != VK_SUCCESS) {
+        error = "could not read Transformer dual-GEMM output: " + vk_helper::vkErrorToString(result);
+        return false;
+      }
+      readback.resize(outputElements);
+      for(size_t i = 0; i < outputElements; i++)
+        readback[i] = half_float::half_cast<float>(outputHalf[i]);
+      errorProp = VulkanTuner::computeErrorProp(reference, readback);
       return true;
     }
 
@@ -5666,6 +6118,271 @@ namespace {
       );
     }
   }
+
+  bool tuneTransformerDualGemmSwiGLU(
+    const TuningContext& context,
+    VulkanTuneParams& config
+  ) {
+    config.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+    if(context.device == nullptr || VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo) <= 0 ||
+       context.modelInfo.transformerFFNChannels <= 0 ||
+       !config.vulkan.canUseCooperativeMatrix ||
+       !config.vulkan.canUseFP16Storage || !config.vulkan.canUseFP16Compute ||
+       !config.vulkan.shouldUseFP16Storage || !config.vulkan.shouldUseFP16Compute ||
+       context.cooperativeMatrixTuneShapes.empty()) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Skipping Vulkan transformerDualGemmSwiGLU tuning: transformer, cooperative-matrix, "
+          "FP16, or property prerequisites unavailable; selected=false"
+        );
+      return false;
+    }
+
+    const int cSize = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
+    const int ffnSize = context.modelInfo.transformerFFNChannels;
+    VulkanTuneParams legacyConfig = config;
+    legacyConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+    const HGemmCooperativeMatrixNCHWTuneParams& nchwParams = config.hgemmCooperativeMatrixNCHW;
+    bool legacyNCHW =
+      config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+      config.vulkan.shouldUseFP16Storage && config.vulkan.shouldUseFP16Compute &&
+      nchwParams.isValid() && cSize % nchwParams.KWG == 0;
+    if(ffnSize > numeric_limits<int>::max() / 2) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan transformerDualGemmSwiGLU tuning: packed FFN size overflow");
+      return false;
+    }
+    const int logicalPackedOCSize = 2 * ffnSize;
+    int packedOCSize = logicalPackedOCSize;
+    if(legacyNCHW) {
+      const int64_t roundedPackedOCSize =
+        ((static_cast<int64_t>(logicalPackedOCSize) + nchwParams.NWG - 1) / nchwParams.NWG) * nchwParams.NWG;
+      if(roundedPackedOCSize > numeric_limits<int>::max()) {
+        if(context.logger != nullptr)
+          context.logger->write("Skipping Vulkan transformerDualGemmSwiGLU tuning: packed FFN size overflow");
+        return false;
+      }
+      packedOCSize = static_cast<int>(roundedPackedOCSize);
+      legacyNCHW = packedOCSize % nchwParams.NWG == 0;
+    }
+    if(packedOCSize < logicalPackedOCSize) {
+      if(context.logger != nullptr)
+        context.logger->write("Skipping Vulkan transformerDualGemmSwiGLU tuning: packed FFN size overflow");
+      return false;
+    }
+
+    vk_shader::ComputePipelines legacyPipelines(
+      context.device->device, context.device->info, nullptr, false
+    );
+    VkResult result = VK_SUCCESS;
+    Pipeline* legacyGemmPipeline = nullptr;
+    if(legacyNCHW) {
+      result = legacyPipelines.createHgemmCooperativeMatrixNCHW(
+        legacyPipelines.hgemmCooperativeMatrixNCHW, nchwParams
+      );
+      legacyGemmPipeline = &legacyPipelines.hgemmCooperativeMatrixNCHW;
+    }
+    else {
+      result = legacyPipelines.createXgemmStridedBatched(
+        legacyPipelines.xgemmStridedBatchedFp32, config.xgemmDirect, config.vulkan
+      );
+      legacyGemmPipeline = &legacyPipelines.xgemmStridedBatchedFp32;
+    }
+    if(result != VK_SUCCESS) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Vulkan transformerDualGemmSwiGLU legacy GEMM pipeline creation failed: " +
+          vk_helper::vkErrorToString(result) + ", selected=false"
+        );
+      return false;
+    }
+    result = legacyPipelines.createTransformerSwiGLU(
+      legacyPipelines.transformerSwiGLU, config.pointwise, config.vulkan
+    );
+    if(result != VK_SUCCESS) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Vulkan transformerDualGemmSwiGLU legacy SwiGLU pipeline creation failed: " +
+          vk_helper::vkErrorToString(result) + ", selected=false"
+        );
+      return false;
+    }
+
+    vector<TransformerDualGemmSwiGLUTuneParams> candidates;
+    const vector<int> scales = context.full ? vector<int>{1, 2, 4} : vector<int>{1, 2};
+    for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+      // cooperativeMatrixTuneShapes contains every device-supported FP16 A/B
+      // tuple, for both 16-bit and 32-bit accumulators. Do not cap this list
+      // in quick mode; only the tile-size variants are reduced there.
+      vector<TransformerDualGemmSwiGLUTuneParams> geometry;
+      TransformerDualGemmSwiGLUTuneParams base;
+      base.accType = shape.accType;
+      base.MWARP = shape.MSize;
+      base.NWARP = shape.NSize;
+      base.KDIM = shape.KSize;
+      base.subgroupSize = shape.subgroupSize;
+      base.MWAVE = shape.MSize;
+      base.NWAVE = shape.NSize;
+      base.MWG = shape.MSize;
+      base.NWG = shape.NSize;
+      base.KWG = shape.KSize;
+      base.VWM = 1;
+      base.VWN = 1;
+      geometry.push_back(base);
+      for(int scale: scales) {
+        if(scale == 1)
+          continue;
+        TransformerDualGemmSwiGLUTuneParams mVariant = base;
+        if(checkedMultiply(shape.MSize, scale, mVariant.MWG)) {
+          mVariant.MWAVE = mVariant.MWG;
+          geometry.push_back(mVariant);
+        }
+        TransformerDualGemmSwiGLUTuneParams nVariant = base;
+        if(checkedMultiply(shape.NSize, scale, nVariant.NWG)) {
+          nVariant.NWAVE = nVariant.NWG;
+          geometry.push_back(nVariant);
+        }
+        TransformerDualGemmSwiGLUTuneParams kVariant = base;
+        if(checkedMultiply(shape.KSize, scale, kVariant.KWG))
+          geometry.push_back(kVariant);
+      }
+      for(const TransformerDualGemmSwiGLUTuneParams& geometryCandidate: geometry) {
+        for(int sb: {0, 1}) {
+          TransformerDualGemmSwiGLUTuneParams candidate = geometryCandidate;
+          candidate.SB = sb;
+          if(candidate.isValid() && cSize % candidate.KWG == 0 && ffnSize % candidate.NWG == 0 &&
+             isValidCooperativeMatrixTuneParams(context, candidate)) {
+            const bool duplicate = any_of(candidates.begin(), candidates.end(), [&](const auto& existing) {
+              return existing.MWARP == candidate.MWARP && existing.NWARP == candidate.NWARP &&
+                     existing.KDIM == candidate.KDIM && existing.subgroupSize == candidate.subgroupSize &&
+                     existing.MWG == candidate.MWG && existing.NWG == candidate.NWG &&
+                     existing.KWG == candidate.KWG && existing.MWAVE == candidate.MWAVE &&
+                     existing.NWAVE == candidate.NWAVE && existing.accType == candidate.accType &&
+                     existing.SB == candidate.SB && existing.VWM == candidate.VWM &&
+                     existing.VWN == candidate.VWN;
+            });
+            if(!duplicate)
+              candidates.push_back(candidate);
+          }
+        }
+      }
+    }
+    if(candidates.empty()) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Skipping Vulkan transformerDualGemmSwiGLU tuning: no device-feasible candidates match model dimensions, selected=false"
+        );
+      return false;
+    }
+
+    const int logicalHW = std::max(1, context.nnXLen * context.nnYLen);
+    const int legacySpatialAlignment = legacyNCHW ? nchwParams.getRequiredSpatialAlignment() : 1;
+    const int maxCandidates = static_cast<int>(candidates.size());
+    double bestFusedCallsPerSecond = 0.0;
+    double conservativeLegacyCallsPerSecond = 0.0;
+    double bestErrorProp = numeric_limits<double>::quiet_NaN();
+    TransformerDualGemmSwiGLUTuneParams bestCandidate;
+    vk_shader::ComputePipelines candidatePipelines(
+      context.device->device, context.device->info, nullptr, false
+    );
+    size_t candidateIndex = 0;
+    bool printedReferenceHeartbeat = false;
+    for(const TransformerDualGemmSwiGLUTuneParams& params: candidates) {
+      candidateIndex++;
+      VulkanTuneParams candidateConfig = config;
+      candidateConfig.vulkan.shouldUseFP16Storage = true;
+      candidateConfig.vulkan.shouldUseFP16Compute = true;
+      candidateConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+      candidateConfig.transformerDualGemmSwiGLU = params;
+      result = candidatePipelines.createTransformerDualGemmSwiGLU(
+        candidatePipelines.transformerDualGemmSwiGLU, params
+      );
+      if(result != VK_SUCCESS) {
+        if(!context.printOnlyOnImprovement && context.logger != nullptr)
+          context.logger->write(
+            "Vulkan transformerDualGemmSwiGLU candidate " + to_string(candidateIndex) + "/" +
+            to_string(maxCandidates) + " pipeline rejected: " + vk_helper::vkErrorToString(result)
+          );
+        continue;
+      }
+
+      const int combinedAlignment = std::lcm(legacySpatialAlignment, params.getRequiredSpatialAlignment());
+      const int hwSize = vk_helper::roundUpToMultipleInt(logicalHW, combinedAlignment);
+      double fusedCallsPerSecond = 0.0;
+      double legacyCallsPerSecond = 0.0;
+      double errorProp = numeric_limits<double>::quiet_NaN();
+      vector<float> readback;
+      string error;
+      const bool measured = context.timer != nullptr && context.timer->measureTransformerDualGemmSwiGLU(
+        candidateConfig, legacyConfig, context,
+        &candidatePipelines.transformerDualGemmSwiGLU,
+        legacyGemmPipeline, &legacyPipelines.transformerSwiGLU,
+        legacyNCHW, hwSize, packedOCSize,
+        fusedCallsPerSecond, legacyCallsPerSecond, errorProp, readback, error
+      );
+      candidatePipelines.destroyPipeline(candidatePipelines.transformerDualGemmSwiGLU);
+      if(!measured || !isfinite(fusedCallsPerSecond) || fusedCallsPerSecond <= 0.0 ||
+         !isfinite(legacyCallsPerSecond) || legacyCallsPerSecond <= 0.0) {
+        if(!context.printOnlyOnImprovement && context.logger != nullptr)
+          context.logger->write(
+            "Vulkan transformerDualGemmSwiGLU candidate " + to_string(candidateIndex) + "/" +
+            to_string(maxCandidates) + " measurement failed: " +
+            (error.empty() ? "invalid calls/sec" : error)
+          );
+        continue;
+      }
+      conservativeLegacyCallsPerSecond = std::max(conservativeLegacyCallsPerSecond, legacyCallsPerSecond);
+      const bool numericallyValid = isfinite(errorProp) &&
+        errorProp <= VulkanTuner::TRANSFORMER_DUAL_GEMM_ERROR_TOLERANCE;
+      if(!printedReferenceHeartbeat && context.printOnlyOnImprovement && context.logger != nullptr) {
+        context.logger->write(
+          "(1/" + to_string(maxCandidates) + ") (reference) transformerDualGemmSwiGLU legacy packed-GEMM+SwiGLU=" +
+          Global::strprintf("%.6g", legacyCallsPerSecond) + " calls/s"
+        );
+        printedReferenceHeartbeat = true;
+      }
+      const bool isBest = numericallyValid && fusedCallsPerSecond > bestFusedCallsPerSecond;
+      if(isBest) {
+        bestFusedCallsPerSecond = fusedCallsPerSecond;
+        bestErrorProp = errorProp;
+        bestCandidate = params;
+      }
+      if(context.logger != nullptr && (!context.printOnlyOnImprovement || isBest)) {
+        context.logger->write(
+          "Vulkan transformerDualGemmSwiGLU candidate " + to_string(candidateIndex) + "/" +
+          to_string(maxCandidates) + ": acc=" + to_string(params.accType) +
+          ", fragment=" + to_string(params.MWARP) + "x" + to_string(params.NWARP) + "x" + to_string(params.KDIM) +
+          ", workgroup=" + to_string(params.MWG) + "x" + to_string(params.NWG) + "x" + to_string(params.KWG) +
+          ", SB=" + to_string(params.SB) + ", fused=" + Global::strprintf("%.6g", fusedCallsPerSecond) +
+          " calls/s, legacy=" + Global::strprintf("%.6g", legacyCallsPerSecond) +
+          " calls/s, error=" + Global::strprintf("%.6g", errorProp) +
+          ", valid=" + (numericallyValid ? "true" : "false") + (isBest ? " (best)" : "")
+        );
+      }
+    }
+
+    const bool useDualGemm = bestFusedCallsPerSecond > 0.0 &&
+      VulkanTuner::isFastEnough(
+        bestFusedCallsPerSecond,
+        conservativeLegacyCallsPerSecond,
+        VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO
+      );
+    if(useDualGemm) {
+      config.transformerDualGemmSwiGLU = bestCandidate;
+      config.vulkan.shouldUseTransformerDualGemmSwiGLU = true;
+    }
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan transformerDualGemmSwiGLU comparison: fused=" +
+        Global::strprintf("%.6g", bestFusedCallsPerSecond) + " calls/s, legacy packed-GEMM+SwiGLU=" +
+        Global::strprintf("%.6g", conservativeLegacyCallsPerSecond) + " calls/s, error=" +
+        Global::strprintf("%.6g", bestErrorProp) + ", required_ratio=" +
+        Global::strprintf("%.2f", VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (useDualGemm ? "true" : "false")
+      );
+    }
+    return useDualGemm;
+  }
 }
 
 bool VulkanTuner::HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(
@@ -5732,6 +6449,7 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.shouldUseFP16Compute = false;
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
   tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
+  tunedConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
   const double xgemmDirectCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
   const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
@@ -5744,6 +6462,7 @@ void VulkanTuner::tune(
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
+  tuneTransformerDualGemmSwiGLU(context, tunedConfig);
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning final selection: "
@@ -5751,7 +6470,9 @@ void VulkanTuner::tune(
       ", shouldUseFP16Compute=" + string(tunedConfig.vulkan.shouldUseFP16Compute ? "1" : "0") +
       ", shouldUseCooperativeMatrix=" + string(tunedConfig.vulkan.shouldUseCooperativeMatrix ? "1" : "0") +
       ", shouldUseHgemmCooperativeMatrixNCHW=" +
-        string(tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW ? "1" : "0")
+        string(tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW ? "1" : "0") +
+      ", shouldUseTransformerDualGemmSwiGLU=" +
+        string(tunedConfig.vulkan.shouldUseTransformerDualGemmSwiGLU ? "1" : "0")
     );
   }
   dummyThread.stopAndJoin();
@@ -5786,9 +6507,11 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
       throw IOError("Vulkan tuning capabilities changed for " + filename);
     if((loaded.vulkan.shouldUseCooperativeMatrix &&
         !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrix)) ||
-       (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-        !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)) ||
-       (loaded.transformer.USE_COOPERATIVE_ATTN &&
+         (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+          !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)) ||
+         (loaded.vulkan.shouldUseTransformerDualGemmSwiGLU &&
+          !isValidCooperativeMatrixConfig(deviceInfo, loaded.transformerDualGemmSwiGLU)) ||
+         (loaded.transformer.USE_COOPERATIVE_ATTN &&
         !isValidCooperativeMatrixConfig(
           deviceInfo, loaded.transformer, modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
         )))
@@ -5838,6 +6561,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrix)) ||
          (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNCHW)) ||
+         (loaded.vulkan.shouldUseTransformerDualGemmSwiGLU &&
+          !isValidCooperativeMatrixConfig(device->info, loaded.transformerDualGemmSwiGLU)) ||
          (loaded.transformer.USE_COOPERATIVE_ATTN &&
           !isValidCooperativeMatrixConfig(
             device->info, loaded.transformer, modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim

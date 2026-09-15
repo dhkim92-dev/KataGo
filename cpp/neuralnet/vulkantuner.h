@@ -13,7 +13,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 1;
+  constexpr int TUNER_VERSION = 23;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -22,11 +22,29 @@ namespace VulkanTuner {
   constexpr double COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO = 1.10;
   constexpr double COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE = 0.001;
   constexpr double COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO = 1.20;
+  constexpr double TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO = 1.10;
+  constexpr double TRANSFORMER_DUAL_GEMM_ERROR_TOLERANCE = 0.002;
   constexpr double COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO = 0.90;
   constexpr std::size_t COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR = 3;
   constexpr std::size_t COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT = 2;
 
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
+  std::vector<float> computeTransformerDualGemmSwiGLUReference(
+    const std::vector<float>& input,
+    const std::vector<float>& packedFilter,
+    int batchSize,
+    int hwSize,
+    int cSize,
+    int packedOCSize,
+    int ffnSize
+  );
+  std::vector<float> packTransformerDualGemmSwiGLUFilter(
+    const std::vector<float>& mainWeights,
+    const std::vector<float>& gateWeights,
+    int cSize,
+    int ffnSize,
+    int packedOCSize
+  );
   double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);
   double computeCooperativeMatrixTuningScore(double callsPerSecond, double errorProp, double errorTolerance);
   bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
@@ -52,6 +70,8 @@ namespace VulkanTuner {
 
     static ModelInfoForTuning ofDesc(const ModelDesc& desc);
   };
+
+  int getTransformerFFNInputChannelsForTuning(const ModelInfoForTuning& modelInfo);
 
   struct HgemmCooperativeMatrixNCHWTuner {
     static bool selectCooperativeMatrixProperties(

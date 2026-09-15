@@ -59,6 +59,10 @@ extern "C" {
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DECLARE_HGEMM_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_VARIANT
@@ -478,6 +482,10 @@ namespace vk_shader {
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_SPIRV_VARIANT
@@ -1204,6 +1212,13 @@ struct LocalDimHash {
       int ocSize;
     };
 
+    struct TransformerDualGemmSwiGLUPushParams {
+      int cSize;
+      int hwSize;
+      int packedOCSize;
+      int ffnSize;
+    };
+
     /** Push constants for hgemm_cooperative_matrix. */
     struct HGemmCooperativeMatrixParams {
       int M;
@@ -1254,7 +1269,6 @@ struct LocalDimHash {
       int size;
       int packedInputBatchStride;
       int outputBatchStride;
-      int batchIndex;
     };
 
     struct TransformerSpatialRMSNormApplyPushParams {
@@ -1396,6 +1410,18 @@ struct LocalDimHash {
       bool isSimple() const;
     };
 
+    /** Runtime tuning parameters for the fused transformer dual-GEMM SwiGLU path. */
+    struct TransformerDualGemmSwiGLUTuneParams : HGemmCooperativeMatrixNCHWTuneParams {
+      TransformerDualGemmSwiGLUTuneParams() {
+        VWM = 1;
+        VWN = 1;
+      }
+
+      bool isValid() const {
+        return HGemmCooperativeMatrixNCHWTuneParams::isValid() && VWM == 1 && VWN == 1;
+      }
+    };
+
     bool isValidCooperativeMatrixConfig(
       const VulkanDeviceInfo& deviceInfo,
       const HGemmCooperativeMatrixTuneParams& params
@@ -1403,6 +1429,10 @@ struct LocalDimHash {
     bool isValidCooperativeMatrixConfig(
       const VulkanDeviceInfo& deviceInfo,
       const HGemmCooperativeMatrixNCHWTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const TransformerDualGemmSwiGLUTuneParams& params
     );
 
     struct TransformerTuneParams {
@@ -1457,6 +1487,7 @@ struct LocalDimHash {
       bool shouldUseCooperativeMatrix = false;
       bool shouldUseHgemmCooperativeMatrixNCHW = false;
       bool shouldUseSubgroup = false;
+      bool shouldUseTransformerDualGemmSwiGLU = false;
     };
 
     // All non-GEMM specialization parameters are stored once for the final
@@ -1470,6 +1501,7 @@ struct LocalDimHash {
       ConvTuneParams conv5x5;
       HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
       HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
+      TransformerDualGemmSwiGLUTuneParams transformerDualGemmSwiGLU;
       XgemmTuneParams xgemm;
       XgemmTuneParams xgemm16;
       XgemmDirectTuneParams xgemmDirect;
@@ -1605,6 +1637,10 @@ struct LocalDimHash {
     DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
     DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
 #undef DECLARE_HGEMM_SHADER_MODULES
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
@@ -1715,6 +1751,7 @@ struct LocalDimHash {
     Pipeline transformerScaleDotProductCooperative;
     Pipeline transformerScaleDotProductNaive;
     Pipeline transformerSwiGLU;
+    Pipeline transformerDualGemmSwiGLU;
     Pipeline transformerSpatialRMSNormApply;
     Pipeline transformerSpatialRMSNormReduce;
     Pipeline transformerSpatialRMSNormSumSq;
@@ -1738,6 +1775,7 @@ struct LocalDimHash {
     VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createHgemmCooperativeMatrix(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
+    VkResult createTransformerDualGemmSwiGLU(Pipeline& pipeline, const tune::TransformerDualGemmSwiGLUTuneParams& tuneParams);
     VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createXgemmBatched(
       Pipeline& pipeline,

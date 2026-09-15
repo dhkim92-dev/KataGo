@@ -148,6 +148,23 @@ namespace vkcompute {
     VkResult *result
   );
 
+  void doTransformerDualGemmSwiGLU(
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    const VkCommandBuffer cb,
+    const VkDescriptorSet descriptorSet,
+    const VulkanBuffer* input,
+    const VulkanBuffer* packedFilter,
+    VulkanBuffer* output,
+    int batchSize,
+    int hwSize,
+    int ffnSize,
+    int cSize,
+    int packedOCSize,
+    VkResult* result
+  );
+
   struct SpatialRMSNormSizing {
     int numCHWWorkgroups;   // workgroups per batch element for pass 1
     int tilesPerGroupPass1; // tiles per group for pass 1
@@ -167,8 +184,7 @@ namespace vkcompute {
     VulkanBuffer* output,
     int totalSize,
     int packedInputBatchStride = 0,
-    int outputBatchStride = 0,
-    int batchCount = 0
+    int outputBatchStride = 0
   );
 }
 

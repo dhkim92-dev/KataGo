@@ -7,6 +7,7 @@
 
 #include <unordered_map>
 #include <memory>
+#include <numeric>
 #include <chrono>
 #include <iostream>
 #include "../core/global.h"
@@ -347,6 +348,8 @@ struct ComputeContext {
                 : false;
           tuneParams.vulkan.shouldUseFP16Storage = useFP16Storage;
           tuneParams.vulkan.shouldUseFP16Compute = useFP16Compute;
+          if(!useFP16Storage || !useFP16Compute)
+            tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, vulkanDevice->info, logger);
           VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
           if(result != VK_SUCCESS)
@@ -3251,6 +3254,8 @@ struct TransformerFFNBlock {
 
   VkDescriptorSet pointwiseDS;
   VkDescriptorSet swigluDS;
+  bool usingTransformerDualGemmSwiGLU;
+  VkDescriptorSet transformerDualGemmSwiGLUDS;
 
   TransformerFFNBlock(
     ComputeHandleInternal *handle,
@@ -3267,7 +3272,9 @@ struct TransformerFFNBlock {
     linear1AndGate(new TransformerMatMulLayer(handle, &packedLinearDesc)),
     linear2(new TransformerMatMulLayer(handle, &desc->linear2)),
     pointwiseDS(VK_NULL_HANDLE),
-    swigluDS(VK_NULL_HANDLE)
+    swigluDS(VK_NULL_HANDLE),
+    usingTransformerDualGemmSwiGLU(false),
+    transformerDualGemmSwiGLUDS(VK_NULL_HANDLE)
   {
     packedLinearDesc.releaseWeights();
     VkResult res;
@@ -3276,6 +3283,26 @@ struct TransformerFFNBlock {
     swigluDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSwiGLU.descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate swigluDS", res);
 
+    const auto& dualParams = handle->tuneParams.transformerDualGemmSwiGLU;
+    usingTransformerDualGemmSwiGLU =
+      handle->usingFP16Storage &&
+      handle->tuneParams.vulkan.canUseCooperativeMatrix &&
+      handle->tuneParams.vulkan.shouldUseFP16Storage &&
+      handle->tuneParams.vulkan.shouldUseFP16Compute &&
+      handle->tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
+      dualParams.isValid() &&
+      numChannels % dualParams.KWG == 0 &&
+      ffnChannels % dualParams.NWG == 0 &&
+      paddedNNXYLen % dualParams.getRequiredSpatialAlignment() == 0 &&
+      handle->pipelines->transformerDualGemmSwiGLU.pipeline != VK_NULL_HANDLE;
+    if(usingTransformerDualGemmSwiGLU) {
+      transformerDualGemmSwiGLUDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice,
+        handle->pipelines->transformerDualGemmSwiGLU.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate transformerDualGemmSwiGLUDS", res);
+    }
   }
 
    ~TransformerFFNBlock() {
@@ -3297,23 +3324,33 @@ struct TransformerFFNBlock {
      // Step 1: RMSNorm
     preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
 
-    // Step 2: compute the linear and gate projections together into [linear | gate | padding].
-    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
-    linear1AndGate->forward(cb, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+    // Step 2: write compact SwiGLU output for linear2.
+    SizedBuf<VulkanBuffer*> ffnOutBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    if(usingTransformerDualGemmSwiGLU) {
+      VkResult res;
+      vkcompute::doTransformerDualGemmSwiGLU(
+        handle->vulkanDevice, handle->tuneParams, &handle->pipelines->transformerDualGemmSwiGLU,
+        cb, transformerDualGemmSwiGLUDS, trunkScratch, linear1AndGate->filter, ffnOutBuf.buf,
+        batchSize, paddedNNXYLen, ffnChannels, numChannels, packedOutChannels, &res
+      );
+      CHECK_VK_MSG("Execute fused transformer dual-GEMM SwiGLU", res);
+    }
+    else {
+      SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
+      linear1AndGate->forward(cb, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+      const int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+      const int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
+      const int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+      vkcompute::doSwiGLU(
+        handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU,
+        handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnOutBuf.buf, totalSize,
+        packedInputBatchStride, outputBatchStride
+      );
+    }
+    // Step 3: linear2 projection: ffnOutBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
+    linear2->forward(cb, batchSize, ffnOutBuf.buf, trunkScratch, mask, convWorkspace);
 
-    // Step 3: apply SwiGLU in place and compact the batch outputs for linear2.
-    int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-    int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
-    int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-    vkcompute::doSwiGLU(
-      handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU,
-      handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnBuf.buf, totalSize,
-      packedInputBatchStride, outputBatchStride, batchSize
-    );
-    // Step 4: linear2 projection: ffnBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
-    linear2->forward(cb, batchSize, ffnBuf.buf, trunkScratch, mask, convWorkspace);
-
-    // Step 5: Add residual
+    // Step 4: Add residual
     performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
   }
 
@@ -3329,25 +3366,40 @@ struct TransformerFFNBlock {
     (void)maskSum;
     preLN->debug(batchSize, trunk, trunkScratch, mask);
 
-    SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
-    linear1AndGate->debug(batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+    SizedBuf<VulkanBuffer*> ffnOutBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    if(usingTransformerDualGemmSwiGLU) {
+      VkCommandBuffer dualGemmCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+      VkResult res = vk_helper::beginCommandBuffer(dualGemmCB);
+      CHECK_VK_MSG("Begin command buffer for TransformerFFNBlock dual-GEMM SwiGLU", res);
+      vkcompute::doTransformerDualGemmSwiGLU(
+        handle->vulkanDevice, handle->tuneParams, &handle->pipelines->transformerDualGemmSwiGLU,
+        dualGemmCB, transformerDualGemmSwiGLUDS, trunkScratch, linear1AndGate->filter, ffnOutBuf.buf,
+        batchSize, paddedNNXYLen, ffnChannels, numChannels, packedOutChannels, &res
+      );
+      res = vk_helper::endCommandBuffer(dualGemmCB);
+      CHECK_VK_MSG("End command buffer for TransformerFFNBlock dual-GEMM SwiGLU", res);
+      vk_helper::submitCommandBuffers(handle->vulkanDevice, {dualGemmCB});
+    }
+    else {
+      SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
+      linear1AndGate->debug(batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
+      const int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+      const int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
+      const int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+      VkCommandBuffer swigluCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+      VkResult res = vk_helper::beginCommandBuffer(swigluCB);
+      CHECK_VK_MSG("Begin command buffer for TransformerFFNBlock SwiGLU", res);
+      vkcompute::doSwiGLU(
+        handle->vulkanDevice, swigluCB, swigluDS, handle->pipelines->transformerSwiGLU,
+        handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnOutBuf.buf, totalSize,
+        packedInputBatchStride, outputBatchStride
+      );
+      res = vk_helper::endCommandBuffer(swigluCB);
+      CHECK_VK_MSG("End command buffer for TransformerFFNBlock SwiGLU", res);
+      vk_helper::submitCommandBuffers(handle->vulkanDevice, {swigluCB});
+    }
 
-    int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-    int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
-    int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-    VkCommandBuffer swigluCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-    VkResult res = vk_helper::beginCommandBuffer(swigluCB);
-    CHECK_VK_MSG("Begin command buffer for TransformerFFNBlock SwiGLU", res);
-    vkcompute::doSwiGLU(
-      handle->vulkanDevice, swigluCB, swigluDS, handle->pipelines->transformerSwiGLU,
-      handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnBuf.buf, totalSize,
-      packedInputBatchStride, outputBatchStride, batchSize
-    );
-    res = vk_helper::endCommandBuffer(swigluCB);
-    CHECK_VK_MSG("End command buffer for TransformerFFNBlock SwiGLU", res);
-    vk_helper::submitCommandBuffers(handle->vulkanDevice, {swigluCB});
-
-    linear2->debug(batchSize, ffnBuf.buf, trunkScratch, mask, convWorkspace);
+    linear2->debug(batchSize, ffnOutBuf.buf, trunkScratch, mask, convWorkspace);
 
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
     performAddPointWise(handle, addPointWiseCB, pointwiseDS, trunk, trunkScratch, checkedTotalElts(batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"));
@@ -5059,14 +5111,27 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
     usingFP16Storage;
+  const bool usingFP16TransformerDualGemmSwiGLU =
+    tuneParams.vulkan.canUseFP16Storage &&
+    tuneParams.vulkan.canUseFP16Compute &&
+    tuneParams.vulkan.canUseCooperativeMatrix &&
+    tuneParams.vulkan.shouldUseFP16Storage &&
+    tuneParams.vulkan.shouldUseFP16Compute &&
+    tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
+    tuneParams.transformerDualGemmSwiGLU.isValid() &&
+    usingFP16Storage;
   usingFP16TensorCores =
     usingFP16Storage &&
     tuneParams.vulkan.canUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.hgemmCooperativeMatrix.isValid();
-  if(usingFP16TensorCoresFor1x1) {
-    const int spatialAlignment = tuneParams.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment();
+  if(usingFP16TensorCoresFor1x1 || usingFP16TransformerDualGemmSwiGLU) {
+    int spatialAlignment = 1;
+    if(usingFP16TensorCoresFor1x1)
+      spatialAlignment = std::lcm(spatialAlignment, tuneParams.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment());
+    if(usingFP16TransformerDualGemmSwiGLU)
+      spatialAlignment = std::lcm(spatialAlignment, tuneParams.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
     this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
   } else {
     this->paddedNNXYLen = nnXLen * nnYLen;
