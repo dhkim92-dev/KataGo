@@ -982,6 +982,7 @@ struct LocalDimHash {
       int ATTN_HEAD_DIM = 1;
       int ATTN_V_HEAD_DIM = 1;
       int COOP_Q_TILES_PER_WORKGROUP = 1;
+      int COOP_PV_N_SIZE = 16;
     };
 
     struct ScaleDotProductNaiveSpec {
@@ -1413,6 +1414,7 @@ struct LocalDimHash {
       int COOP_K_SIZE=16;
       uint32_t COOP_SUBGROUP_SIZE=32;
       uint32_t COOP_Q_TILES_PER_WORKGROUP=1;
+      int COOP_PV_N_SIZE=16;
 
       bool isValid() const;
     };

@@ -1409,6 +1409,7 @@ namespace vk_shader {
     spec.ATTN_HEAD_DIM = qHeadDim;
     spec.ATTN_V_HEAD_DIM = vHeadDim;
     spec.COOP_Q_TILES_PER_WORKGROUP = tuneParams.COOP_Q_TILES_PER_WORKGROUP;
+    spec.COOP_PV_N_SIZE = tuneParams.COOP_PV_N_SIZE;
     SpecializationData specData(spec);
 
     if(tuneParams.COOP_ACC_TYPE == 16) {

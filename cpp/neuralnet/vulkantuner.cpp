@@ -349,14 +349,23 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
        params.COOP_SUBGROUP_SIZE
      ))
     return false;
+  if(!isSupportedCooperativeMatrixShape(
+       deviceInfo,
+       params.COOP_ACC_TYPE,
+       params.COOP_M_SIZE,
+       params.COOP_PV_N_SIZE,
+       params.COOP_N_SIZE,
+       params.COOP_SUBGROUP_SIZE
+     ))
+    return false;
 
   const int headDimPad = ((qHeadDim + params.COOP_K_SIZE - 1) / params.COOP_K_SIZE) * params.COOP_K_SIZE;
   const int kvPad = ((params.COOP_N_SIZE + params.COOP_K_SIZE - 1) / params.COOP_K_SIZE) * params.COOP_K_SIZE;
-  const int vHeadDimPad = ((vHeadDim + params.COOP_N_SIZE - 1) / params.COOP_N_SIZE) * params.COOP_N_SIZE;
+  const int vHeadDimPad = ((vHeadDim + params.COOP_PV_N_SIZE - 1) / params.COOP_PV_N_SIZE) * params.COOP_PV_N_SIZE;
   const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
   const uint64_t localSize = static_cast<uint64_t>(params.COOP_SUBGROUP_SIZE) * params.COOP_Q_TILES_PER_WORKGROUP;
   const uint64_t sharedBytes =
-    5 * 16ull +
+    7 * 16ull +
     2ull * (
       static_cast<uint64_t>(headDimPad) * qBlock +
       static_cast<uint64_t>(headDimPad) * params.COOP_N_SIZE +
@@ -364,6 +373,7 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
     ) +
     static_cast<uint64_t>(params.COOP_ACC_TYPE == 32 ? 4 : 2) *
       qBlock * params.COOP_N_SIZE +
+    4ull * qBlock * vHeadDimPad +
     4ull * params.COOP_N_SIZE;
   const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
   return localSize <= limits.maxComputeWorkGroupSize[0] &&
@@ -590,6 +600,8 @@ bool TransformerTuneParams::isValid() const {
     return false;
   if(COOP_M_SIZE <= 0 || COOP_N_SIZE <= 0 || COOP_K_SIZE <= 0 || COOP_SUBGROUP_SIZE == 0)
     return false;
+  if(COOP_PV_N_SIZE <= 0 || (COOP_PV_N_SIZE & (COOP_PV_N_SIZE - 1)) != 0)
+    return false;
   if(COOP_Q_TILES_PER_WORKGROUP == 0 ||
      (COOP_Q_TILES_PER_WORKGROUP & (COOP_Q_TILES_PER_WORKGROUP - 1)) != 0)
     return false;
@@ -708,6 +720,7 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          transformer.COOP_K_SIZE == other.transformer.COOP_K_SIZE &&
          transformer.COOP_SUBGROUP_SIZE == other.transformer.COOP_SUBGROUP_SIZE &&
          transformer.COOP_Q_TILES_PER_WORKGROUP == other.transformer.COOP_Q_TILES_PER_WORKGROUP &&
+         transformer.COOP_PV_N_SIZE == other.transformer.COOP_PV_N_SIZE &&
          rmsNorm.WG_C_SIZE == other.rmsNorm.WG_C_SIZE &&
          rmsNorm.WG_XY_SIZE == other.rmsNorm.WG_XY_SIZE &&
          rmsNorm.C_PER_THREAD == other.rmsNorm.C_PER_THREAD &&
@@ -778,7 +791,7 @@ namespace {
     WRITE_CONV("conv3x3", profile.conv3x3); WRITE_CONV("conv5x5", profile.conv5x5);
 #undef WRITE_CONV
     WRITE("gPool.XYSTRIDE", profile.gPool.XYSTRIDE); WRITE("gPool.CHANNELSTRIDE", profile.gPool.CHANNELSTRIDE); WRITE("gPool.BATCHSTRIDE", profile.gPool.BATCHSTRIDE);
-    WRITE("transformer.ATTN_BLOCK_Q", profile.transformer.ATTN_BLOCK_Q); WRITE("transformer.ATTN_BLOCK_KV", profile.transformer.ATTN_BLOCK_KV); WRITE("transformer.Q_PER_THREAD", profile.transformer.Q_PER_THREAD); WRITE("transformer.USE_TILED_ATTN", profile.transformer.USE_TILED_ATTN); WRITE("transformer.USE_COOPERATIVE_ATTN", profile.transformer.USE_COOPERATIVE_ATTN); WRITE("transformer.COOP_ACC_TYPE", profile.transformer.COOP_ACC_TYPE); WRITE("transformer.COOP_M_SIZE", profile.transformer.COOP_M_SIZE); WRITE("transformer.COOP_N_SIZE", profile.transformer.COOP_N_SIZE); WRITE("transformer.COOP_K_SIZE", profile.transformer.COOP_K_SIZE); WRITE("transformer.COOP_SUBGROUP_SIZE", profile.transformer.COOP_SUBGROUP_SIZE); WRITE("transformer.COOP_Q_TILES_PER_WORKGROUP", profile.transformer.COOP_Q_TILES_PER_WORKGROUP);
+    WRITE("transformer.ATTN_BLOCK_Q", profile.transformer.ATTN_BLOCK_Q); WRITE("transformer.ATTN_BLOCK_KV", profile.transformer.ATTN_BLOCK_KV); WRITE("transformer.Q_PER_THREAD", profile.transformer.Q_PER_THREAD); WRITE("transformer.USE_TILED_ATTN", profile.transformer.USE_TILED_ATTN); WRITE("transformer.USE_COOPERATIVE_ATTN", profile.transformer.USE_COOPERATIVE_ATTN); WRITE("transformer.COOP_ACC_TYPE", profile.transformer.COOP_ACC_TYPE); WRITE("transformer.COOP_M_SIZE", profile.transformer.COOP_M_SIZE); WRITE("transformer.COOP_N_SIZE", profile.transformer.COOP_N_SIZE); WRITE("transformer.COOP_K_SIZE", profile.transformer.COOP_K_SIZE); WRITE("transformer.COOP_SUBGROUP_SIZE", profile.transformer.COOP_SUBGROUP_SIZE); WRITE("transformer.COOP_Q_TILES_PER_WORKGROUP", profile.transformer.COOP_Q_TILES_PER_WORKGROUP); WRITE("transformer.COOP_PV_N_SIZE", profile.transformer.COOP_PV_N_SIZE);
     WRITE("rmsNorm.WG_C_SIZE", profile.rmsNorm.WG_C_SIZE); WRITE("rmsNorm.WG_XY_SIZE", profile.rmsNorm.WG_XY_SIZE); WRITE("rmsNorm.C_PER_THREAD", profile.rmsNorm.C_PER_THREAD);
     WRITE("pointwise.ELTS_PER_THREAD", profile.pointwise.ELTS_PER_THREAD); WRITE("pointwise.LOCAL_SIZE", profile.pointwise.LOCAL_SIZE);
     WRITE("addChannelBiases.XY_ELTS_PER_THREAD", profile.addChannelBiases.XY_ELTS_PER_THREAD); WRITE("addChannelBiases.NC_ELTS_PER_THREAD", profile.addChannelBiases.NC_ELTS_PER_THREAD);
@@ -830,7 +843,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 107)
+  if(values.size() != 108)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -858,7 +871,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
     READ_CONV("conv3x3", profile.conv3x3); READ_CONV("conv5x5", profile.conv5x5);
 #undef READ_CONV
     profile.gPool.XYSTRIDE = read("gPool.XYSTRIDE"); profile.gPool.CHANNELSTRIDE = read("gPool.CHANNELSTRIDE"); profile.gPool.BATCHSTRIDE = read("gPool.BATCHSTRIDE");
-    profile.transformer.ATTN_BLOCK_Q = read("transformer.ATTN_BLOCK_Q"); profile.transformer.ATTN_BLOCK_KV = read("transformer.ATTN_BLOCK_KV"); profile.transformer.Q_PER_THREAD = read("transformer.Q_PER_THREAD"); profile.transformer.USE_TILED_ATTN = read("transformer.USE_TILED_ATTN"); profile.transformer.USE_COOPERATIVE_ATTN = read("transformer.USE_COOPERATIVE_ATTN"); profile.transformer.COOP_ACC_TYPE = read("transformer.COOP_ACC_TYPE"); profile.transformer.COOP_M_SIZE = read("transformer.COOP_M_SIZE"); profile.transformer.COOP_N_SIZE = read("transformer.COOP_N_SIZE"); profile.transformer.COOP_K_SIZE = read("transformer.COOP_K_SIZE"); profile.transformer.COOP_SUBGROUP_SIZE = read("transformer.COOP_SUBGROUP_SIZE"); profile.transformer.COOP_Q_TILES_PER_WORKGROUP = read("transformer.COOP_Q_TILES_PER_WORKGROUP");
+    profile.transformer.ATTN_BLOCK_Q = read("transformer.ATTN_BLOCK_Q"); profile.transformer.ATTN_BLOCK_KV = read("transformer.ATTN_BLOCK_KV"); profile.transformer.Q_PER_THREAD = read("transformer.Q_PER_THREAD"); profile.transformer.USE_TILED_ATTN = read("transformer.USE_TILED_ATTN"); profile.transformer.USE_COOPERATIVE_ATTN = read("transformer.USE_COOPERATIVE_ATTN"); profile.transformer.COOP_ACC_TYPE = read("transformer.COOP_ACC_TYPE"); profile.transformer.COOP_M_SIZE = read("transformer.COOP_M_SIZE"); profile.transformer.COOP_N_SIZE = read("transformer.COOP_N_SIZE"); profile.transformer.COOP_K_SIZE = read("transformer.COOP_K_SIZE"); profile.transformer.COOP_SUBGROUP_SIZE = read("transformer.COOP_SUBGROUP_SIZE"); profile.transformer.COOP_Q_TILES_PER_WORKGROUP = read("transformer.COOP_Q_TILES_PER_WORKGROUP"); profile.transformer.COOP_PV_N_SIZE = read("transformer.COOP_PV_N_SIZE");
     profile.rmsNorm.WG_C_SIZE = read("rmsNorm.WG_C_SIZE"); profile.rmsNorm.WG_XY_SIZE = read("rmsNorm.WG_XY_SIZE"); profile.rmsNorm.C_PER_THREAD = read("rmsNorm.C_PER_THREAD");
     profile.pointwise.ELTS_PER_THREAD = read("pointwise.ELTS_PER_THREAD"); profile.pointwise.LOCAL_SIZE = read("pointwise.LOCAL_SIZE");
     profile.addChannelBiases.XY_ELTS_PER_THREAD = read("addChannelBiases.XY_ELTS_PER_THREAD"); profile.addChannelBiases.NC_ELTS_PER_THREAD = read("addChannelBiases.NC_ELTS_PER_THREAD");
@@ -893,6 +906,10 @@ namespace {
         modelInfo.transformerVHeadDim = attn->vHeadDim;
         modelInfo.transformerNumHeads = attn->numHeads;
         modelInfo.transformerNumKVHeads = attn->numKVHeads;
+        modelInfo.transformerUseRope = attn->useRope;
+        modelInfo.transformerLearnableRope = attn->learnableRope;
+        modelInfo.transformerRopeTheta = attn->ropeTheta;
+        modelInfo.transformerRopeFreqs = attn->ropeFreqs;
       }
       else if(block.first == TRANSFORMER_FFN_BLOCK_KIND) {
         const TransformerFFNDesc* ffn = static_cast<const TransformerFFNDesc*>(block.second.get());
@@ -1287,7 +1304,11 @@ namespace {
     if(tunerName == "pointwise" || tunerName == "transformerRMSNorm" || tunerName == "spatialRMSNorm")
       return {tunerName, 20, 0, 0.05, 0.25, batchSizes, {}, workloadWeights};
     if(tunerName == "transformerAttention")
-      return {tunerName, 12, 0, 0.005, 0.025, batchSizes, {}, workloadWeights};
+      return {
+        tunerName, 12, 0, VulkanTuner::COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE,
+        VulkanTuner::COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE * 5.0,
+        batchSizes, {}, workloadWeights
+      };
     return {tunerName, 20, 0, 0.005, 0.025, batchSizes, {}, workloadWeights};
   }
 
@@ -1534,6 +1555,7 @@ namespace {
       add("COOP_K_SIZE", config.transformer.COOP_K_SIZE);
       add("COOP_SUBGROUP_SIZE", config.transformer.COOP_SUBGROUP_SIZE);
       add("COOP_Q_TILES_PER_WORKGROUP", config.transformer.COOP_Q_TILES_PER_WORKGROUP);
+      add("COOP_PV_N_SIZE", config.transformer.COOP_PV_N_SIZE);
     }
     else if(tunerName == "transformerRMSNorm") {
       add("WG_C_SIZE", config.rmsNorm.WG_C_SIZE);
@@ -1903,6 +1925,48 @@ namespace {
             for(size_t xy = 0; xy < logicalXYSize; xy++)
               data[(n * channels + c) * xySize + xy] = static_cast<float>(rand.nextDouble());
       };
+      const auto fillTransformerRopeTable = [&](vector<float>& data, bool sine) {
+        const int headDim = std::max(1, context.modelInfo.transformerHeadDim);
+        const int numPairs = headDim / 2;
+        const int numKVHeads = std::max(1, context.modelInfo.transformerNumKVHeads);
+        const int numPairsPerDim = numPairs / 2;
+        const int dimHalf = std::max(1, numPairs);
+        const bool learnable = context.modelInfo.transformerLearnableRope;
+        for(int tableHead = 0; tableHead < (learnable ? numKVHeads : 1); tableHead++) {
+          for(int pairIdx = 0; pairIdx < numPairs; pairIdx++) {
+            float freqX = 0.0f;
+            float freqY = 0.0f;
+            if(learnable) {
+              const size_t freqIndex = static_cast<size_t>(tableHead * numPairs + pairIdx) * 2;
+              if(freqIndex + 1 < context.modelInfo.transformerRopeFreqs.size()) {
+                freqX = context.modelInfo.transformerRopeFreqs[freqIndex];
+                freqY = context.modelInfo.transformerRopeFreqs[freqIndex + 1];
+              }
+            }
+            else {
+              const int frequencyPair = pairIdx < numPairsPerDim ? pairIdx : pairIdx - numPairsPerDim;
+              const float theta = context.modelInfo.transformerRopeTheta;
+              const float frequency = theta > 0.0f
+                ? 1.0f / powf(theta, static_cast<float>(2 * frequencyPair) / static_cast<float>(dimHalf))
+                : 0.0f;
+              if(pairIdx < numPairsPerDim)
+                freqY = frequency;
+              else
+                freqX = frequency;
+            }
+            const int tableIndex = tableHead * numPairs + pairIdx;
+            for(int y = 0; y < context.nnYLen; y++) {
+              for(int x = 0; x < context.nnXLen; x++) {
+                const int xy = y * context.nnXLen + x;
+                const float angle = static_cast<float>(x) * freqX + static_cast<float>(y) * freqY;
+                const size_t index = static_cast<size_t>(tableIndex) * xySize + xy;
+                if(index < data.size())
+                  data[index] = sine ? sinf(angle) : cosf(angle);
+              }
+            }
+          }
+        }
+      };
       size_t tuningBufferIndex = 0;
       for(const Pipeline* pipeline: pipelines) {
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
@@ -1948,6 +2012,9 @@ namespace {
               const bool transformerAttentionInput =
                 plan.kernelName == "transformerAttention" &&
                 name.find("transformer_scale_dot_product") == 0 && binding < 3;
+              const bool transformerAttentionRopeTable =
+                plan.kernelName == "transformerAttention" &&
+                name.find("transformer_scale_dot_product") == 0 && (binding == 5 || binding == 6);
               const bool transformerRMSNormInput =
                 plan.kernelName == "transformerRMSNorm" && name.find("transformer_rms_norm") == 0 && binding == 0;
               const bool transformerRMSNormGamma =
@@ -1996,6 +2063,9 @@ namespace {
                 const size_t validBiases = batchSize * static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
                 for(size_t i = 0; i < validBiases; i++)
                   data[i] = static_cast<float>(rand.nextDouble());
+              }
+              else if(transformerAttentionRopeTable && context.modelInfo.transformerUseRope) {
+                fillTransformerRopeTable(data, binding == 6);
               }
               else if(transformerAttentionInput) {
                 const size_t heads = static_cast<size_t>(std::max(1, context.modelInfo.transformerNumHeads));
@@ -2210,13 +2280,38 @@ namespace {
           const int headDim = std::max(1, context.modelInfo.transformerHeadDim);
           const int vHeadDim = std::max(1, context.modelInfo.transformerVHeadDim);
           const float scale = 1.0f / sqrtf(static_cast<float>(headDim));
+          const bool useRope = context.modelInfo.transformerUseRope;
+          const bool learnableRope = context.modelInfo.transformerLearnableRope;
+          const int ropeNumPairs = headDim / 2;
+          const vector<float>& ropeCosTable = buffer(5);
+          const vector<float>& ropeSinTable = buffer(6);
+          const auto ropeTableIndex = [&](int tableHead, int pairIdx, int position) {
+            return static_cast<size_t>(learnableRope ? tableHead * ropeNumPairs + pairIdx : pairIdx) *
+              xySize + position;
+          };
           for(int bh = 0; bh < cpuBatchSize * heads; bh++) {
             const int n = bh / heads;
             const int kvBase = n * kvHeads + (bh % heads) / (heads / kvHeads);
+            const int qRopeTableHead = (bh % heads) * kvHeads / heads;
+            const int kRopeTableHead = kvBase % kvHeads;
             vector<float> output(vHeadDim * cpuXYSize, 0.0f);
             for(int qPos = 0; qPos < cpuXYSize; qPos++) {
               if(mask[n * cpuXYSize + qPos] == 0.0f) {
                 continue;
+              }
+              vector<float> rotatedQuery(headDim);
+              for(int d = 0; d < headDim; d++)
+                rotatedQuery[d] = query[(bh * headDim + d) * cpuXYSize + qPos];
+              if(useRope) {
+                for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
+                  const size_t tableIndex = ropeTableIndex(qRopeTableHead, pairIdx, qPos);
+                  const float q0 = rotatedQuery[2 * pairIdx];
+                  const float q1 = rotatedQuery[2 * pairIdx + 1];
+                  const float cosVal = ropeCosTable[tableIndex];
+                  const float sinVal = ropeSinTable[tableIndex];
+                  rotatedQuery[2 * pairIdx] = q0 * cosVal - q1 * sinVal;
+                  rotatedQuery[2 * pairIdx + 1] = q0 * sinVal + q1 * cosVal;
+                }
               }
               float runningMax = -1e30f;
               float runningSum = 0.0f;
@@ -2224,10 +2319,23 @@ namespace {
               for(int kPos = 0; kPos < cpuXYSize; kPos++) {
                 if(mask[n * cpuXYSize + kPos] == 0.0f)
                   continue;
+                vector<float> rotatedKey(headDim);
+                for(int d = 0; d < headDim; d++)
+                  rotatedKey[d] = key[(kvBase * headDim + d) * cpuXYSize + kPos];
+                if(useRope) {
+                  for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
+                    const size_t tableIndex = ropeTableIndex(kRopeTableHead, pairIdx, kPos);
+                    const float k0 = rotatedKey[2 * pairIdx];
+                    const float k1 = rotatedKey[2 * pairIdx + 1];
+                    const float cosVal = ropeCosTable[tableIndex];
+                    const float sinVal = ropeSinTable[tableIndex];
+                    rotatedKey[2 * pairIdx] = k0 * cosVal - k1 * sinVal;
+                    rotatedKey[2 * pairIdx + 1] = k0 * sinVal + k1 * cosVal;
+                  }
+                }
                 float dot = 0.0f;
                 for(int d = 0; d < headDim; d++)
-                  dot += query[(bh * headDim + d) * cpuXYSize + qPos] *
-                    key[(kvBase * headDim + d) * cpuXYSize + kPos];
+                  dot += rotatedQuery[d] * rotatedKey[d];
                 dot *= scale;
                 const float nextMax = std::max(runningMax, dot);
                 const float oldWeight = expf(runningMax - nextMax);
@@ -2567,8 +2675,8 @@ namespace {
             qBatchStride,
             kBatchStride,
             vBatchStride,
-            0,
-            0,
+            context.modelInfo.transformerUseRope ? 1 : 0,
+            context.modelInfo.transformerLearnableRope ? 1 : 0,
             std::max(1, context.modelInfo.transformerHeadDim) / 2,
             0
           };
@@ -5233,22 +5341,34 @@ namespace {
         for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
           if(shape.accType != 32 || shape.MSize > 256 || shape.NSize > 128 || shape.MSize > static_cast<int>(shape.subgroupSize))
             continue;
-          for(int qTiles: {1, 2, 4, 8, 16}) {
-            if(shape.MSize * qTiles > 256)
-              break;
-            VulkanTuneParams cooperative = current;
-            cooperative.transformer.USE_TILED_ATTN = 1;
-            cooperative.transformer.USE_COOPERATIVE_ATTN = 1;
-            cooperative.transformer.Q_PER_THREAD = 1;
-            cooperative.transformer.ATTN_BLOCK_Q = shape.MSize * qTiles;
-            cooperative.transformer.ATTN_BLOCK_KV = shape.NSize;
-            cooperative.transformer.COOP_ACC_TYPE = shape.accType;
-            cooperative.transformer.COOP_M_SIZE = shape.MSize;
-            cooperative.transformer.COOP_N_SIZE = shape.NSize;
-            cooperative.transformer.COOP_K_SIZE = shape.KSize;
-            cooperative.transformer.COOP_SUBGROUP_SIZE = shape.subgroupSize;
-            cooperative.transformer.COOP_Q_TILES_PER_WORKGROUP = qTiles;
-            configs.push_back(cooperative);
+          vector<int> pvNSizes;
+          for(const CooperativeMatrixTuneShape& pvShape: getCooperativeMatrixTuneShapes(context.device)) {
+            if(pvShape.accType == shape.accType &&
+               pvShape.MSize == shape.MSize &&
+               pvShape.KSize == shape.NSize)
+              pvNSizes.push_back(pvShape.NSize);
+          }
+          sort(pvNSizes.begin(), pvNSizes.end());
+          pvNSizes.erase(unique(pvNSizes.begin(), pvNSizes.end()), pvNSizes.end());
+          for(int pvNSize: pvNSizes) {
+            for(int qTiles: {1, 2, 4, 8, 16}) {
+              if(shape.MSize * qTiles > 256)
+                break;
+              VulkanTuneParams cooperative = current;
+              cooperative.transformer.USE_TILED_ATTN = 1;
+              cooperative.transformer.USE_COOPERATIVE_ATTN = 1;
+              cooperative.transformer.Q_PER_THREAD = 1;
+              cooperative.transformer.ATTN_BLOCK_Q = shape.MSize * qTiles;
+              cooperative.transformer.ATTN_BLOCK_KV = shape.NSize;
+              cooperative.transformer.COOP_ACC_TYPE = shape.accType;
+              cooperative.transformer.COOP_M_SIZE = shape.MSize;
+              cooperative.transformer.COOP_N_SIZE = shape.NSize;
+              cooperative.transformer.COOP_K_SIZE = shape.KSize;
+              cooperative.transformer.COOP_SUBGROUP_SIZE = shape.subgroupSize;
+              cooperative.transformer.COOP_Q_TILES_PER_WORKGROUP = qTiles;
+              cooperative.transformer.COOP_PV_N_SIZE = pvNSize;
+              configs.push_back(cooperative);
+            }
           }
         }
       }

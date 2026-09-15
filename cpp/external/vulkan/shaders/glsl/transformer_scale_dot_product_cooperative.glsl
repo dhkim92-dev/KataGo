@@ -25,10 +25,11 @@ layout(constant_id = 5) const int COOP_K_SIZE = 16;
 layout(constant_id = 6) const int ATTN_HEAD_DIM = 64;
 layout(constant_id = 7) const int ATTN_V_HEAD_DIM = 64;
 layout(constant_id = 8) const int COOP_Q_TILES_PER_WORKGROUP = 1;
+layout(constant_id = 9) const int COOP_PV_N_SIZE = 16;
 
 const int HEAD_DIM_PAD = ((ATTN_HEAD_DIM + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
 const int KV_PAD = ((COOP_N_SIZE + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
-const int V_HEAD_DIM_PAD = ((ATTN_V_HEAD_DIM + COOP_N_SIZE - 1) / COOP_N_SIZE) * COOP_N_SIZE;
+const int V_HEAD_DIM_PAD = ((ATTN_V_HEAD_DIM + COOP_PV_N_SIZE - 1) / COOP_PV_N_SIZE) * COOP_PV_N_SIZE;
 const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
@@ -122,6 +123,20 @@ struct KeyMaskStorage {
 };
 shared KeyMaskStorage keyMaskStorage;
 #define keyMaskTile keyMaskStorage.values
+
+struct ProbabilityTileStorage {
+  uvec4 alignment;
+  float16_t values[Q_BLOCK * COOP_N_SIZE];
+};
+shared ProbabilityTileStorage probabilityTileStorage;
+#define probabilityTile probabilityTileStorage.values
+
+struct PvTileStorage {
+  uvec4 alignment;
+  float values[Q_BLOCK * V_HEAD_DIM_PAD];
+};
+shared PvTileStorage pvTileStorage;
+#define pvTile pvTileStorage.values
 
 void loadQueryTile(int qBlockStart, int batchBase, int head) {
   const int localIdx = int(gl_LocalInvocationID.x);
@@ -295,6 +310,12 @@ void main() {
     storeScoreTile(scoreFrag, qBase);
     subgroupBarrier();
 
+    // Cooperative matrix operands are FP16 on the supported devices. Keep the
+    // online-softmax state and final accumulation in FP32, but round only the
+    // current probability tile to FP16 for the cooperative PV multiplication.
+    // This is the same precision boundary used by the CUDA tensor-core flash
+    // attention path, while avoiding the scalar k*d inner loop.
+    float oldWeight = 1.0;
     if(subgroupLocalIdx < COOP_M_SIZE) {
       float tileMax = -1e30;
       if(qValid) {
@@ -304,37 +325,49 @@ void main() {
         }
       }
       const float newMax = max(runningMax, tileMax);
-      const float oldWeight = exp(runningMax - newMax);
+      oldWeight = exp(runningMax - newMax);
       if(qValid) {
-        for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
-          acc[d] *= oldWeight;
+        runningSum *= oldWeight;
+        runningMax = newMax;
       }
-      runningSum *= oldWeight;
-      runningMax = newMax;
       for(int k = 0; k < COOP_N_SIZE; k++) {
         float weight = 0.0;
         if(qValid && keyMaskTile[k] != 0.0)
           weight = exp(getScore(qBase, subgroupLocalIdx, k) * scale - newMax);
         if(qValid)
           runningSum += weight;
+        probabilityTile[k * Q_BLOCK + qBase + subgroupLocalIdx] = float16_t(weight);
       }
     }
+
     subgroupBarrier();
 
-    // The OpenCL reference keeps the softmax weights and PV accumulator in
-    // FP32. Cooperative matrix operands are FP16 on the supported devices,
-    // so storing the weights in an FP16 tile would introduce an additional
-    // quantization point before PV. Accumulate PV directly in FP32 instead.
-    for(int valueStart = 0; valueStart < ATTN_V_HEAD_DIM; valueStart += COOP_N_SIZE) {
+    coopmat<float16_t, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseA> probabilityFrag;
+    coopMatLoad(
+      probabilityFrag, probabilityTile, qBase, Q_BLOCK,
+      gl_CooperativeMatrixLayoutColumnMajor
+    );
+
+    for(int valueStart = 0; valueStart < V_HEAD_DIM_PAD; valueStart += COOP_PV_N_SIZE) {
+      coopmat<float16_t, gl_ScopeSubgroup, COOP_N_SIZE, COOP_PV_N_SIZE, gl_MatrixUseB> valueFrag;
+      coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator> pvFrag;
+      pvFrag = coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator>(0.0);
+      coopMatLoad(
+        valueFrag, vTile, valueStart, V_HEAD_DIM_PAD,
+        gl_CooperativeMatrixLayoutRowMajor
+      );
+      pvFrag = coopMatMulAdd(probabilityFrag, valueFrag, pvFrag);
+      coopMatStore(
+        pvFrag, pvTile, valueStart * Q_BLOCK + qBase, Q_BLOCK,
+        gl_CooperativeMatrixLayoutColumnMajor
+      );
+      subgroupBarrier();
+
       if(subgroupLocalIdx < COOP_M_SIZE && qValid) {
-        const int valueCount = min(COOP_N_SIZE, ATTN_V_HEAD_DIM - valueStart);
-        for(int k = 0; k < COOP_N_SIZE; k++) {
-          if(keyMaskTile[k] == 0.0)
-            continue;
-          const float weight = exp(getScore(qBase, subgroupLocalIdx, k) * scale - runningMax);
-          for(int d = 0; d < valueCount; d++)
-            acc[valueStart + d] += weight * float(vTile[k * V_HEAD_DIM_PAD + valueStart + d]);
-        }
+        const int valueCount = min(COOP_PV_N_SIZE, ATTN_V_HEAD_DIM - valueStart);
+        for(int d = 0; d < valueCount; d++)
+          acc[valueStart + d] = acc[valueStart + d] * oldWeight +
+            pvTile[(valueStart + d) * Q_BLOCK + qBase + subgroupLocalIdx];
       }
       subgroupBarrier();
     }

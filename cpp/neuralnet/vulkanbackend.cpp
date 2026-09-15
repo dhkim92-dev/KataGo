@@ -2420,10 +2420,10 @@ struct TransformerAttentionLayer {
     const bool learnableRope,
     const int ropeNumPairs
   ) {
-    // Cooperative matrix operands are FP16 on the supported devices. With
-    // integrated RoPE this rounds Q/K after rotation before the matrix
-    // operation, unlike the FP32 baseline attention shader.
-    const bool useCooperativeDispatch = useCooperative && !useRope;
+    // The cooperative shader applies RoPE while loading Q/K. Its FP16
+    // rounding is accepted only when the tuner has measured it within the
+    // attention error tolerance.
+    const bool useCooperativeDispatch = useCooperative;
     const Pipeline& activePipeline = useCooperativeDispatch ? pipeline : (useCooperative ? scalarPipeline : pipeline);
     const VkDescriptorSet activeDescriptorSet = useCooperativeDispatch ? descriptorSet : (useCooperative ? scalarDescriptorSet : descriptorSet);
     auto writeDescriptors = {
