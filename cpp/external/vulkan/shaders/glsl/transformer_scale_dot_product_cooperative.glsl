@@ -119,7 +119,6 @@ shared ScoreTileStorage scoreTileStorage;
 #endif
 
 struct KeyMaskStorage {
-  uvec4 alignment;
   float values[COOP_N_SIZE];
 };
 shared KeyMaskStorage keyMaskStorage;

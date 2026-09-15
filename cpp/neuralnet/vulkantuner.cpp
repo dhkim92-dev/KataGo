@@ -470,7 +470,7 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
   const uint64_t localSize = static_cast<uint64_t>(params.COOP_SUBGROUP_SIZE) * params.COOP_Q_TILES_PER_WORKGROUP;
   const uint64_t sharedBytes =
-    7 * 16ull +
+    6 * 16ull +
     2ull * (
       static_cast<uint64_t>(headDimPad) * qBlock +
       static_cast<uint64_t>(headDimPad) * params.COOP_N_SIZE +
