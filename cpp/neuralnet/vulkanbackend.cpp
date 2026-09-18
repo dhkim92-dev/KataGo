@@ -1906,80 +1906,6 @@ struct NormActConv {
   NormActConv& operator=(const NormActConv&) = delete;
 };
 
-void performExtractChannel0NCHW(
-  ComputeHandleInternal *handle,
-  VkCommandBuffer& commandBuffer,
-  VkDescriptorSet& descriptorSet,
-  VulkanBuffer* input,
-  VulkanBuffer* output,
-  int batchSize,
-  int numInputChannels,
-  int nnXYLen,
-  bool begin = true
-) {
-  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
-  Pipeline targetPipeline = pipelines->extractChannel0NCHWFp32;
-  if ( commandBuffer == VK_NULL_HANDLE ) {
-    commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
-  }
-
-  VkResult res = VK_ERROR_UNKNOWN;
-  if ( begin ) {
-    res = vk_helper::beginCommandBuffer(commandBuffer);
-    CHECK_VK_MSG("Begin command buffer for ExtractChannel0NCHW", res);
-  }
-
-  if ( descriptorSet == VK_NULL_HANDLE ) {
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
-    CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0NCHW", res);
-  }
-  // update descriptor set
-  std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
-  };
-  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-
-  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, targetPipeline.pipeline);
-  vkCmdBindDescriptorSets(
-    commandBuffer,
-    VK_PIPELINE_BIND_POINT_COMPUTE,
-    targetPipeline.layout,
-    0,
-    1,
-    &descriptorSet,
-    0,
-    nullptr
-  );
-  ExtractChannel0NCHWParams pushConstants = {};
-  pushConstants.cSize = static_cast<uint32_t>(numInputChannels);
-  pushConstants.nSize = static_cast<uint32_t>(batchSize);
-  pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
-  vkCmdPushConstants(
-    commandBuffer,
-    targetPipeline.layout,
-    VK_SHADER_STAGE_COMPUTE_BIT,
-    0,
-    sizeof(ExtractChannel0NCHWParams),
-    &pushConstants
-  );
-  // Thread mapping: x->spatial, y->batch
-  uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(nnXYLen));
-  uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
-  uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1u) / targetPipeline.localSizeX;
-  uint32_t wgCountY = (globalSizeY + targetPipeline.localSizeY - 1u) / targetPipeline.localSizeY;
-  uint32_t wgCountZ = 1u;
-  SHADER_PROFILE_START("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
-  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, wgCountZ);
-  SHADER_PROFILE_END("EXTRACT_CHANNEL0_NCHW_FP32", commandBuffer);
-  vk_helper::barrierCommandBufferForBuffer(commandBuffer, output);
-
-  if ( begin ) {
-    vk_helper::endCommandBuffer(commandBuffer);
-  }
-  // return commandBuffer;
-}
-
 void performAddChannelBiases(
   ComputeHandleInternal *handle,
   VkCommandBuffer& commandBuffer,
@@ -4641,7 +4567,7 @@ struct ValueHead {
     v1Conv->forward(cb, batchSize, trunk, v1Out.buf, convWorkspace, convWorkspace2);
     v1BN->forward(cb, batchSize, v1Out.buf, mask, v1Out.buf);
     VkResult res;;
-    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels,  paddedNNXYLen, false);
+    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen, false);
 
     v2Mul->forward(cb, batchSize, v1Mean.buf, v2Out.buf);
     v2Bias->forward(cb, batchSize, v2Out.buf);
@@ -4801,6 +4727,7 @@ struct Model {
   std::unique_ptr<ValueHead> valueHead;
   std::vector<VkCommandBuffer> commandBuffers;
   VkDescriptorSet extractChannel0DS = VK_NULL_HANDLE;
+  VkDescriptorSet extractChannel0NCHWToNHWCDS = VK_NULL_HANDLE;
   VkDescriptorSet computeMaskSumDS = VK_NULL_HANDLE;
 
   VkFence fence = VK_NULL_HANDLE;
@@ -4912,7 +4839,24 @@ struct Model {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
-    performExtractChannel0NCHW(handle, forwardCB, extractChannel0DS, input, mask, batchSize, numInputChannels,handle->paddedNNXYLen, false);
+    const bool useNHWC = true;
+    vkcompute::extractChannel0(
+      handle->vulkanDevice,
+      &handle->pipelines->extractChannel0Fp32,
+      forwardCB,
+      extractChannel0DS,
+      useNHWC ? &handle->pipelines->nchwToNhwc : nullptr,
+      extractChannel0NCHWToNHWCDS,
+      input,
+      mask,
+      convWorkspace,
+      batchSize,
+      numInputChannels,
+      handle->paddedNNXYLen,
+      nnXLen * nnYLen,
+      useNHWC,
+      false
+    );
     computeMaskSums(handle, forwardCB, computeMaskSumDS, batchSize, mask, maskSum, false);
     trunk->forward(forwardCB, batchSize, scratch, input, inputGlobal, inputMeta, trunkBuf,  mask, maskSum, convWorkspace, convWorkspace2);
     policyHead->forward(forwardCB, batchSize, scratch, trunkBuf, mask, maskSum, policyPass, policy, convWorkspace, convWorkspace2);
@@ -4944,7 +4888,23 @@ struct Model {
       printDeviceBuffer("First Input: ", handle->vulkanDevice, input, batchSize * numInputChannels * paddedNNXYLen, false);
     }
 
-    performExtractChannel0NCHW(handle, extractChannel0CB, extractChannel0DS, input, mask, batchSize, numInputChannels, handle->paddedNNXYLen);
+    const bool useNHWC = true;
+    vkcompute::extractChannel0(
+      handle->vulkanDevice,
+      &handle->pipelines->extractChannel0Fp32,
+      extractChannel0CB,
+      extractChannel0DS,
+      useNHWC ? &handle->pipelines->nchwToNhwc : nullptr,
+      extractChannel0NCHWToNHWCDS,
+      input,
+      mask,
+      convWorkspace,
+      batchSize,
+      numInputChannels,
+      handle->paddedNNXYLen,
+      nnXLen * nnYLen,
+      useNHWC
+    );
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {extractChannel0CB});
     printDeviceBuffer("Model::debug Extract Channel 0 Result", handle->vulkanDevice, mask, batchSize * handle->paddedNNXYLen);
     computeMaskSums(handle, computeMaskSumCB, computeMaskSumDS, batchSize, mask, maskSum);

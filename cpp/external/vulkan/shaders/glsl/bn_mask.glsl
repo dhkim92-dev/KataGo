@@ -1,9 +1,9 @@
 /**
 * @author dhkim92.dev@gmail.com
 * @brief BatchNorm (Mask) + Activation compute shader
-* Format: NCHW
+* Format: NCHW or NHWC, selected by USE_NHWC specialization
 * Thread mapping optimized for memory coalescing:
-*   x -> spatial (contiguous in NCHW memory layout)
+*   x -> spatial
 *   y -> channel
 *   z -> batch
 */
@@ -16,6 +16,8 @@ layout(push_constant) uniform BatchNormMaskFp32Params {
     int cSize;
     int xySize;
 };
+
+layout(constant_id = 3) const int USE_NHWC = 0;
 
 layout(set = 0, binding = 0) readonly buffer g_input_block {
     realstore d_input[];
@@ -43,7 +45,10 @@ void main() {
   const int c = int(gl_GlobalInvocationID.y);
   if(c < cSize && xy < xySize) {
     for(int n = 0; n < nSize; n++) {
-      int idx = (n * cSize + c) * xySize + xy;
+      const int channelsPadded = (cSize + 3) & ~3;
+      const int idx = USE_NHWC == 1
+        ? (n * xySize + xy) * channelsPadded + c
+        : (n * cSize + c) * xySize + xy;
     #if ACTIVATION == 0
       real result = (LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c)) * LOAD(mask,n * xySize + xy);
     #elif ACTIVATION == 1

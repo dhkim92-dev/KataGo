@@ -11,6 +11,7 @@
 #include "../neuralnet/vulkanshaders.h"
 #include "../neuralnet/vulkanhelpers.h"
 
+struct ComputeHandleInternal;
 
 namespace vkcompute {
 
@@ -42,6 +43,24 @@ namespace vkcompute {
     int spatialStride,
     int logicalSpatialSize,
     VkResult* result
+  );
+
+  void extractChannel0(
+    const VulkanDevice* device,
+    const Pipeline* extractPipeline,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& extractDescriptorSet,
+    const Pipeline* nchwToNhwcPipeline,
+    VkDescriptorSet& nchwToNhwcDescriptorSet,
+    const VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcScratch,
+    int batchSize,
+    int numInputChannels,
+    int spatialSize,
+    int logicalSpatialSize,
+    bool useNHWC,
+    bool begin = true
   );
 
   void im2colNHWC(

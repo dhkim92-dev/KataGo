@@ -109,6 +109,118 @@ void convertNHWCToNCHW(
   );
 }
 
+void extractChannel0(
+  const VulkanDevice* device,
+  const Pipeline* extractPipeline,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& extractDescriptorSet,
+  const Pipeline* nchwToNhwcPipeline,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  VulkanBuffer* nhwcScratch,
+  int batchSize,
+  int numInputChannels,
+  int spatialSize,
+  int logicalSpatialSize,
+  bool useNHWC,
+  bool begin
+) {
+  assert(device != nullptr);
+  assert(extractPipeline != nullptr);
+  assert(input != nullptr && output != nullptr);
+  if(useNHWC) {
+    assert(nchwToNhwcPipeline != nullptr);
+    assert(nhwcScratch != nullptr);
+  }
+
+  if(commandBuffer == VK_NULL_HANDLE)
+    commandBuffer = vk_helper::allocateCommandBuffer(device);
+
+  VkResult result = VK_ERROR_UNKNOWN;
+  if(begin) {
+    result = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for ExtractChannel0", result);
+  }
+
+  if(useNHWC && nchwToNhwcDescriptorSet == VK_NULL_HANDLE) {
+    nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+      device, nchwToNhwcPipeline->descriptorSetLayout, &result
+    );
+    CHECK_VK_MSG("Allocate NCHW to NHWC descriptor set for ExtractChannel0", result);
+  }
+  const VulkanBuffer* extractInput = input;
+  if(useNHWC) {
+    convertNCHWToNHWC(
+      device,
+      nchwToNhwcPipeline,
+      commandBuffer,
+      nchwToNhwcDescriptorSet,
+      input,
+      nhwcScratch,
+      batchSize,
+      numInputChannels,
+      spatialSize,
+      spatialSize,
+      logicalSpatialSize,
+      &result
+    );
+    CHECK_VK_MSG("Execute NCHW to NHWC conversion for ExtractChannel0", result);
+    extractInput = nhwcScratch;
+  }
+
+  if(extractDescriptorSet == VK_NULL_HANDLE) {
+    extractDescriptorSet = vk_helper::allocateDescriptorSet(
+      device, extractPipeline->descriptorSetLayout, &result
+    );
+    CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0", result);
+  }
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(extractDescriptorSet, 0, extractInput),
+    vk_helper::writeDescriptorSetBuffer(extractDescriptorSet, 1, output)
+  };
+  result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update descriptors for ExtractChannel0", result);
+
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, extractPipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    commandBuffer,
+    VK_PIPELINE_BIND_POINT_COMPUTE,
+    extractPipeline->layout,
+    0,
+    1,
+    &extractDescriptorSet,
+    0,
+    nullptr
+  );
+  const vk_shader::push::ExtractChannel0Params pushParams = {
+    batchSize,
+    numInputChannels,
+    spatialSize
+  };
+  vkCmdPushConstants(
+    commandBuffer,
+    extractPipeline->layout,
+    VK_SHADER_STAGE_COMPUTE_BIT,
+    0,
+    sizeof(pushParams),
+    &pushParams
+  );
+  const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(spatialSize));
+  const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
+  const uint32_t wgCountX = (globalSizeX + extractPipeline->localSizeX - 1u) / extractPipeline->localSizeX;
+  const uint32_t wgCountY = (globalSizeY + extractPipeline->localSizeY - 1u) / extractPipeline->localSizeY;
+  SHADER_PROFILE_START("EXTRACT_CHANNEL0", commandBuffer);
+  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, 1u);
+  SHADER_PROFILE_END("EXTRACT_CHANNEL0", commandBuffer);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, output);
+
+  if(begin) {
+    result = vk_helper::endCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("End command buffer for ExtractChannel0", result);
+  }
+}
+
 void im2colNHWC(
   const VulkanDevice* device,
   const Pipeline* pipeline,

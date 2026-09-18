@@ -318,17 +318,17 @@ namespace vk_shader {
   size_t spirv_add_channel_bias_nc_silu_fp32_size = _binary_add_channel_bias_nc_silu_fp32_size;
 
 
-  // extract_channel0_nchw_fp32
-  const unsigned char* spirv_extract_channel0_nchw_fp32 = _binary_extract_channel0_nchw_fp32_start;
-  size_t spirv_extract_channel0_nchw_fp32_size = _binary_extract_channel0_nchw_fp32_size;
+  // extract_channel0_fp32
+  const unsigned char* spirv_extract_channel0_fp32 = _binary_extract_channel0_fp32_start;
+  size_t spirv_extract_channel0_fp32_size = _binary_extract_channel0_fp32_size;
 
-  // extract_channel0_nchw_p32s16
-  const unsigned char* spirv_extract_channel0_nchw_p32s16 = _binary_extract_channel0_nchw_p32s16_start;
-  size_t spirv_extract_channel0_nchw_p32s16_size = _binary_extract_channel0_nchw_p32s16_size;
+  // extract_channel0_p32s16
+  const unsigned char* spirv_extract_channel0_p32s16 = _binary_extract_channel0_p32s16_start;
+  size_t spirv_extract_channel0_p32s16_size = _binary_extract_channel0_p32s16_size;
 
-  // extract_channel0_nchw_p16s16
-  const unsigned char* spirv_extract_channel0_nchw_p16s16 = _binary_extract_channel0_nchw_p16s16_start;
-  size_t spirv_extract_channel0_nchw_p16s16_size = _binary_extract_channel0_nchw_p16s16_size;
+  // extract_channel0_p16s16
+  const unsigned char* spirv_extract_channel0_p16s16 = _binary_extract_channel0_p16s16_start;
+  size_t spirv_extract_channel0_p16s16_size = _binary_extract_channel0_p16s16_size;
 
   // transformer_rms_norm_fp32
   const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
@@ -491,9 +491,9 @@ namespace vk_shader {
       {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32},
-      {spirv_extract_channel0_nchw_fp32, spirv_extract_channel0_nchw_fp32_size, &shaderModule_extract_channel0_nchw_fp32},
-      {spirv_extract_channel0_nchw_p16s16, spirv_extract_channel0_nchw_p16s16_size, &shaderModule_extract_channel0_nchw_p16s16},
-      {spirv_extract_channel0_nchw_p32s16, spirv_extract_channel0_nchw_p32s16_size, &shaderModule_extract_channel0_nchw_p32s16},
+      {spirv_extract_channel0_fp32, spirv_extract_channel0_fp32_size, &shaderModule_extract_channel0_fp32},
+      {spirv_extract_channel0_p16s16, spirv_extract_channel0_p16s16_size, &shaderModule_extract_channel0_p16s16},
+      {spirv_extract_channel0_p32s16, spirv_extract_channel0_p32s16_size, &shaderModule_extract_channel0_p32s16},
       {spirv_global_pooling_channels_fp32, spirv_global_pooling_channels_fp32_size, &shaderModule_global_pooling_channels_fp32},
       {spirv_global_pooling_channels_p32s16, spirv_global_pooling_channels_p32s16_size, &shaderModule_global_pooling_channels_p32s16},
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0, hgemm_cooperative_matrix_acc_fp16_sa0_sb0)
@@ -693,11 +693,12 @@ namespace vk_shader {
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createBatchNormMaskMishScale8(batchNormMaskMishScale8, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createBatchNormMaskSilu(batchNormMaskSilu, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    const bool useNHWC = false;
+    if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskMishScale8(batchNormMaskMishScale8, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
+    if((result = createBatchNormMaskSilu(batchNormMaskSilu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createGlobalPoolingChannelsFp32(globalPoolingChannelsFp32, tuneParams.gPool, tuneParams.vulkan)) != VK_SUCCESS) return result;
     for(uint32_t localSizeY = 1; localSizeY <= static_cast<uint32_t>(tuneParams.gPool.CHANNELSTRIDE); localSizeY *= 2) {
       for(uint32_t localSizeZ = 1; localSizeZ <= static_cast<uint32_t>(tuneParams.gPool.BATCHSTRIDE); localSizeZ *= 2) {
@@ -719,7 +720,11 @@ namespace vk_shader {
     if((result = createAddChannelBiasNCMish(addChannelBiasNCMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCMishScale8(addChannelBiasNCMishScale8, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCSilu(addChannelBiasNCSilu, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createExtractChannel0NCHWFp32(extractChannel0NCHWFp32, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createExtractChannel0Fp32(
+      extractChannel0Fp32,
+      tuneParams.vulkan,
+      true
+    )) != VK_SUCCESS) return result;
     if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -786,7 +791,7 @@ namespace vk_shader {
     destroyPipeline(addChannelBiasNCMish);
     destroyPipeline(addChannelBiasNCMishScale8);
     destroyPipeline(addChannelBiasNCSilu);
-    destroyPipeline(extractChannel0NCHWFp32);
+    destroyPipeline(extractChannel0Fp32);
 
     destroyPipeline(transformerRmsNorm);
     destroyPipeline(transformerApplyRoPE);
@@ -1447,8 +1452,9 @@ namespace vk_shader {
     );
   }
 
-  VkResult ComputePipelines::createBatchNormMaskIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createBatchNormMaskIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = BatchNormMaskSpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1458,8 +1464,9 @@ namespace vk_shader {
     return createPipeline("bn_mask_identity_fp32", shaderModule_bn_mask_identity_fp32, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createBatchNormMaskRelu(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createBatchNormMaskRelu(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = BatchNormMaskSpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1469,8 +1476,9 @@ namespace vk_shader {
     return createPipeline("bn_mask_relu_fp32", shaderModule_bn_mask_relu_fp32, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createBatchNormMaskMish(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createBatchNormMaskMish(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = BatchNormMaskSpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1480,8 +1488,9 @@ namespace vk_shader {
     return createPipeline("bn_mask_mish_fp32", shaderModule_bn_mask_mish_fp32, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createBatchNormMaskMishScale8(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createBatchNormMaskMishScale8(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = BatchNormMaskSpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1491,8 +1500,9 @@ namespace vk_shader {
     return createPipeline("bn_mask_mish_scale8_fp32", shaderModule_bn_mask_mish_scale8_fp32, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createBatchNormMaskSilu(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createBatchNormMaskSilu(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = BatchNormMaskSpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1590,15 +1600,20 @@ namespace vk_shader {
     return createPipeline("add_channel_bias_nc_silu_fp32", shaderModule_add_channel_bias_nc_silu_fp32, 2, sizeof(AddChannelBiasNCParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createExtractChannel0NCHWFp32(Pipeline& pipeline, const VulkanParams& vulkanParams) {
-    auto spec = ExtractChannel0NCHWSpec();
+  VkResult ComputePipelines::createExtractChannel0Fp32(
+    Pipeline& pipeline,
+    const VulkanParams& vulkanParams,
+    bool useNHWC
+  ) {
+    auto spec = ExtractChannel0Spec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("extract_channel0_nchw_p16s16", shaderModule_extract_channel0_nchw_p16s16, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("extract_channel0_nchw_p32s16", shaderModule_extract_channel0_nchw_p32s16, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("extract_channel0_p16s16", shaderModule_extract_channel0_p16s16, 2, sizeof(ExtractChannel0Params), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("extract_channel0_p32s16", shaderModule_extract_channel0_p32s16, 2, sizeof(ExtractChannel0Params), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("extract_channel0_nchw_fp32", shaderModule_extract_channel0_nchw_fp32, 2, sizeof(ExtractChannel0NCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("extract_channel0_fp32", shaderModule_extract_channel0_fp32, 2, sizeof(ExtractChannel0Params), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createTransformerRMSNorm(Pipeline& pipeline, const TransformerRMSNormTuneParms& tuneParams, const VulkanParams& vulkanParams) {

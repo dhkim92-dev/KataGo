@@ -333,20 +333,20 @@ extern "C" {
   extern const unsigned char* _binary_add_channel_bias_nc_silu_fp32_end;
   extern const size_t _binary_add_channel_bias_nc_silu_fp32_size;
 
-  // extract channel0_nchw_fp32
-  extern const unsigned char _binary_extract_channel0_nchw_fp32_start[];
-  extern const unsigned char* _binary_extract_channel0_nchw_fp32_end;
-  extern const size_t _binary_extract_channel0_nchw_fp32_size;
+  // extract_channel0_fp32
+  extern const unsigned char _binary_extract_channel0_fp32_start[];
+  extern const unsigned char* _binary_extract_channel0_fp32_end;
+  extern const size_t _binary_extract_channel0_fp32_size;
 
-  // extract_channel0_nchw_p32s16
-  extern const unsigned char _binary_extract_channel0_nchw_p32s16_start[];
-  extern const unsigned char* _binary_extract_channel0_nchw_p32s16_end;
-  extern const size_t _binary_extract_channel0_nchw_p32s16_size;
+  // extract_channel0_p32s16
+  extern const unsigned char _binary_extract_channel0_p32s16_start[];
+  extern const unsigned char* _binary_extract_channel0_p32s16_end;
+  extern const size_t _binary_extract_channel0_p32s16_size;
 
-  // extract_channel0_nchw_p16s16
-  extern const unsigned char _binary_extract_channel0_nchw_p16s16_start[];
-  extern const unsigned char* _binary_extract_channel0_nchw_p16s16_end;
-  extern const size_t _binary_extract_channel0_nchw_p16s16_size;
+  // extract_channel0_p16s16
+  extern const unsigned char _binary_extract_channel0_p16s16_start[];
+  extern const unsigned char* _binary_extract_channel0_p16s16_end;
+  extern const size_t _binary_extract_channel0_p16s16_size;
 
   // transformer_rms_norm_fp32
   extern const unsigned char _binary_transformer_rms_norm_fp32_start[];
@@ -681,15 +681,15 @@ namespace vk_shader {
   extern const unsigned char* spirv_add_channel_bias_nc_silu_fp32;
   extern size_t spirv_add_channel_bias_nc_silu_fp32_size;
 
-  // Extract channel 0 from NCHW fp32
-  extern const unsigned char* spirv_extract_channel0_nchw_fp32;
-  extern size_t spirv_extract_channel0_nchw_fp32_size;
+  // Extract channel 0 from NCHW or NHWC input
+  extern const unsigned char* spirv_extract_channel0_fp32;
+  extern size_t spirv_extract_channel0_fp32_size;
 
-  extern const unsigned char* spirv_extract_channel0_nchw_p32s16;
-  extern size_t spirv_extract_channel0_nchw_p32s16_size;
+  extern const unsigned char* spirv_extract_channel0_p32s16;
+  extern size_t spirv_extract_channel0_p32s16_size;
 
-  extern const unsigned char* spirv_extract_channel0_nchw_p16s16;
-  extern size_t spirv_extract_channel0_nchw_p16s16_size;
+  extern const unsigned char* spirv_extract_channel0_p16s16;
+  extern size_t spirv_extract_channel0_p16s16_size;
 
   // Transformer RMS Norm f32
   extern const unsigned char* spirv_transformer_rms_norm_fp32;
@@ -820,6 +820,7 @@ struct LocalDimHash {
       uint32_t localSizeX = 32;
       uint32_t localSizeY = 8;
       uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
     };
 
     struct GlobalPoolingChannelsSpec {
@@ -869,10 +870,11 @@ struct LocalDimHash {
       uint32_t localSizeZ = 1;
     };
 
-    struct ExtractChannel0NCHWSpec {
+    struct ExtractChannel0Spec {
       uint32_t localSizeX = 64;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
     };
 
     struct WinogradInputTransformBnActSpec {
@@ -1246,12 +1248,12 @@ struct LocalDimHash {
     };
 
     /**
-     * @brief Push parameters for ExtractChannel0NCHW shader
+     * @brief Push parameters for ExtractChannel0 shader
      * @param nSize: number of batches
      * @param cSize: number of input channels
      * @param xySize: H*W spatial size
      */
-    struct ExtractChannel0NCHWParams {
+    struct ExtractChannel0Params {
       int nSize;  
       int cSize;
       int xySize;
@@ -1682,9 +1684,9 @@ struct LocalDimHash {
     VkShaderModule shaderModule_nhwc_matrix_to_nchw_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_extract_channel0_nchw_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_extract_channel0_nchw_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_extract_channel0_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_global_pooling_channels_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
 #define DECLARE_HGEMM_SHADER_MODULES(base) \
@@ -1812,7 +1814,7 @@ struct LocalDimHash {
     Pipeline addChannelBiasNCMish;
     Pipeline addChannelBiasNCMishScale8;
     Pipeline addChannelBiasNCSilu;
-    Pipeline extractChannel0NCHWFp32;
+    Pipeline extractChannel0Fp32;
 
     // Transformer
 
@@ -1861,11 +1863,11 @@ struct LocalDimHash {
       const tune::VulkanParams& vulkanParams
     );
     VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
-    VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
-    VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
-    VkResult createBatchNormMaskMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
-    VkResult createBatchNormMaskMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
-    VkResult createBatchNormMaskSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createGlobalPoolingChannelsFp32(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createValueHeadPoolingChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
     VkResult createSumChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
@@ -1875,7 +1877,7 @@ struct LocalDimHash {
     VkResult createAddChannelBiasNCMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createAddChannelBiasNCMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createAddChannelBiasNCSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
-    VkResult createExtractChannel0NCHWFp32(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createExtractChannel0Fp32(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
