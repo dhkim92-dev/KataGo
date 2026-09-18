@@ -2380,9 +2380,11 @@ void performValueHeadPool(
   ComputeHandleInternal *handle,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
   VulkanBuffer* gpoolConvOut,
   VulkanBuffer* gpoolConcat,
   VulkanBuffer* maskSum,
+  VulkanBuffer* nhwcScratch,
   int batchSize,
   int gPoolChannels,
   int nnXYLen,
@@ -2397,6 +2399,9 @@ void performValueHeadPool(
     CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
   }
   const auto pipelines = handle->pipelines;
+  const bool useNHWC = pipelines->useNHWC;
+  const int logicalSpatialSize = handle->nnXLen * handle->nnYLen;
+  const int spatialSize = useNHWC ? logicalSpatialSize : nnXYLen;
   LocalDim dim = {
     handle->tuneParams.gPool.XYSTRIDE,
     std::min(handle->tuneParams.gPool.CHANNELSTRIDE, static_cast<int>(vk_helper::powerOf2ify(gPoolChannels))),
@@ -2412,9 +2417,37 @@ void performValueHeadPool(
     );
     CHECK_VK_MSG("ValueHeadPool allocate descriptor set", res);
   }
+  VulkanBuffer* shaderInput = gpoolConvOut;
+  if(useNHWC) {
+    assert(nhwcScratch != nullptr);
+    if(nchwToNhwcDescriptorSet == VK_NULL_HANDLE) {
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice,
+        pipelines->nchwToNhwc.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("ValueHeadPool allocate NCHW to NHWC descriptor set", res);
+    }
+    vkcompute::convertNCHWToNHWC(
+      handle->vulkanDevice,
+      &pipelines->nchwToNhwc,
+      commandBuffer,
+      nchwToNhwcDescriptorSet,
+      gpoolConvOut,
+      nhwcScratch,
+      batchSize,
+      gPoolChannels,
+      logicalSpatialSize,
+      nnXYLen,
+      logicalSpatialSize,
+      &res
+    );
+    CHECK_VK_MSG("Convert ValueHeadPool input to NHWC", res);
+    shaderInput = nhwcScratch;
+  }
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, shaderInput),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
   };
@@ -2437,7 +2470,7 @@ void performValueHeadPool(
   ValueHeadPoolingChannelsParams pushConstants = {};
   pushConstants.nSize = batchSize;
   pushConstants.cSize= gPoolChannels;
-  pushConstants.xySize = nnXYLen;
+  pushConstants.xySize = spatialSize;
   vkCmdPushConstants(
     commandBuffer,
     pipeline.layout,
@@ -2460,7 +2493,7 @@ void performValueHeadPool(
   // vk_helper::barrierCommandBuffer(commandBuffer);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
-  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, shaderInput);
   if ( begin ) {
     vk_helper::endCommandBuffer(commandBuffer);
   }
@@ -4817,6 +4850,7 @@ struct ValueHead {
   std::unique_ptr<MatBiasLayer> sv3Bias;
   std::unique_ptr<ConvLayer> vOwnershipConv;
   VkDescriptorSet gpoolDS = VK_NULL_HANDLE;
+  VkDescriptorSet gpoolNchwToNhwcDS = VK_NULL_HANDLE;
 
   ValueHead() = delete;
   ValueHead(const ValueHead&) = delete;
@@ -4861,6 +4895,12 @@ struct ValueHead {
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,v1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,vOwnershipConv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,v1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
+    if(handle->pipelines->useNHWC) {
+      const size_t logicalSpatialSize = static_cast<size_t>(handle->nnXLen) * static_cast<size_t>(handle->nnYLen);
+      const size_t channelsPadded = static_cast<size_t>(vk_helper::roundUpToMultipleInt(v1Channels, 4));
+      const size_t conversionElts = maxBatchSize * logicalSpatialSize * channelsPadded;
+      maxElts.size1 = std::max(maxElts.size1, conversionElts);
+    }
     return maxElts;
   }
 
@@ -4888,7 +4928,7 @@ struct ValueHead {
       convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
     );
     VkResult res;;
-    performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen, false);
+    performValueHeadPool(handle, cb, gpoolDS, gpoolNchwToNhwcDS, v1Out.buf, v1Mean.buf, maskSum, convWorkspace, batchSize, v1Channels, paddedNNXYLen, false);
 
     v2Mul->forward(cb, batchSize, v1Mean.buf, v2Out.buf);
     v2Bias->forward(cb, batchSize, v2Out.buf);
@@ -4923,7 +4963,7 @@ struct ValueHead {
     );
     VkResult res;
     VkCommandBuffer gpoolCB =  VK_NULL_HANDLE;
-    performValueHeadPool(handle, gpoolCB, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen);
+    performValueHeadPool(handle, gpoolCB, gpoolDS, gpoolNchwToNhwcDS, v1Out.buf, v1Mean.buf, maskSum, convWorkspace, batchSize, v1Channels, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
 
     v2Mul->debug(batchSize, v1Mean.buf, v2Out.buf);

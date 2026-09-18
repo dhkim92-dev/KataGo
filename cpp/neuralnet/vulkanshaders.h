@@ -840,6 +840,7 @@ struct LocalDimHash {
       int XYSTRIDE;
       int CHANNELSTRIDE;
       int LOCALSIZE_TOTAL;
+      uint32_t useNHWC = 0;
     };
 
     /**
