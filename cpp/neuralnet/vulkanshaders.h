@@ -830,6 +830,7 @@ struct LocalDimHash {
       int XYSTRIDE;
       int CHANNELSTRIDE;
       int LOCALSIZE_TOTAL;
+      uint32_t useNHWC = 0;
     };
 
     struct ValueHeadPoolingChannelsSpec {
@@ -1215,6 +1216,7 @@ struct LocalDimHash {
       int nSize;
       int cSize;
       int xySize;
+      int maskSpatialStride;
     };
 
     /**

@@ -2827,7 +2827,7 @@ namespace {
         }
         else if(pipeline->name.find("global_pooling_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize};
+          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize,pipelineXYSize};
           push(params);
           dispatch(
             1,

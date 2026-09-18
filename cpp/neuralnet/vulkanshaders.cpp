@@ -1532,6 +1532,7 @@ namespace vk_shader {
     spec.XYSTRIDE = tuneParams.XYSTRIDE;
     spec.CHANNELSTRIDE = tuneParams.CHANNELSTRIDE;
     spec.LOCALSIZE_TOTAL = spec.XYSTRIDE * spec.CHANNELSTRIDE * tuneParams.BATCHSTRIDE;
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage)
       return createPipeline("global_pooling_channels_p32s16", shaderModule_global_pooling_channels_p32s16, 4, sizeof(GlobalPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);

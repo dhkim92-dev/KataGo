@@ -2255,6 +2255,7 @@ void performGpoolMask(
   ComputeHandleInternal *handle,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
   VulkanBuffer* gpoolConvOut,
   VulkanBuffer* gpoolConcat,
   VulkanBuffer* mask,
@@ -2262,11 +2263,15 @@ void performGpoolMask(
   int batchSize,
   int gpoolChannels,
   int nnXYLen,
+  VulkanBuffer* nhwcScratch,
   VkResult* result,
   bool begin = true
 ) {
   const vk_shader::ComputePipelines* pipelines = handle->pipelines;
+  const bool useNHWC = pipelines->useNHWC;
   Pipeline pipeline = pipelines->globalPoolingChannelsFp32;
+  const int logicalSpatialSize = handle->nnXLen * handle->nnYLen;
+  const int spatialSize = useNHWC ? logicalSpatialSize : nnXYLen;
   if ( commandBuffer == VK_NULL_HANDLE ) {
     commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
   }
@@ -2279,9 +2284,36 @@ void performGpoolMask(
     descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice,  pipeline.descriptorSetLayout, &res);
     CHECK_VK_MSG("Allocate descriptor set for GlobalPoolingMask", res);
   }
+  if(useNHWC) {
+    assert(nhwcScratch != nullptr);
+    if(nchwToNhwcDescriptorSet == VK_NULL_HANDLE) {
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice,
+        pipelines->nchwToNhwc.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("Allocate NCHW to NHWC descriptor set for GlobalPoolingMask", res);
+    }
+    vkcompute::convertNCHWToNHWC(
+      handle->vulkanDevice,
+      &pipelines->nchwToNhwc,
+      commandBuffer,
+      nchwToNhwcDescriptorSet,
+      gpoolConvOut,
+      nhwcScratch,
+      batchSize,
+      gpoolChannels,
+      logicalSpatialSize,
+      nnXYLen,
+      logicalSpatialSize,
+      &res
+    );
+    CHECK_VK_MSG("Convert GlobalPoolingMask input to NHWC", res);
+  }
+  VulkanBuffer* shaderInput = useNHWC ? nhwcScratch : gpoolConvOut;
   // update descriptor set
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, shaderInput),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mask),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, maskSum)
@@ -2302,7 +2334,8 @@ void performGpoolMask(
   GlobalPoolingChannelsParams pushConstants = {};
   pushConstants.nSize = static_cast<uint32_t>(batchSize);
   pushConstants.cSize = static_cast<uint32_t>(gpoolChannels);
-  pushConstants.xySize = static_cast<uint32_t>(nnXYLen);
+  pushConstants.xySize = static_cast<uint32_t>(spatialSize);
+  pushConstants.maskSpatialStride = static_cast<uint32_t>(nnXYLen);
   vkCmdPushConstants(
     commandBuffer,
     pipelines->globalPoolingChannelsFp32.layout,
@@ -2336,7 +2369,7 @@ void performGpoolMask(
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, mask);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat); 
-  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, shaderInput);
   if ( begin ) {
     res = vk_helper::endCommandBuffer(commandBuffer);
   }
@@ -3868,6 +3901,7 @@ struct GlobalPoolingResidualBlock {
 
   // VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
   VkDescriptorSet gpoolDS = VK_NULL_HANDLE;
+  VkDescriptorSet gpoolNchwToNhwcDS = VK_NULL_HANDLE;
   // VkCommandBuffer addChannelCB = VK_NULL_HANDLE;
   VkDescriptorSet addChannelDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelNchwToNhwcDS = VK_NULL_HANDLE;
@@ -3919,6 +3953,11 @@ struct GlobalPoolingResidualBlock {
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, normActConv2->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, preBN->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, gpoolBN->requiredConvWorkspaceElts(handle, maxBatchSize));
+    if(handle->pipelines->useNHWC) {
+      const size_t channelsPadded = vk_helper::roundUpToMultipleInt(gpoolChannels, 4);
+      const size_t conversionElts = maxBatchSize * static_cast<size_t>(nnXYLen) * channelsPadded;
+      maxElts.size1 = std::max(maxElts.size1, conversionElts);
+    }
     return maxElts;
   }
 
@@ -3949,7 +3988,7 @@ struct GlobalPoolingResidualBlock {
       convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
     );
     VkResult res;;
-    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, &res, false);
+    performGpoolMask(handle, cb, gpoolDS, gpoolNchwToNhwcDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, convWorkspace, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(
       handle, cb, addChannelDS, addChannelNchwToNhwcDS, addChannelNhwcToNchwDS,
@@ -3989,7 +4028,7 @@ struct GlobalPoolingResidualBlock {
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
     VkCommandBuffer addChannelCB = VK_NULL_HANDLE;
     VkCommandBuffer addPointWiseCB = VK_NULL_HANDLE;
-    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, &res);
+    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolNchwToNhwcDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, convWorkspace, &res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record GlobalPoolingResidualBlock gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
@@ -4599,6 +4638,7 @@ struct PolicyHead {
   std::unique_ptr<MatBiasLayer> gpoolToPassBias;
   std::unique_ptr<MatmulLayer> gpoolToPassMul2;
   VkDescriptorSet gpoolDS = VK_NULL_HANDLE;
+  VkDescriptorSet gpoolNchwToNhwcDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelBiasDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelBiasNchwToNhwcDS = VK_NULL_HANDLE;
   VkDescriptorSet addChannelBiasNhwcToNchwDS = VK_NULL_HANDLE;
@@ -4646,6 +4686,11 @@ struct PolicyHead {
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p2Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,g1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
+    if(handle->pipelines->useNHWC) {
+      const size_t channelsPadded = vk_helper::roundUpToMultipleInt(g1Channels, 4);
+      const size_t conversionElts = maxBatchSize * static_cast<size_t>(nnXLen * nnYLen) * channelsPadded;
+      maxElts.size1 = std::max(maxElts.size1, conversionElts);
+    }
     return maxElts;
   }
 
@@ -4675,7 +4720,7 @@ struct PolicyHead {
       convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
     );
     VkResult res;;
-    performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res, false);
+    performGpoolMask(handle, cb, gpoolDS, gpoolNchwToNhwcDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, convWorkspace, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(
       handle, cb, addChannelBiasDS, addChannelBiasNchwToNhwcDS, addChannelBiasNhwcToNchwDS,
@@ -4722,7 +4767,7 @@ struct PolicyHead {
     );
     VkResult res;;
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
-    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res);
+    performGpoolMask(handle, gpoolCB, gpoolDS, gpoolNchwToNhwcDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, convWorkspace, &res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {gpoolCB});
     CHECK_VK_MSG("Record PolicyHead gpool mask", res);
     gpoolToBiasMul->debug(batchSize, gpoolConcat.buf, gpoolBias.buf);
