@@ -693,12 +693,22 @@ namespace vk_shader {
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    const bool useNHWC = false;
+    useNHWC =
+      tuneParams.vulkan.canUseCooperativeMatrix &&
+      tuneParams.vulkan.canUseFP16Storage &&
+      tuneParams.vulkan.canUseFP16Compute &&
+      tuneParams.vulkan.shouldUseFP16Storage &&
+      tuneParams.vulkan.shouldUseFP16Compute &&
+      (tuneParams.vulkan.shouldUseCooperativeMatrix ||
+       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskMishScale8(batchNormMaskMishScale8, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskSilu(batchNormMaskSilu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
+    if(useNHWC) {
+      if((result = createBatchNormMaskSilu(batchNormMaskSiluNCHW, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    }
     if((result = createGlobalPoolingChannelsFp32(globalPoolingChannelsFp32, tuneParams.gPool, tuneParams.vulkan)) != VK_SUCCESS) return result;
     for(uint32_t localSizeY = 1; localSizeY <= static_cast<uint32_t>(tuneParams.gPool.CHANNELSTRIDE); localSizeY *= 2) {
       for(uint32_t localSizeZ = 1; localSizeZ <= static_cast<uint32_t>(tuneParams.gPool.BATCHSTRIDE); localSizeZ *= 2) {
@@ -775,6 +785,7 @@ namespace vk_shader {
     destroyPipeline(batchNormMaskMish);
     destroyPipeline(batchNormMaskMishScale8);
     destroyPipeline(batchNormMaskSilu);
+    destroyPipeline(batchNormMaskSiluNCHW);
     destroyPipeline(globalPoolingChannelsFp32);
 
     for ( auto it : valueHeadPoolingChannels ) {

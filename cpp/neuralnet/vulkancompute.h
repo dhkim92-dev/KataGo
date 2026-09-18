@@ -57,7 +57,8 @@ namespace vkcompute {
     VulkanBuffer* nhwcScratch,
     int batchSize,
     int numInputChannels,
-    int spatialSize,
+    int nhwcSpatialSize,
+    int nchwSpatialStride,
     int logicalSpatialSize,
     bool useNHWC,
     bool begin = true

@@ -1184,6 +1184,7 @@ struct LocalDimHash {
       uint32_t batchSize;
       uint32_t numChannels;
       uint32_t nnXYLen;
+      uint32_t maskSpatialStride;
     };
 
     /**
@@ -1251,12 +1252,16 @@ struct LocalDimHash {
      * @brief Push parameters for ExtractChannel0 shader
      * @param nSize: number of batches
      * @param cSize: number of input channels
-     * @param xySize: H*W spatial size
+     * @param nhwcSpatialSize: NHWC staging spatial size
+     * @param nchwSpatialStride: external NCHW spatial stride
+     * @param logicalSpatialSize: logical, unpadded spatial size
      */
     struct ExtractChannel0Params {
       int nSize;  
       int cSize;
-      int xySize;
+      int nhwcSpatialSize;
+      int nchwSpatialStride;
+      int logicalSpatialSize;
     };
 
     struct NCHWPushConstantParams {
@@ -1647,6 +1652,7 @@ struct LocalDimHash {
     VkPipelineCache cache;
     Logger* logger;
     bool printPipelineCreation = false;
+    bool useNHWC = false;
 
     // Shader modules are shared by all specialization variants of a SPIR-V binary.
     VkShaderModule shaderModule_add_channel_bias_nc_identity_fp32 = VK_NULL_HANDLE;
@@ -1799,6 +1805,7 @@ struct LocalDimHash {
     Pipeline batchNormMaskMish;
     Pipeline batchNormMaskMishScale8;
     Pipeline batchNormMaskSilu;
+    Pipeline batchNormMaskSiluNCHW;
 
     // Pooling pipelines
     Pipeline globalPoolingChannelsFp32;

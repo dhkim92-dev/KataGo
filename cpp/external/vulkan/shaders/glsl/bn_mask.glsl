@@ -15,6 +15,7 @@ layout(push_constant) uniform BatchNormMaskFp32Params {
     int nSize;
     int cSize;
     int xySize;
+    int maskSpatialStride;
 };
 
 layout(constant_id = 3) const int USE_NHWC = 0;
@@ -40,30 +41,50 @@ layout(set = 0, binding = 4) readonly buffer g_mask_block {
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+void bnMaskElement(int idx, int n, int c, int xy) {
+  const real maskValue = xy < maskSpatialStride
+    ? LOAD(mask,n * maskSpatialStride + xy)
+    : ZERO;
+    #if ACTIVATION == 0
+  real result = (LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c)) * maskValue;
+    #elif ACTIVATION == 1
+  real result = fmax(LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c), ZERO) * maskValue;
+    #elif ACTIVATION == 2
+  float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
+  real result = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * maskValue;
+    #elif ACTIVATION == 12
+  float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
+  real result = floatToReal(a < (LOG1PEXPTHRESHOLD*0.125f) ? a * tanh(log1p(exp(a*8.0f))) : a) * maskValue;
+    #elif ACTIVATION == 3
+  float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
+  real result = floatToReal(a / (1.0f + exp(-a))) * maskValue;
+    #endif
+  STORE(d_output,idx,result);
+}
+
+void bnMaskNCHW(int xy, int c) {
+  for(int n = 0; n < nSize; n++) {
+    const int idx = (n * cSize + c) * xySize + xy;
+    bnMaskElement(idx, n, c, xy);
+  }
+}
+
+void bnMaskNHWC(int xy, int c) {
+  const int channelsPadded = (cSize + 3) & ~3;
+  for(int n = 0; n < nSize; n++) {
+    const int idx = (n * xySize + xy) * channelsPadded + c;
+    bnMaskElement(idx, n, c, xy);
+  }
+}
+
 void main() {
   const int xy = int(gl_GlobalInvocationID.x);
   const int c = int(gl_GlobalInvocationID.y);
   if(c < cSize && xy < xySize) {
-    for(int n = 0; n < nSize; n++) {
-      const int channelsPadded = (cSize + 3) & ~3;
-      const int idx = USE_NHWC == 1
-        ? (n * xySize + xy) * channelsPadded + c
-        : (n * cSize + c) * xySize + xy;
-    #if ACTIVATION == 0
-      real result = (LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c)) * LOAD(mask,n * xySize + xy);
-    #elif ACTIVATION == 1
-      real result = fmax(LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c), ZERO) * LOAD(mask,n * xySize + xy);
-    #elif ACTIVATION == 2
-      float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
-      real result = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * LOAD(mask,n * xySize + xy);
-    #elif ACTIVATION == 12
-      float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
-      real result = floatToReal(a < (LOG1PEXPTHRESHOLD*0.125f) ? a * tanh(log1p(exp(a*8.0f))) : a) * LOAD(mask,n * xySize + xy);
-    #elif ACTIVATION == 3
-      float a = LOAD(d_input,idx) * LOAD(scale,c) + LOAD(bias,c);
-      real result = floatToReal(a / (1.0f + exp(-a))) * LOAD(mask,n * xySize + xy);
-    #endif
-      STORE(d_output,idx,result);
+    if(USE_NHWC == 1) {
+      bnMaskNHWC(xy, c);
+    } else {
+      bnMaskNCHW(xy, c);
     }
   }
 }

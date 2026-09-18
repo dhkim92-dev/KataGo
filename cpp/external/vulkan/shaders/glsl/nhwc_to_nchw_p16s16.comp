@@ -4,7 +4,7 @@
 
 // Read channel-last staging data with aligned vector loads, then scatter the
 // valid channels into the externally visible NCHW tensor. Padded channels are
-// never written to the destination.
+// never written to the destination, and the NCHW spatial tail is zeroed.
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer {
@@ -27,21 +27,27 @@ layout(push_constant) uniform NHWCToNCHWParams {
 void main() {
   const int vectorIndex = int(gl_GlobalInvocationID.x);
   const int vectorsPerSpatial = channelsPadded / 4;
-  const int totalVectors = batchSize * spatialSize * vectorsPerSpatial;
+  const int dispatchSpatialSize = max(spatialSize, spatialStride);
+  const int totalVectors = batchSize * dispatchSpatialSize * vectorsPerSpatial;
   if(vectorIndex >= totalVectors)
     return;
 
   const int spatialIndex = vectorIndex / vectorsPerSpatial;
   const int channelVector = vectorIndex - spatialIndex * vectorsPerSpatial;
   const int channelBase = channelVector * 4;
-  const int batch = spatialIndex / spatialSize;
-  const int xy = spatialIndex - batch * spatialSize;
+  const int batch = spatialIndex / dispatchSpatialSize;
+  const int xy = spatialIndex - batch * dispatchSpatialSize;
   const int outputBatchBase = batch * channels * spatialStride;
-  const f16vec4 value = inputData[vectorIndex];
+  f16vec4 value = f16vec4(0.0hf);
+  if(xy < spatialSize) {
+    const int inputVectorIndex = (batch * spatialSize + xy) * vectorsPerSpatial + channelVector;
+    value = inputData[inputVectorIndex];
+  }
 
   for(int lane = 0; lane < 4; ++lane) {
     const int channel = channelBase + lane;
-    if(channel < channels && xy < logicalSpatialSize)
-      outputData[outputBatchBase + channel * spatialStride + xy] = value[lane];
+    if(channel < channels && xy < spatialStride)
+      outputData[outputBatchBase + channel * spatialStride + xy] =
+        xy < logicalSpatialSize ? value[lane] : 0.0hf;
   }
 }

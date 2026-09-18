@@ -26,6 +26,7 @@ void convertNCHWNHWC(
   int spatialSize,
   int spatialStride,
   int logicalSpatialSize,
+  bool nhwcToNchw,
   VkResult* result
 ) {
   assert(device != nullptr);
@@ -59,7 +60,8 @@ void convertNCHWNHWC(
   };
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
 
-  const size_t vectorCount = static_cast<size_t>(batchSize) * static_cast<size_t>(spatialSize) * static_cast<size_t>(channelsPadded / 4);
+  const int dispatchSpatialSize = nhwcToNchw ? std::max(spatialSize, spatialStride) : spatialSize;
+  const size_t vectorCount = static_cast<size_t>(batchSize) * static_cast<size_t>(dispatchSpatialSize) * static_cast<size_t>(channelsPadded / 4);
   const uint32_t workgroupCount = static_cast<uint32_t>(
     (vectorCount + pipeline->localSizeX - 1) / pipeline->localSizeX
   );
@@ -85,7 +87,7 @@ void convertNCHWToNHWC(
 ) {
   convertNCHWNHWC(
     device, pipeline, cb, descriptorSet, input, output,
-    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, result
+    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, false, result
   );
 }
 
@@ -105,7 +107,7 @@ void convertNHWCToNCHW(
 ) {
   convertNCHWNHWC(
     device, pipeline, cb, descriptorSet, input, output,
-    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, result
+    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, true, result
   );
 }
 
@@ -121,7 +123,8 @@ void extractChannel0(
   VulkanBuffer* nhwcScratch,
   int batchSize,
   int numInputChannels,
-  int spatialSize,
+  int nhwcSpatialSize,
+  int nchwSpatialStride,
   int logicalSpatialSize,
   bool useNHWC,
   bool begin
@@ -160,8 +163,8 @@ void extractChannel0(
       nhwcScratch,
       batchSize,
       numInputChannels,
-      spatialSize,
-      spatialSize,
+      nhwcSpatialSize,
+      nchwSpatialStride,
       logicalSpatialSize,
       &result
     );
@@ -196,7 +199,9 @@ void extractChannel0(
   const vk_shader::push::ExtractChannel0Params pushParams = {
     batchSize,
     numInputChannels,
-    spatialSize
+    nhwcSpatialSize,
+    nchwSpatialStride,
+    logicalSpatialSize
   };
   vkCmdPushConstants(
     commandBuffer,
@@ -206,7 +211,7 @@ void extractChannel0(
     sizeof(pushParams),
     &pushParams
   );
-  const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(spatialSize));
+  const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(nchwSpatialStride));
   const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
   const uint32_t wgCountX = (globalSizeX + extractPipeline->localSizeX - 1u) / extractPipeline->localSizeX;
   const uint32_t wgCountY = (globalSizeY + extractPipeline->localSizeY - 1u) / extractPipeline->localSizeY;

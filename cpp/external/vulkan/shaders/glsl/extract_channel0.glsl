@@ -17,7 +17,9 @@ layout(constant_id = 3) const int USE_NHWC = 0;
 layout(push_constant) uniform ExtractChannel0Params {
     int nSize;        // N: number of batches
     int cSize; // C: number of input channels
-    int xySize;          // H*W: spatial size
+    int nhwcSpatialSize; // NHWC staging spatial size
+    int nchwSpatialStride; // External NCHW spatial stride
+    int logicalSpatialSize; // Unpadded spatial size
 };
 
 // Descriptor Set bindings
@@ -31,21 +33,25 @@ layout(set = 0, binding = 1) buffer OutputBlock {
 };
 
 void extractNCHW(const int nIdx, const int xyIdx) {
-    real result = LOAD(d_input, nIdx * cSize * xySize + xyIdx);
-    STORE(d_output, nIdx * xySize + xyIdx, result);
+    real result = xyIdx < logicalSpatialSize
+        ? LOAD(d_input, nIdx * cSize * nchwSpatialStride + xyIdx)
+        : ZERO;
+    STORE(d_output, nIdx * nchwSpatialStride + xyIdx, result);
 }
 
 void extractNHWC(const int nIdx, const int xyIdx) {
     const int channelsPadded = (cSize + 3) & ~3;
-    real result = LOAD(d_input, (nIdx * xySize + xyIdx) * channelsPadded);
-    STORE(d_output, nIdx * xySize + xyIdx, result);
+    real result = xyIdx < logicalSpatialSize
+        ? LOAD(d_input, (nIdx * nhwcSpatialSize + xyIdx) * channelsPadded)
+        : ZERO;
+    STORE(d_output, nIdx * nchwSpatialStride + xyIdx, result);
 }
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
     const int xyIdx = int(gl_GlobalInvocationID.x);
     const int nIdx = int(gl_GlobalInvocationID.y);
-    if (xyIdx < xySize && nIdx < nSize) {
+    if (xyIdx < nchwSpatialStride && nIdx < nSize) {
         if (USE_NHWC == 1)
             extractNHWC(nIdx, xyIdx);
         else

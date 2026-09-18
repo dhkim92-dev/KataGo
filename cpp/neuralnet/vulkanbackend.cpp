@@ -622,7 +622,11 @@ struct BatchNormLayer {
   VulkanBuffer* mergedScaleBuf;
   VulkanBuffer* mergedBiasBuf;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nchwToNhwcDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcToNchwDescriptorSet = VK_NULL_HANDLE;
   Pipeline pipeline;
+  const bool useNHWC;
   BatchNormMaskParams pushParams = {};
 
   ~BatchNormLayer() {
@@ -655,7 +659,8 @@ struct BatchNormLayer {
     numChannels(desc->numChannels),
     epsilon(desc->epsilon),
     activation(actDesc->activation),
-    paddedNNXYLen(handle_->paddedNNXYLen)
+    paddedNNXYLen(handle_->paddedNNXYLen),
+    useNHWC(handle_->pipelines->useNHWC)
   {
     assert(desc->mean.size() == static_cast<size_t>(numChannels));
     assert(desc->variance.size() == static_cast<size_t>(numChannels));
@@ -710,6 +715,7 @@ struct BatchNormLayer {
     CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
     pushParams.numChannels = static_cast<uint32_t>(numChannels);
     pushParams.nnXYLen = static_cast<uint32_t>(paddedNNXYLen);
+    pushParams.maskSpatialStride = static_cast<uint32_t>(paddedNNXYLen);
     globalSizeX = vk_helper::powerOf2ify(paddedNNXYLen);
     globalSizeY = vk_helper::powerOf2ify(numChannels);
 
@@ -720,9 +726,20 @@ struct BatchNormLayer {
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* mask,
-    VulkanBuffer* output
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcInput = nullptr,
+    VulkanBuffer* nhwcOutput = nullptr,
+    int nhwcSpatialSize = 0,
+    int logicalSpatialSize = 0
   ) {
     assert(cb != VK_NULL_HANDLE);
+    if(useNHWC) {
+      forwardNHWC(
+        cb, batchSize, input, mask, output, nhwcInput, nhwcOutput,
+        nhwcSpatialSize, logicalSpatialSize
+      );
+      return;
+    }
     
       // update descriptor set
     std::vector<WriteDescriptorSet> writeDescriptorSets = {
@@ -753,6 +770,84 @@ struct BatchNormLayer {
     // CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
   }
 
+  void forwardNHWC(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* mask,
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcInput,
+    VulkanBuffer* nhwcOutput,
+    int nhwcSpatialSize,
+    int logicalSpatialSize
+  ) {
+    assert(cb != VK_NULL_HANDLE);
+    assert(input != nullptr && mask != nullptr && output != nullptr);
+    assert(nhwcInput != nullptr && nhwcOutput != nullptr);
+    assert(nhwcSpatialSize >= logicalSpatialSize);
+
+    VkResult res = VK_ERROR_UNKNOWN;
+    const Pipeline& nchwToNhwcPipeline = handle->pipelines->nchwToNhwc;
+    const Pipeline& nhwcToNchwPipeline = handle->pipelines->nhwcToNchw;
+    if(nchwToNhwcDescriptorSet == VK_NULL_HANDLE) {
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, nchwToNhwcPipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NCHW to NHWC descriptor set for BatchNormLayer: " + name, res);
+    }
+    if(nhwcToNchwDescriptorSet == VK_NULL_HANDLE) {
+      nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, nhwcToNchwPipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC to NCHW descriptor set for BatchNormLayer: " + name, res);
+    }
+    if(nhwcDescriptorSet == VK_NULL_HANDLE) {
+      nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC BatchNormLayer descriptor set: " + name, res);
+    }
+
+    vkcompute::convertNCHWToNHWC(
+      handle->vulkanDevice, &nchwToNhwcPipeline, cb, nchwToNhwcDescriptorSet,
+      input, nhwcInput, batchSize, numChannels, nhwcSpatialSize, paddedNNXYLen,
+      logicalSpatialSize, &res
+    );
+    CHECK_VK_MSG("Convert BatchNormLayer input to NHWC: " + name, res);
+
+    const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+      vk_helper::writeDescriptorSetBuffer(nhwcDescriptorSet, 0, nhwcInput),
+      vk_helper::writeDescriptorSetBuffer(nhwcDescriptorSet, 1, nhwcOutput),
+      vk_helper::writeDescriptorSetBuffer(nhwcDescriptorSet, 2, mergedScaleBuf),
+      vk_helper::writeDescriptorSetBuffer(nhwcDescriptorSet, 3, mergedBiasBuf),
+      vk_helper::writeDescriptorSetBuffer(nhwcDescriptorSet, 4, mask)
+    };
+    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+    BatchNormMaskParams nhwcPushParams = pushParams;
+    nhwcPushParams.batchSize = static_cast<uint32_t>(batchSize);
+    nhwcPushParams.nnXYLen = static_cast<uint32_t>(nhwcSpatialSize);
+    nhwcPushParams.maskSpatialStride = static_cast<uint32_t>(paddedNNXYLen);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &nhwcDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BatchNormMaskParams), &nhwcPushParams);
+    const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(nhwcSpatialSize));
+    const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(numChannels));
+    const uint32_t wgCountX = (globalSizeX + pipeline.localSizeX - 1u) / pipeline.localSizeX;
+    const uint32_t wgCountY = (globalSizeY + pipeline.localSizeY - 1u) / pipeline.localSizeY;
+    SHADER_PROFILE_START("BATCHNORM_MASK_NHWC", cb);
+    vkCmdDispatch(cb, wgCountX, wgCountY, 1u);
+    SHADER_PROFILE_END("BATCHNORM_MASK_NHWC", cb);
+    vk_helper::barrierCommandBufferForBuffer(cb, nhwcOutput);
+
+    vkcompute::convertNHWCToNCHW(
+      handle->vulkanDevice, &nhwcToNchwPipeline, cb, nhwcToNchwDescriptorSet,
+      nhwcOutput, output, batchSize, numChannels, nhwcSpatialSize, paddedNNXYLen,
+      logicalSpatialSize, &res
+    );
+    CHECK_VK_MSG("Convert BatchNormLayer output to NCHW: " + name, res);
+  }
+
   /**
    * @brief Launch the recorded command buffer, only for debug now.
    * @param batchSize
@@ -764,17 +859,34 @@ struct BatchNormLayer {
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* mask,
-    VulkanBuffer* output
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcInput = nullptr,
+    VulkanBuffer* nhwcOutput = nullptr,
+    int nhwcSpatialSize = 0,
+    int logicalSpatialSize = 0
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for BatchNormLayer: " + name, res);
-    forward(commandBuffer, batchSize, input, mask, output);
+    forward(commandBuffer, batchSize, input, mask, output, nhwcInput, nhwcOutput, nhwcSpatialSize, logicalSpatialSize);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for BatchNormLayer: " + name, res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
     printDeviceBuffer(name + " Output : ", handle->vulkanDevice, output, static_cast<size_t>(batchSize) * static_cast<size_t>(numChannels) * static_cast<size_t>(paddedNNXYLen));
   }
+
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(
+    ComputeHandleInternal* handle_,
+    size_t maxBatchSize
+  ) const {
+    if(!useNHWC)
+      return ConvWorkspaceEltsNeeded();
+    const size_t channelsPadded = vk_helper::roundUpToMultipleInt(numChannels, 4);
+    const size_t logicalSpatialSize = static_cast<size_t>(handle_->nnXLen) * static_cast<size_t>(handle_->nnYLen);
+    const size_t conversionElts = maxBatchSize * logicalSpatialSize * channelsPadded;
+    return ConvWorkspaceEltsNeeded(conversionElts, conversionElts);
+  }
+
 };
 
 
@@ -1849,7 +1961,10 @@ struct NormActConv {
   }
 
   ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, int maxBatchSize) {
-    return conv.requiredConvWorkspaceElts(handle, maxBatchSize);
+    return ConvWorkspaceEltsNeeded::getMax(
+      conv.requiredConvWorkspaceElts(handle, maxBatchSize),
+      bn.requiredConvWorkspaceElts(handle, maxBatchSize)
+    );
   }
 
   /**
@@ -1873,7 +1988,12 @@ struct NormActConv {
     if ( conv.isBNActFusedPossible() ) {
       conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
     } else {
-      bn.forward(cb, batchSize, input, mask, inputScratchOrInput);
+      bn.forward(
+        cb, batchSize, input, mask, inputScratchOrInput,
+        convWorkspace, convWorkspace2,
+        conv.nnXLen * conv.nnYLen,
+        conv.nnXLen * conv.nnYLen
+      );
       vk_helper::barrierCommandBufferForBuffer(cb, inputScratchOrInput);
       conv.forward(cb, batchSize, inputScratchOrInput, output, convWorkspace, convWorkspace2);
     }
@@ -1897,7 +2017,12 @@ struct NormActConv {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
-    bn.debug(batchSize, input, mask, inputScratchOrInput);
+    bn.debug(
+      batchSize, input, mask, inputScratchOrInput,
+      convWorkspace, convWorkspace2,
+      conv.nnXLen * conv.nnYLen,
+      conv.nnXLen * conv.nnYLen
+    );
     conv.debug(batchSize, inputScratchOrInput, output, nullptr, nullptr, convWorkspace, convWorkspace2);
   }
 
@@ -2828,7 +2953,10 @@ struct RMSNormLayer {
       VkResult res;
       actOnesBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, ones, useFP16Act, &res);
       actZerosBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeros, useFP16Act, &res);
-      scaleBiasMaskDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->batchNormMaskSilu.descriptorSetLayout, &res);
+      const Pipeline& scaleBiasMaskPipeline = handle->pipelines->useNHWC
+        ? handle->pipelines->batchNormMaskSiluNCHW
+        : handle->pipelines->batchNormMaskSilu;
+      scaleBiasMaskDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, scaleBiasMaskPipeline.descriptorSetLayout, &res);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate scaleBiasMaskDS",res);
     }
   }
@@ -2987,7 +3115,9 @@ struct RMSNormLayer {
 
     // Apply activation in-place on output if needed
     if(activation == ACTIVATION_SILU) {
-      Pipeline pipeline = handle->pipelines->batchNormMaskSilu;
+      Pipeline pipeline = handle->pipelines->useNHWC
+        ? handle->pipelines->batchNormMaskSiluNCHW
+        : handle->pipelines->batchNormMaskSilu;
       auto writeDescriptorSets = {
         vk_helper::writeDescriptorSetBuffer(scaleBiasMaskDS, 0, output),
         vk_helper::writeDescriptorSetBuffer(scaleBiasMaskDS, 1, output),
@@ -3000,6 +3130,7 @@ struct RMSNormLayer {
       params.batchSize = batchSize;
       params.numChannels = numChannels;
       params.nnXYLen = paddedNNXYLen;
+      params.maskSpatialStride = paddedNNXYLen;
       vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
       vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &scaleBiasMaskDS, 0, nullptr);
       vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
@@ -3717,6 +3848,8 @@ struct GlobalPoolingResidualBlock {
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, regularConv->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, gpoolConv->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, normActConv2->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, preBN->requiredConvWorkspaceElts(handle, maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, gpoolBN->requiredConvWorkspaceElts(handle, maxBatchSize));
     return maxElts;
   }
 
@@ -3736,10 +3869,16 @@ struct GlobalPoolingResidualBlock {
     SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(gpoolChannels * 3));
     SizedBuf<VulkanBuffer*> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(regularChannels));
 
-    preBN->forward(cb, batchSize, trunk, mask, trunkScratch);
+    preBN->forward(
+      cb, batchSize, trunk, mask, trunkScratch,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     regularConv->forward(cb, batchSize, trunkScratch, regularOut.buf, convWorkspace, convWorkspace2);
     gpoolConv->forward(cb, batchSize, trunkScratch, gpoolOut.buf, convWorkspace, convWorkspace2);
-    gpoolBN->forward(cb, batchSize, gpoolOut. buf,mask, gpoolOut.buf);
+    gpoolBN->forward(
+      cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;;
     performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
@@ -3763,10 +3902,16 @@ struct GlobalPoolingResidualBlock {
     SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(gpoolChannels * 3));
     SizedBuf<VulkanBuffer*> gpoolBias(scratch->allocator, scratch->getBufSizeFloat(regularChannels));
 
-    preBN->debug(batchSize, trunk, mask, trunkScratch);
+    preBN->debug(
+      batchSize, trunk, mask, trunkScratch,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     regularConv->debug(batchSize, trunkScratch, regularOut.buf, nullptr, nullptr, convWorkspace, convWorkspace2);
     gpoolConv->debug(batchSize, trunkScratch, gpoolOut.buf, nullptr, nullptr, convWorkspace, convWorkspace2);
-    gpoolBN->debug(batchSize, gpoolOut. buf,mask, gpoolOut.buf);
+    gpoolBN->debug(
+      batchSize, gpoolOut.buf, mask, gpoolOut.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;;
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
     VkCommandBuffer addChannelCB = VK_NULL_HANDLE;
@@ -4246,6 +4391,8 @@ struct Trunk {
 
     if(trunkTipRMSNorm)
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunkTipRMSNorm->requiredConvWorkspaceElts(handle,maxBatchSize));
+    if(trunkTipBN)
+      maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunkTipBN->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -4279,7 +4426,10 @@ struct Trunk {
     blockStack.forward(cb, batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
 
     if (trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
-      trunkTipBN->forward(cb, batchSize, trunk, mask, trunk);
+      trunkTipBN->forward(
+        cb, batchSize, trunk, mask, trunk,
+        convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+      );
     } else {
       trunkTipRMSNorm->forward(cb, batchSize, trunk, trunk, mask, maskSum, convWorkspace, convWorkspace2);
     }
@@ -4323,7 +4473,10 @@ struct Trunk {
     }
     blockStack.debug(batchSize, scratch, trunk, trunkScratch.buf, mask, maskSum, convWorkspace, convWorkspace2);
     if (trunkNormKind == TRUNK_NORM_KIND_STANDARD) {
-      trunkTipBN->debug(batchSize, trunk, mask, trunk);
+      trunkTipBN->debug(
+        batchSize, trunk, mask, trunk,
+        convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+      );
     } else {
       trunkTipRMSNorm->debug(batchSize, trunk, trunk, mask, maskSum, convWorkspace, convWorkspace2);
     }
@@ -4394,6 +4547,8 @@ struct PolicyHead {
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,g1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p2Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,g1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -4418,12 +4573,18 @@ struct PolicyHead {
 
     p1Conv->forward(cb, batchSize, trunk, p1Out.buf, convWorkspace, convWorkspace2);
     g1Conv->forward(cb, batchSize, trunk, gpoolOut.buf, convWorkspace, convWorkspace2);
-    g1BN->forward(cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf);
+    g1BN->forward(
+      cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;;
     performGpoolMask(handle, cb, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res, false);
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     performAddChannelBiases(handle, cb, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, paddedNNXYLen, false);
-    p1BN->forward(cb, batchSize, p1Out.buf, mask, p1Out.buf);
+    p1BN->forward(
+      cb, batchSize, p1Out.buf, mask, p1Out.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     p2Conv->forward(cb, batchSize, p1Out.buf, policy, convWorkspace, convWorkspace2);
 
     if ( modelVersion >= 15 ) {
@@ -4454,7 +4615,10 @@ struct PolicyHead {
 
     p1Conv->debug(batchSize, trunk, p1Out.buf, nullptr, nullptr, convWorkspace, convWorkspace2);
     g1Conv->debug(batchSize, trunk, gpoolOut.buf, nullptr, nullptr, convWorkspace, convWorkspace2);
-    g1BN->debug(batchSize, gpoolOut.buf, mask, gpoolOut.buf);
+    g1BN->debug(
+      batchSize, gpoolOut.buf, mask, gpoolOut.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;;
     VkCommandBuffer gpoolCB = VK_NULL_HANDLE;
     performGpoolMask(handle, gpoolCB, gpoolDS, gpoolOut.buf, gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen, &res);
@@ -4464,7 +4628,10 @@ struct PolicyHead {
     VkCommandBuffer addChannelBiasCB = VK_NULL_HANDLE;
     performAddChannelBiases(handle, addChannelBiasCB, addChannelBiasDS, p1Out.buf, gpoolBias.buf, p1Channels * batchSize, paddedNNXYLen);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {addChannelBiasCB});
-    p1BN->debug(batchSize, p1Out.buf, mask, p1Out.buf);
+    p1BN->debug(
+      batchSize, p1Out.buf, mask, p1Out.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     p2Conv->debug(batchSize, p1Out.buf, policy, nullptr, nullptr, convWorkspace, convWorkspace2);
 
     if ( modelVersion >= 15 ) {
@@ -4543,6 +4710,7 @@ struct ValueHead {
     ConvWorkspaceEltsNeeded maxElts;
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,v1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,vOwnershipConv->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,v1BN->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -4565,7 +4733,10 @@ struct ValueHead {
     SizedBuf<VulkanBuffer*> v2Out(scratch->allocator, scratch->getBufSizeFloat(v2Channels));
 
     v1Conv->forward(cb, batchSize, trunk, v1Out.buf, convWorkspace, convWorkspace2);
-    v1BN->forward(cb, batchSize, v1Out.buf, mask, v1Out.buf);
+    v1BN->forward(
+      cb, batchSize, v1Out.buf, mask, v1Out.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;;
     performValueHeadPool(handle, cb, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen, false);
 
@@ -4596,7 +4767,10 @@ struct ValueHead {
     SizedBuf<VulkanBuffer*> v2Out(scratch->allocator, scratch->getBufSizeFloat(v2Channels));
 
     v1Conv->debug(batchSize, trunk, v1Out.buf, nullptr, nullptr, convWorkspace, convWorkspace2);
-    v1BN->debug(batchSize, v1Out.buf, mask, v1Out.buf);
+    v1BN->debug(
+      batchSize, v1Out.buf, mask, v1Out.buf,
+      convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
+    );
     VkResult res;
     VkCommandBuffer gpoolCB =  VK_NULL_HANDLE;
     performValueHeadPool(handle, gpoolCB, gpoolDS, v1Out.buf, v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen);
@@ -4815,6 +4989,15 @@ struct Model {
     ComputeHandleInternal *handle
   ) const {
     ConvWorkspaceEltsNeeded maxElts;
+    if(handle->pipelines->useNHWC) {
+      const size_t logicalSpatialSize = static_cast<size_t>(handle->nnXLen) * static_cast<size_t>(handle->nnYLen);
+      const size_t inputStagingElts = static_cast<size_t>(maxBatchSize) * logicalSpatialSize *
+        static_cast<size_t>(vk_helper::roundUpToMultipleInt(numInputChannels, 4));
+      maxElts = ConvWorkspaceEltsNeeded::getMax(
+        maxElts,
+        ConvWorkspaceEltsNeeded(inputStagingElts, inputStagingElts)
+      );
+    }
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, trunk->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, policyHead->requiredConvWorkspaceElts(handle, maxBatchSize));
     maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts, valueHead->requiredConvWorkspaceElts(handle, maxBatchSize));
@@ -4852,6 +5035,7 @@ struct Model {
       convWorkspace,
       batchSize,
       numInputChannels,
+      nnXLen * nnYLen,
       handle->paddedNNXYLen,
       nnXLen * nnYLen,
       useNHWC,
@@ -4901,6 +5085,7 @@ struct Model {
       convWorkspace,
       batchSize,
       numInputChannels,
+      nnXLen * nnYLen,
       handle->paddedNNXYLen,
       nnXLen * nnYLen,
       useNHWC
