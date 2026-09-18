@@ -1899,6 +1899,22 @@ namespace {
             xySize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP))
           )
         : xySize;
+      const bool addChannelBiasesUseNHWC =
+        config.vulkan.canUseCooperativeMatrix &&
+        config.vulkan.canUseFP16Storage &&
+        config.vulkan.canUseFP16Compute &&
+        config.vulkan.shouldUseFP16Storage &&
+        config.vulkan.shouldUseFP16Compute &&
+        (config.vulkan.shouldUseCooperativeMatrix ||
+         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
+      const size_t addChannelBiasesSpatialSize = addChannelBiasesUseNHWC
+        ? logicalXYSize : addChannelBiasesXYSize;
+      const size_t addChannelBiasesChannels = static_cast<size_t>(
+        std::max(1, context.modelInfo.trunkNumChannels)
+      );
+      const size_t addChannelBiasesChannelsPadded = addChannelBiasesUseNHWC
+        ? vk_helper::roundUpToMultiple(addChannelBiasesChannels, size_t(4))
+        : addChannelBiasesChannels;
       const XgemmTuneParams& xgemmParams =
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
       const bool useHgemmCooperativeMatrixForPadding =
@@ -2004,7 +2020,7 @@ namespace {
         attentionOutputElements
       });
       const size_t addChannelBiasesElements = batchSize *
-        static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels)) * addChannelBiasesXYSize;
+        addChannelBiasesChannelsPadded * addChannelBiasesSpatialSize;
       const size_t scratchElements = isGemm ? gemmElements :
         plan.kernelName == "addChannelBiases" ? addChannelBiasesElements : transformElements;
       const size_t scratchBytes = vk_helper::roundUpToMultiple(std::max<size_t>(scratchElements, 4), size_t(4)) * sizeof(float);
@@ -2036,7 +2052,7 @@ namespace {
           return 2;
         if(name.find("transformer_scale_dot_product") == 0)
           return 3;
-        if(name.find("add_pointwise") == 0 || name.find("add_channel_bias_nchw") == 0)
+        if(name.find("add_pointwise") == 0 || name.find("add_channel_bias_") == 0)
           return 0;
         return 1;
       };
@@ -2050,7 +2066,7 @@ namespace {
           return binding == 0 || binding == 2;
         if(name.find("value_head_pool_channels") == 0 || name.find("sum_channels") == 0)
           return binding == 0;
-        if(name.find("add_channel_bias_nchw") == 0)
+        if(name.find("add_channel_bias_") == 0)
           return binding == 0;
         if(name.find("transformer_rms_norm") == 0 || name.find("transformer_spatial_rms_norm_apply") == 0)
           return binding == 0 || binding == 1 || binding == 4;
@@ -2178,7 +2194,7 @@ namespace {
               const bool swigluInput =
                 plan.kernelName == "pointwise" && name.find("transformer_swiglu") == 0 && binding < 2;
               const bool addChannelBiasesInput =
-                plan.kernelName == "addChannelBiases" && name.find("add_channel_bias_nchw") == 0 && binding == 1;
+                plan.kernelName == "addChannelBiases" && name.find("add_channel_bias_") == 0 && binding == 1;
               const bool transformerAttentionInput =
                 plan.kernelName == "transformerAttention" &&
                 name.find("transformer_scale_dot_product") == 0 && binding < 3;
@@ -2228,6 +2244,19 @@ namespace {
                   ? static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels))
                   : static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels));
                 fillPaddedNCHWInput(data, channels, rand);
+              }
+              else if(plan.kernelName == "addChannelBiases" &&
+                      name.find("add_channel_bias_") == 0 && binding == 0) {
+                if(addChannelBiasesUseNHWC) {
+                  for(size_t n = 0; n < batchSize; n++)
+                    for(size_t xy = 0; xy < logicalXYSize; xy++)
+                      for(size_t c = 0; c < addChannelBiasesChannels; c++)
+                        data[(n * addChannelBiasesSpatialSize + xy) * addChannelBiasesChannelsPadded + c] =
+                          static_cast<float>(rand.nextDouble());
+                }
+                else {
+                  fillPaddedNCHWInput(data, addChannelBiasesChannels, rand);
+                }
               }
               else if(addChannelBiasesInput) {
                 const size_t validBiases = batchSize * static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
@@ -2316,7 +2345,7 @@ namespace {
           // their initialized input so every measured invocation has the same
           // input, as in the OpenCL tuner.
           if((pipeline->name.find("add_pointwise") == 0 ||
-              pipeline->name.find("add_channel_bias_nchw") == 0) && binding == 0) {
+              pipeline->name.find("add_channel_bias_") == 0) && binding == 0) {
             if(!ensureBuffer(pointwiseAccumulatorInitialBuffer, scratchBytes, result, error, "pointwise reset buffer"))
               return false;
             if(!queueUpload(initialData, initialBytes, pointwiseAccumulatorInitialBuffer, "pointwise reset buffer"))
@@ -2432,12 +2461,26 @@ namespace {
             cpuReference->push_back(input[i] / (1.0f + expf(-input[i])) * gate[i]);
           return true;
         }
-        if(name.find("add_channel_bias_nchw") == 0) {
+        if(name.find("add_channel_bias_") == 0) {
           const vector<float>& accum = buffer(0);
           const vector<float>& bias = buffer(1);
-          const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * addChannelBiasesXYSize;
-          for(size_t i = 0; i < count; i++)
-            cpuReference->push_back(accum[i] + bias[i / addChannelBiasesXYSize]);
+          if(addChannelBiasesUseNHWC) {
+            for(int n = 0; n < cpuBatchSize; n++)
+              for(size_t xy = 0; xy < addChannelBiasesSpatialSize; xy++)
+                for(size_t c = 0; c < addChannelBiasesChannelsPadded; c++) {
+                  const size_t index =
+                    (static_cast<size_t>(n) * addChannelBiasesSpatialSize + xy) * addChannelBiasesChannelsPadded + c;
+                  const float result = c < addChannelBiasesChannels
+                    ? accum[index] + bias[static_cast<size_t>(n) * addChannelBiasesChannels + c]
+                    : accum[index];
+                  cpuReference->push_back(result);
+                }
+          }
+          else {
+            const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * addChannelBiasesXYSize;
+            for(size_t i = 0; i < count; i++)
+              cpuReference->push_back(accum[i] + bias[i / addChannelBiasesXYSize]);
+          }
           return true;
         }
         if(name.find("transformer_scale_dot_product") == 0) {
@@ -2817,9 +2860,10 @@ namespace {
           dispatch((params.size + config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX - 1) /
                    (config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX));
         }
-        else if(pipeline->name.find("add_channel_bias_nchw") == 0) {
+        else if(pipeline->name.find("add_channel_bias_") == 0) {
           vk_shader::push::AddChannelBiasNCHWParams params = {
-            static_cast<uint32_t>(batchSize * channels), static_cast<uint32_t>(addChannelBiasesXYSize)
+            static_cast<uint32_t>(batchSize * channels), static_cast<uint32_t>(addChannelBiasesSpatialSize),
+            static_cast<uint32_t>(channels)
           };
           push(params);
           dispatch(
@@ -2945,7 +2989,7 @@ namespace {
       const bool resetsInPlaceAccumulator =
         pointwiseAccumulatorInitialBuffer != nullptr &&
         (pipelines[0]->name.find("add_pointwise") == 0 ||
-         pipelines[0]->name.find("add_channel_bias_nchw") == 0);
+         pipelines[0]->name.find("add_channel_bias_") == 0);
       const auto resetInPlaceAccumulator = [&]() {
         if(!resetsInPlaceAccumulator)
           return;
@@ -3576,7 +3620,7 @@ namespace {
          !pointwiseValidationBuffers.empty()) {
         const uint32_t binding = outputBinding(pipelines[0]);
         size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
-        if(pipelines[0]->name.find("add_channel_bias_nchw") == 0)
+        if(pipelines[0]->name.find("add_channel_bias_") == 0)
           count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * addChannelBiasesXYSize;
         else if(pipelines[0]->name.find("transformer_swiglu") == 0)
           count = batchSize * std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels) * xySize;
@@ -5759,8 +5803,8 @@ namespace {
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createAddChannelBiasNCHW(pipelines.addChannelBiasNCHW, config.addChannelBiases, config.vulkan);
-      if(result == VK_SUCCESS) targets.push_back(&pipelines.addChannelBiasNCHW);
+      VkResult result = pipelines.createAddChannelBias(pipelines.addChannelBias, config.addChannelBiases, config.vulkan);
+      if(result == VK_SUCCESS) targets.push_back(&pipelines.addChannelBias);
       return result;
     }
   };

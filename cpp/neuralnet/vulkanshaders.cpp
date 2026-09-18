@@ -288,13 +288,13 @@ namespace vk_shader {
   const unsigned char* spirv_value_head_pool_channels_p32s16 = _binary_value_head_pool_channels_p32s16_start;
   size_t spirv_value_head_pool_channels_p32s16_size = _binary_value_head_pool_channels_p32s16_size;
 
-  // add_channel_bias_nchw_fp32
-  const unsigned char* spirv_add_channel_bias_nchw_fp32 = _binary_add_channel_bias_nchw_fp32_start;
-  size_t spirv_add_channel_bias_nchw_fp32_size = _binary_add_channel_bias_nchw_fp32_size;
-  const unsigned char* spirv_add_channel_bias_nchw_p32s16 = _binary_add_channel_bias_nchw_p32s16_start;
-  size_t spirv_add_channel_bias_nchw_p32s16_size = _binary_add_channel_bias_nchw_p32s16_size;
-  const unsigned char* spirv_add_channel_bias_nchw_p16s16 = _binary_add_channel_bias_nchw_p16s16_start;
-  size_t spirv_add_channel_bias_nchw_p16s16_size = _binary_add_channel_bias_nchw_p16s16_size;
+  // add_channel_bias_fp32
+  const unsigned char* spirv_add_channel_bias_fp32 = _binary_add_channel_bias_fp32_start;
+  size_t spirv_add_channel_bias_fp32_size = _binary_add_channel_bias_fp32_size;
+  const unsigned char* spirv_add_channel_bias_p32s16 = _binary_add_channel_bias_p32s16_start;
+  size_t spirv_add_channel_bias_p32s16_size = _binary_add_channel_bias_p32s16_size;
+  const unsigned char* spirv_add_channel_bias_p16s16 = _binary_add_channel_bias_p16s16_start;
+  size_t spirv_add_channel_bias_p16s16_size = _binary_add_channel_bias_p16s16_size;
 
   // add_channel_bias_nc_fp32
   const unsigned char* spirv_add_channel_bias_nc_identity_fp32 = _binary_add_channel_bias_nc_identity_fp32_start;
@@ -461,9 +461,9 @@ namespace vk_shader {
       {spirv_add_channel_bias_nc_mish_scale8_fp32, spirv_add_channel_bias_nc_mish_scale8_fp32_size, &shaderModule_add_channel_bias_nc_mish_scale8_fp32},
       {spirv_add_channel_bias_nc_relu_fp32, spirv_add_channel_bias_nc_relu_fp32_size, &shaderModule_add_channel_bias_nc_relu_fp32},
       {spirv_add_channel_bias_nc_silu_fp32, spirv_add_channel_bias_nc_silu_fp32_size, &shaderModule_add_channel_bias_nc_silu_fp32},
-      {spirv_add_channel_bias_nchw_fp32, spirv_add_channel_bias_nchw_fp32_size, &shaderModule_add_channel_bias_nchw_fp32},
-      {spirv_add_channel_bias_nchw_p16s16, spirv_add_channel_bias_nchw_p16s16_size, &shaderModule_add_channel_bias_nchw_p16s16},
-      {spirv_add_channel_bias_nchw_p32s16, spirv_add_channel_bias_nchw_p32s16_size, &shaderModule_add_channel_bias_nchw_p32s16},
+      {spirv_add_channel_bias_fp32, spirv_add_channel_bias_fp32_size, &shaderModule_add_channel_bias_fp32},
+      {spirv_add_channel_bias_p16s16, spirv_add_channel_bias_p16s16_size, &shaderModule_add_channel_bias_p16s16},
+      {spirv_add_channel_bias_p32s16, spirv_add_channel_bias_p32s16_size, &shaderModule_add_channel_bias_p32s16},
       {spirv_add_pointwise_fp32, spirv_add_pointwise_fp32_size, &shaderModule_add_pointwise_fp32},
       {spirv_add_pointwise_p16s16, spirv_add_pointwise_p16s16_size, &shaderModule_add_pointwise_p16s16},
       {spirv_add_pointwise_p32s16, spirv_add_pointwise_p32s16_size, &shaderModule_add_pointwise_p32s16},
@@ -724,7 +724,7 @@ namespace vk_shader {
       if((result = createSumChannels(pipeline, tuneParams.gPool, localSizeZ, tuneParams.vulkan)) != VK_SUCCESS) return result;
       sumChannels.emplace(dim, pipeline);
     }
-    if((result = createAddChannelBiasNCHW(addChannelBiasNCHW, tuneParams.addChannelBiases, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBias(addChannelBias, tuneParams.addChannelBiases, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCIdentity(addChannelBiasNCIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCRelu(addChannelBiasNCRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCMish(addChannelBiasNCMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -796,7 +796,7 @@ namespace vk_shader {
       destroyPipeline(it.second);
     }
     sumChannels.clear();
-    destroyPipeline(addChannelBiasNCHW);
+    destroyPipeline(addChannelBias);
     destroyPipeline(addChannelBiasNCIdentity);
     destroyPipeline(addChannelBiasNCRelu);
     destroyPipeline(addChannelBiasNCMish);
@@ -1566,19 +1566,28 @@ namespace vk_shader {
     return createPipeline("sum_channels_fp32", shaderModule_sum_channels_fp32, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createAddChannelBiasNCHW(Pipeline& pipeline, const AddChannelBiasesNCHWTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createAddChannelBias(Pipeline& pipeline, const AddChannelBiasesNCHWTuneParams& tuneParams, const VulkanParams& vulkanParams) {
     auto spec = AddChannelBiasNCHWSpec();
     spec.XY_ELTS_PER_THREAD = tuneParams.XY_ELTS_PER_THREAD;
     spec.NC_ELTS_PER_THREAD = tuneParams.NC_ELTS_PER_THREAD;
     spec.localSizeX=32;
     spec.localSizeY=1;
+    spec.useNHWC = (
+      vulkanParams.canUseCooperativeMatrix &&
+      vulkanParams.canUseFP16Storage &&
+      vulkanParams.canUseFP16Compute &&
+      vulkanParams.shouldUseFP16Storage &&
+      vulkanParams.shouldUseFP16Compute &&
+      (vulkanParams.shouldUseCooperativeMatrix ||
+       vulkanParams.shouldUseHgemmCooperativeMatrixNCHW)
+    ) ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("add_channel_bias_nchw_p16s16", shaderModule_add_channel_bias_nchw_p16s16, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("add_channel_bias_nchw_p32s16", shaderModule_add_channel_bias_nchw_p32s16, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("add_channel_bias_p16s16", shaderModule_add_channel_bias_p16s16, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("add_channel_bias_p32s16", shaderModule_add_channel_bias_p32s16, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("add_channel_bias_nchw_fp32", shaderModule_add_channel_bias_nchw_fp32, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("add_channel_bias_fp32", shaderModule_add_channel_bias_fp32, 2, sizeof(AddChannelBiasNCHWParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createAddChannelBiasNCIdentity(Pipeline& pipeline, const VulkanParams& vulkanParams [[maybe_unused]]) {

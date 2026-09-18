@@ -295,18 +295,18 @@ extern "C" {
   extern const unsigned char* _binary_sum_channels_p32s16_end;
   extern const size_t _binary_sum_channels_p32s16_size;
 
-  // add_channel_bias_nchw_fp32.glsl
-  extern const unsigned char _binary_add_channel_bias_nchw_fp32_start[];
-  extern const unsigned char* _binary_add_channel_bias_nchw_fp32_end;
-  extern const size_t _binary_add_channel_bias_nchw_fp32_size;
+  // add_channel_bias_fp32.comp
+  extern const unsigned char _binary_add_channel_bias_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_fp32_end;
+  extern const size_t _binary_add_channel_bias_fp32_size;
 
-  extern const unsigned char _binary_add_channel_bias_nchw_p32s16_start[];
-  extern const unsigned char* _binary_add_channel_bias_nchw_p32s16_end;
-  extern const size_t _binary_add_channel_bias_nchw_p32s16_size;
+  extern const unsigned char _binary_add_channel_bias_p32s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_p32s16_end;
+  extern const size_t _binary_add_channel_bias_p32s16_size;
 
-  extern const unsigned char _binary_add_channel_bias_nchw_p16s16_start[];
-  extern const unsigned char* _binary_add_channel_bias_nchw_p16s16_end;
-  extern const size_t _binary_add_channel_bias_nchw_p16s16_size;
+  extern const unsigned char _binary_add_channel_bias_p16s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_p16s16_end;
+  extern const size_t _binary_add_channel_bias_p16s16_size;
 
   // add_channel_bias_nc_identity_fp32.glsl
   extern const unsigned char _binary_add_channel_bias_nc_identity_fp32_start[];
@@ -651,15 +651,15 @@ namespace vk_shader {
   extern const unsigned char* spirv_value_head_pool_channels_p32s16;
   extern size_t spirv_value_head_pool_channels_p32s16_size;
 
-  // add_channel_bias_nchw_fp32 - Add channel bias (identity)
-  extern const unsigned char* spirv_add_channel_bias_nchw_fp32;
-  extern size_t spirv_add_channel_bias_nchw_fp32_size;
+  // add_channel_bias_fp32 - Add channel bias (identity)
+  extern const unsigned char* spirv_add_channel_bias_fp32;
+  extern size_t spirv_add_channel_bias_fp32_size;
 
-  extern const unsigned char* spirv_add_channel_bias_nchw_p32s16;
-  extern size_t spirv_add_channel_bias_nchw_p32s16_size;
+  extern const unsigned char* spirv_add_channel_bias_p32s16;
+  extern size_t spirv_add_channel_bias_p32s16_size;
 
-  extern const unsigned char* spirv_add_channel_bias_nchw_p16s16;
-  extern size_t spirv_add_channel_bias_nchw_p16s16_size;
+  extern const unsigned char* spirv_add_channel_bias_p16s16;
+  extern size_t spirv_add_channel_bias_p16s16_size;
 
   // add_channel_bias_nc_identity_fp32 - Add channel bias + Identity
   extern const unsigned char* spirv_add_channel_bias_nc_identity_fp32;
@@ -862,6 +862,7 @@ struct LocalDimHash {
       uint32_t localSizeZ = 1;
       int XY_ELTS_PER_THREAD = 1;
       int NC_ELTS_PER_THREAD = 1;
+      uint32_t useNHWC = 0;
     };
 
     struct AddChannelBiasNCSpec {
@@ -1238,6 +1239,7 @@ struct LocalDimHash {
     struct AddChannelBiasNCHWParams {
       uint32_t ncSize;
       uint32_t xySize;
+      uint32_t cSize;
     };
 
     /**
@@ -1660,9 +1662,9 @@ struct LocalDimHash {
     VkShaderModule shaderModule_add_channel_bias_nc_mish_scale8_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_add_channel_bias_nc_relu_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_add_channel_bias_nc_silu_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_add_channel_bias_nchw_fp32 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_add_channel_bias_nchw_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_add_channel_bias_nchw_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_add_pointwise_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_add_pointwise_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_add_pointwise_p32s16 = VK_NULL_HANDLE;
@@ -1815,7 +1817,7 @@ struct LocalDimHash {
     // Element wise operations
     std::map<LocalDim, Pipeline> sumChannels;
 
-    Pipeline addChannelBiasNCHW;
+    Pipeline addChannelBias;
     Pipeline addChannelBiasNCIdentity;
     Pipeline addChannelBiasNCRelu;
     Pipeline addChannelBiasNCMish;
@@ -1878,7 +1880,7 @@ struct LocalDimHash {
     VkResult createGlobalPoolingChannelsFp32(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createValueHeadPoolingChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
     VkResult createSumChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
-    VkResult createAddChannelBiasNCHW(Pipeline& pipeline, const tune::AddChannelBiasesNCHWTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBias(Pipeline& pipeline, const tune::AddChannelBiasesNCHWTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createAddChannelBiasNCIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createAddChannelBiasNCRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createAddChannelBiasNCMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);

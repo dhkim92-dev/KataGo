@@ -2,4 +2,4 @@
 #define PRECISION 16
 #define PRECISION_STORAGE 16
 
-#include "add_channel_bias_nchw.glsl"
+#include "add_channel_bias.glsl"
