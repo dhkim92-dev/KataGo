@@ -12,6 +12,308 @@
 
 namespace vkcompute {
 
+namespace {
+
+void convertNCHWNHWC(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  int batchSize,
+  int channels,
+  int spatialSize,
+  int spatialStride,
+  int logicalSpatialSize,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && output != nullptr);
+  assert(result != nullptr);
+
+  if(batchSize <= 0 || channels <= 0 || spatialSize <= 0 || spatialStride < logicalSpatialSize ||
+     logicalSpatialSize <= 0 || logicalSpatialSize > spatialSize) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update descriptors for NCHW/NHWC conversion", *result);
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+
+  const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, 4);
+  const vk_shader::push::NCHWNHWCParams pushParams = {
+    batchSize, channels, spatialSize, spatialStride, channelsPadded, logicalSpatialSize
+  };
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+
+  const size_t vectorCount = static_cast<size_t>(batchSize) * static_cast<size_t>(spatialSize) * static_cast<size_t>(channelsPadded / 4);
+  const uint32_t workgroupCount = static_cast<uint32_t>(
+    (vectorCount + pipeline->localSizeX - 1) / pipeline->localSizeX
+  );
+  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
+}
+
+void convertNCHWToNHWC(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  int batchSize,
+  int channels,
+  int spatialSize,
+  int spatialStride,
+  int logicalSpatialSize,
+  VkResult* result
+) {
+  convertNCHWNHWC(
+    device, pipeline, cb, descriptorSet, input, output,
+    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, result
+  );
+}
+
+void convertNHWCToNCHW(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  int batchSize,
+  int channels,
+  int spatialSize,
+  int spatialStride,
+  int logicalSpatialSize,
+  VkResult* result
+) {
+  convertNCHWNHWC(
+    device, pipeline, cb, descriptorSet, input, output,
+    batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, result
+  );
+}
+
+void im2colNHWC(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  const VulkanBuffer* scale,
+  const VulkanBuffer* bias,
+  const VulkanBuffer* mask,
+  int batchSize,
+  int xSize,
+  int ySize,
+  int logicalSpatialSize,
+  int spatialSize,
+  int maskSpatialStride,
+  int channels,
+  int channelsPadded,
+  int kSize,
+  int logicalKSize,
+  int convYSize,
+  int convXSize,
+  int activation,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && output != nullptr && scale != nullptr && bias != nullptr && mask != nullptr);
+  assert(result != nullptr);
+  if(batchSize <= 0 || xSize <= 0 || ySize <= 0 || logicalSpatialSize <= 0 ||
+     logicalSpatialSize > spatialSize || maskSpatialStride < logicalSpatialSize ||
+     channels <= 0 || channelsPadded < channels ||
+     kSize <= 0 || logicalKSize <= 0 || logicalKSize > kSize ||
+     convYSize <= 0 || convXSize <= 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, scale),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, bias),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for NHWC im2col", *result);
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+  const vk_shader::push::Im2ColNHWCParams pushParams = {
+    batchSize, xSize, ySize, logicalSpatialSize, spatialSize, maskSpatialStride,
+    channels, channelsPadded, kSize, logicalKSize,
+    convYSize, convXSize, activation
+  };
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+  const size_t total = static_cast<size_t>(batchSize) * static_cast<size_t>(spatialSize) * static_cast<size_t>(kSize);
+  const uint32_t workgroupCount = static_cast<uint32_t>((total + pipeline->localSizeX - 1) / pipeline->localSizeX);
+  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
+void convertNHWCMatrixToNCHW(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* input,
+  VulkanBuffer* output,
+  int batchSize,
+  int channels,
+  int logicalSpatialSize,
+  int spatialSize,
+  int outputSpatialStride,
+  int matrixChannels,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && output != nullptr);
+  assert(result != nullptr);
+  if(batchSize <= 0 || channels <= 0 || logicalSpatialSize <= 0 || spatialSize < logicalSpatialSize ||
+     outputSpatialStride < logicalSpatialSize || matrixChannels < channels) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for NHWC matrix to NCHW", *result);
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+  const vk_shader::push::NHWCMatrixToNCHWParams pushParams = {
+    batchSize, channels, logicalSpatialSize, spatialSize, outputSpatialStride, matrixChannels
+  };
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+  const size_t total = static_cast<size_t>(batchSize) * static_cast<size_t>(logicalSpatialSize) * static_cast<size_t>(channels);
+  const uint32_t workgroupCount = static_cast<uint32_t>((total + pipeline->localSizeX - 1) / pipeline->localSizeX);
+  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
+namespace {
+
+template<typename TuneParams>
+void doHgemmCooperativeMatrixNHWCImpl(
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* A,
+  const VulkanBuffer* B,
+  VulkanBuffer* C,
+  int batchSize,
+  int M,
+  int N,
+  int K,
+  const TuneParams& params,
+  VkResult* result
+) {
+  assert(device != nullptr && pipeline != nullptr && cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE && A != nullptr && B != nullptr && C != nullptr && result != nullptr);
+  if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 || !params.isValid() ||
+     M % params.MWG != 0 || N % params.NWG != 0 || K % params.KWG != 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for NHWC cooperative matrix GEMM", *result);
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
+  );
+  const vk_shader::push::HGemmCooperativeMatrixParams pushParams = {M, N, K};
+  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
+  vkCmdDispatch(
+    cb,
+    static_cast<uint32_t>(M / params.MWG),
+    static_cast<uint32_t>(N / params.NWG),
+    static_cast<uint32_t>(batchSize)
+  );
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
+}
+
+}
+
+void doHgemmCooperativeMatrixNHWC(
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* A,
+  const VulkanBuffer* B,
+  VulkanBuffer* C,
+  int batchSize,
+  int M,
+  int N,
+  int K,
+  const vk_shader::tune::HGemmCooperativeMatrixTuneParams& params,
+  VkResult* result
+) {
+  (void)tuneParams;
+  doHgemmCooperativeMatrixNHWCImpl(
+    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K, params, result
+  );
+}
+
+void doHgemmCooperativeMatrixNHWC(
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const VulkanBuffer* A,
+  const VulkanBuffer* B,
+  VulkanBuffer* C,
+  int batchSize,
+  int M,
+  int N,
+  int K,
+  const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
+  VkResult* result
+) {
+  (void)tuneParams;
+  doHgemmCooperativeMatrixNHWCImpl(
+    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K, params, result
+  );
+}
+
 void winogradFilterTransform3x3_2x2(
   float& a0, float& a1, float& a2, float& a3
 ) {
@@ -114,6 +416,31 @@ std::vector<float> convWeightsToWinogradDomain(
     }
   }
   return transWeights;
+}
+
+std::vector<float> convWeightsToNHWCIm2Col(
+  const std::vector<float>& weights,
+  uint32_t inChannels,
+  uint32_t outChannels,
+  uint32_t convY,
+  uint32_t convX,
+  uint32_t kSize,
+  uint32_t nSize
+) {
+  std::vector<float> im2colWeights(static_cast<size_t>(kSize) * nSize, 0.0f);
+  for(uint32_t y = 0; y < convY; ++y) {
+    for(uint32_t x = 0; x < convX; ++x) {
+      for(uint32_t ic = 0; ic < inChannels; ++ic) {
+        const uint32_t k = (y * convX + x) * inChannels + ic;
+        for(uint32_t oc = 0; oc < outChannels; ++oc) {
+          const uint32_t n = oc;
+          im2colWeights[static_cast<size_t>(k) * nSize + n] =
+            weights[(static_cast<size_t>(oc) * inChannels + ic) * convY * convX + y * convX + x];
+        }
+      }
+    }
+  }
+  return im2colWeights;
 }
 
 void convInputsToWinogradDomain(

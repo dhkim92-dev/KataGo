@@ -31,6 +31,31 @@ extern "C" {
   extern const unsigned char* _binary_conv2d_p16s16_end;
   extern const size_t _binary_conv2d_p16s16_size;
 
+  // NCHW/NHWC conversion shaders used by cooperative-matrix ConvLayer.
+  extern const unsigned char _binary_nchw_to_nhwc_p16s16_start[];
+  extern const unsigned char* _binary_nchw_to_nhwc_p16s16_end;
+  extern const size_t _binary_nchw_to_nhwc_p16s16_size;
+
+  extern const unsigned char _binary_nhwc_to_nchw_p16s16_start[];
+  extern const unsigned char* _binary_nhwc_to_nchw_p16s16_end;
+  extern const size_t _binary_nhwc_to_nchw_p16s16_size;
+
+  extern const unsigned char _binary_im2col_nhwc_p16s16_start[];
+  extern const unsigned char* _binary_im2col_nhwc_p16s16_end;
+  extern const size_t _binary_im2col_nhwc_p16s16_size;
+
+  extern const unsigned char _binary_nhwc_matrix_to_nchw_p16s16_start[];
+  extern const unsigned char* _binary_nhwc_matrix_to_nchw_p16s16_end;
+  extern const size_t _binary_nhwc_matrix_to_nchw_p16s16_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_size;
+
 #define DECLARE_HGEMM_VARIANT(name) \
   extern const unsigned char _binary_##name##_start[]; \
   extern const unsigned char* _binary_##name##_end; \
@@ -1066,6 +1091,40 @@ struct LocalDimHash {
       int xyStride;
     };
 
+    struct NCHWNHWCParams {
+      int batchSize;
+      int channels;
+      int spatialSize;
+      int spatialStride;
+      int channelsPadded;
+      int logicalSpatialSize;
+    };
+
+    struct Im2ColNHWCParams {
+      int batchSize;
+      int xSize;
+      int ySize;
+      int logicalSpatialSize;
+      int spatialSize;
+      int maskSpatialStride;
+      int channels;
+      int channelsPadded;
+      int kSize;
+      int logicalKSize;
+      int convYSize;
+      int convXSize;
+      int activation;
+    };
+
+    struct NHWCMatrixToNCHWParams {
+      int batchSize;
+      int channels;
+      int logicalSpatialSize;
+      int spatialSize;
+      int outputSpatialStride;
+      int matrixChannels;
+    };
+
     struct XGEMMBatchedParams{
       uint32_t M;  
       uint32_t N;  
@@ -1617,6 +1676,12 @@ struct LocalDimHash {
     VkShaderModule shaderModule_conv2d_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_conv2d_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_conv2d_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nchw_to_nhwc_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nhwc_to_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_im2col_nhwc_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nhwc_matrix_to_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_extract_channel0_nchw_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_extract_channel0_nchw_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_extract_channel0_nchw_p32s16 = VK_NULL_HANDLE;
@@ -1689,6 +1754,12 @@ struct LocalDimHash {
 
     // Conv2D pipelines
     Pipeline conv2dFp32; 
+    Pipeline nchwToNhwc;
+    Pipeline nhwcToNchw;
+    Pipeline im2colNHWC;
+    Pipeline nhwcMatrixToNchw;
+    Pipeline hgemmCooperativeMatrixNHWC;
+    Pipeline hgemmCooperativeMatrix1x1NHWC;
     Pipeline winogradInputTransform3x3;
     Pipeline winogradInputTransform5x5;
 
@@ -1770,6 +1841,12 @@ struct LocalDimHash {
 
     VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print);
     VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
+    VkResult createNchwToNhwc(Pipeline& pipeline);
+    VkResult createNhwcToNchw(Pipeline& pipeline);
+    VkResult createIm2ColNHWC(Pipeline& pipeline);
+    VkResult createNHWCMatrixToNCHW(Pipeline& pipeline);
+    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
     VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
     VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);

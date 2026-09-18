@@ -1,0 +1,89 @@
+#version 460
+#define PRECISION 16
+#define PRECISION_STORAGE 16
+#include "common.glsl"
+#include "functions.glsl"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+  realstore inputData[];
+};
+layout(set = 0, binding = 1) writeonly buffer Im2ColBuffer {
+  realstore im2colData[];
+};
+layout(set = 0, binding = 2) readonly buffer ScaleBuffer {
+  realstore scaleData[];
+};
+layout(set = 0, binding = 3) readonly buffer BiasBuffer {
+  realstore biasData[];
+};
+layout(set = 0, binding = 4) readonly buffer MaskBuffer {
+  realstore maskData[];
+};
+
+layout(push_constant) uniform Im2ColNHWCParams {
+  int batchSize;
+  int xSize;
+  int ySize;
+  int logicalSpatialSize;
+  int spatialSize;
+  int maskSpatialStride;
+  int channels;
+  int channelsPadded;
+  int kSize;
+  int logicalKSize;
+  int convYSize;
+  int convXSize;
+  int activation;
+};
+
+void main() {
+  const int linear = int(gl_GlobalInvocationID.x);
+  const int total = batchSize * spatialSize * kSize;
+  if(linear >= total)
+    return;
+
+  const int k = linear % kSize;
+  const int row = (linear / kSize) % spatialSize;
+  const int batch = linear / (kSize * spatialSize);
+  real value = ZERO;
+
+  const int kernelIndex = channels > 0 ? k / channels : 0;
+  const int channel = channels > 0 ? k - kernelIndex * channels : 0;
+
+  if(row < logicalSpatialSize && k < logicalKSize && channel < channels) {
+    const int outY = row / xSize;
+    const int outX = row - outY * xSize;
+    const int kernelY = kernelIndex / convXSize;
+    const int kernelX = kernelIndex - kernelY * convXSize;
+    const int inputY = outY + kernelY - convYSize / 2;
+    const int inputX = outX + kernelX - convXSize / 2;
+
+    if(inputY >= 0 && inputY < ySize && inputX >= 0 && inputX < xSize) {
+      const int inputXY = inputY * xSize + inputX;
+      const int inputIndex = (batch * spatialSize + inputXY) * channelsPadded + channel;
+      value = LOAD(inputData, inputIndex);
+      if(activation >= ACTIVATION_TYPE_IDENTITY) {
+        const real normalized = value * LOAD(scaleData, channel) + LOAD(biasData, channel);
+        if(activation == ACTIVATION_TYPE_IDENTITY) {
+          value = normalized;
+        } else if(activation == ACTIVATION_TYPE_RELU) {
+          value = max(normalized, ZERO);
+        } else if(activation == ACTIVATION_TYPE_MISH) {
+          const float a = float(normalized);
+          value = floatToReal(a * tanh(a < float(LOG1PEXPTHRESHOLD) ? log(1.0 + exp(a)) : a));
+        } else if(activation == ACTIVATION_TYPE_MISH_SCALE8) {
+          const float a = float(normalized);
+          value = floatToReal(a < float(LOG1PEXPTHRESHOLD) * 0.125 ? a * tanh(log(1.0 + exp(a * 8.0))) : a);
+        } else if(activation == ACTIVATION_TYPE_SILU) {
+          const float a = float(normalized);
+          value = floatToReal(a / (1.0 + exp(-a)));
+        }
+        value *= LOAD(maskData, batch * maskSpatialStride + inputXY);
+      }
+    }
+  }
+
+  im2colData[(batch * spatialSize + row) * kSize + k] = value;
+}

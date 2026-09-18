@@ -74,6 +74,19 @@ namespace vk_shader {
   const unsigned char* spirv_conv2d_p16s16 = _binary_conv2d_p16s16_start;
   size_t spirv_conv2d_p16s16_size = _binary_conv2d_p16s16_size;
 
+  const unsigned char* spirv_nchw_to_nhwc_p16s16 = _binary_nchw_to_nhwc_p16s16_start;
+  size_t spirv_nchw_to_nhwc_p16s16_size = _binary_nchw_to_nhwc_p16s16_size;
+  const unsigned char* spirv_nhwc_to_nchw_p16s16 = _binary_nhwc_to_nchw_p16s16_start;
+  size_t spirv_nhwc_to_nchw_p16s16_size = _binary_nhwc_to_nchw_p16s16_size;
+  const unsigned char* spirv_im2col_nhwc_p16s16 = _binary_im2col_nhwc_p16s16_start;
+  size_t spirv_im2col_nhwc_p16s16_size = _binary_im2col_nhwc_p16s16_size;
+  const unsigned char* spirv_nhwc_matrix_to_nchw_p16s16 = _binary_nhwc_matrix_to_nchw_p16s16_start;
+  size_t spirv_nhwc_matrix_to_nchw_p16s16_size = _binary_nhwc_matrix_to_nchw_p16s16_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_nhwc_acc_fp16 = _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_start;
+  size_t spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size = _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_size;
+  const unsigned char* spirv_hgemm_cooperative_matrix_nhwc_acc_fp32 = _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_start;
+  size_t spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size = _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_size;
+
 #define DEFINE_HGEMM_VARIANT(name) \
   const unsigned char* spirv_##name = _binary_##name##_start; \
   size_t spirv_##name##_size = _binary_##name##_size;
@@ -472,6 +485,12 @@ namespace vk_shader {
       {spirv_conv2d_fp32, spirv_conv2d_fp32_size, &shaderModule_conv2d_fp32},
       {spirv_conv2d_p16s16, spirv_conv2d_p16s16_size, &shaderModule_conv2d_p16s16},
       {spirv_conv2d_p32s16, spirv_conv2d_p32s16_size, &shaderModule_conv2d_p32s16},
+      {spirv_nchw_to_nhwc_p16s16, spirv_nchw_to_nhwc_p16s16_size, &shaderModule_nchw_to_nhwc_p16s16},
+      {spirv_nhwc_to_nchw_p16s16, spirv_nhwc_to_nchw_p16s16_size, &shaderModule_nhwc_to_nchw_p16s16},
+      {spirv_im2col_nhwc_p16s16, spirv_im2col_nhwc_p16s16_size, &shaderModule_im2col_nhwc_p16s16},
+      {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16},
+      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16},
+      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32},
       {spirv_extract_channel0_nchw_fp32, spirv_extract_channel0_nchw_fp32_size, &shaderModule_extract_channel0_nchw_fp32},
       {spirv_extract_channel0_nchw_p16s16, spirv_extract_channel0_nchw_p16s16_size, &shaderModule_extract_channel0_nchw_p16s16},
       {spirv_extract_channel0_nchw_p32s16, spirv_extract_channel0_nchw_p32s16_size, &shaderModule_extract_channel0_nchw_p32s16},
@@ -616,6 +635,24 @@ namespace vk_shader {
        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
       if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
     }
+    if(tuneParams.vulkan.canUseCooperativeMatrix &&
+       tuneParams.vulkan.canUseFP16Storage &&
+       tuneParams.vulkan.canUseFP16Compute &&
+       tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseFP16Compute &&
+       (tuneParams.vulkan.shouldUseCooperativeMatrix ||
+        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW)) {
+      if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
+      if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
+      if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
+      if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
+      if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
+        if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
+      }
+      if(tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
+        if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrix1x1NHWC, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
+      }
+    }
     if(tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU) {
       if(!tuneParams.vulkan.canUseCooperativeMatrix ||
          !tuneParams.vulkan.canUseFP16Storage ||
@@ -704,6 +741,12 @@ namespace vk_shader {
     destroyPipeline(conv2dFp32);
     destroyPipeline(hgemmCooperativeMatrix);
     destroyPipeline(hgemmCooperativeMatrixNCHW);
+    destroyPipeline(hgemmCooperativeMatrixNHWC);
+    destroyPipeline(hgemmCooperativeMatrix1x1NHWC);
+    destroyPipeline(im2colNHWC);
+    destroyPipeline(nhwcMatrixToNchw);
+    destroyPipeline(nchwToNhwc);
+    destroyPipeline(nhwcToNchw);
     destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
@@ -888,6 +931,136 @@ namespace vk_shader {
       return createPipeline("winograd_input_transform_p32s16", shaderModule_winograd_input_transform_p32s16, 2, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
     return createPipeline("winograd_input_transform_fp32", shaderModule_winograd_input_transform_fp32, 2, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+  }
+
+  VkResult ComputePipelines::createNchwToNhwc(Pipeline& pipeline) {
+    return createPipeline(
+      "nchw_to_nhwc_p16s16",
+      shaderModule_nchw_to_nhwc_p16s16,
+      2,
+      sizeof(NCHWNHWCParams),
+      pipeline,
+      nullptr,
+      128,
+      1,
+      1
+    );
+  }
+
+  VkResult ComputePipelines::createNhwcToNchw(Pipeline& pipeline) {
+    return createPipeline(
+      "nhwc_to_nchw_p16s16",
+      shaderModule_nhwc_to_nchw_p16s16,
+      2,
+      sizeof(NCHWNHWCParams),
+      pipeline,
+      nullptr,
+      128,
+      1,
+      1
+    );
+  }
+
+  VkResult ComputePipelines::createIm2ColNHWC(Pipeline& pipeline) {
+    return createPipeline(
+      "im2col_nhwc_p16s16",
+      shaderModule_im2col_nhwc_p16s16,
+      5,
+      sizeof(Im2ColNHWCParams),
+      pipeline,
+      nullptr,
+      128,
+      1,
+      1
+    );
+  }
+
+  VkResult ComputePipelines::createNHWCMatrixToNCHW(Pipeline& pipeline) {
+    return createPipeline(
+      "nhwc_matrix_to_nchw_p16s16",
+      shaderModule_nhwc_matrix_to_nchw_p16s16,
+      2,
+      sizeof(NHWCMatrixToNCHWParams),
+      pipeline,
+      nullptr,
+      128,
+      1,
+      1
+    );
+  }
+
+  VkResult ComputePipelines::createHgemmCooperativeMatrixNHWC(
+    Pipeline& pipeline,
+    const HGemmCooperativeMatrixTuneParams& tuneParams
+  ) {
+    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
+      return VK_ERROR_INITIALIZATION_FAILED;
+    HGemmCooperativeMatrixSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MWARP;
+    spec.NSize = tuneParams.NWARP;
+    spec.KSize = tuneParams.KDIM;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    SpecializationData specData(spec);
+    return createPipeline(
+      tuneParams.accType == 32
+        ? "hgemm_cooperative_matrix_nhwc_acc_fp32"
+        : "hgemm_cooperative_matrix_nhwc_acc_fp16",
+      tuneParams.accType == 32
+        ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32
+        : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16,
+      3,
+      sizeof(HGemmCooperativeMatrixParams),
+      pipeline,
+      &specData.info,
+      spec.localSizeX,
+      spec.localSizeY,
+      spec.localSizeZ,
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+    );
+  }
+
+  VkResult ComputePipelines::createHgemmCooperativeMatrixNHWC(
+    Pipeline& pipeline,
+    const HGemmCooperativeMatrixNCHWTuneParams& tuneParams
+  ) {
+    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
+      return VK_ERROR_INITIALIZATION_FAILED;
+    HGemmCooperativeMatrixNCHWSpec spec;
+    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeZ = 1;
+    spec.MSize = tuneParams.MWARP;
+    spec.NSize = tuneParams.NWARP;
+    spec.KSize = tuneParams.KDIM;
+    spec.MWG = tuneParams.MWG;
+    spec.NWG = tuneParams.NWG;
+    spec.KWG = tuneParams.KWG;
+    spec.MWAVE = tuneParams.MWAVE;
+    spec.NWAVE = tuneParams.NWAVE;
+    SpecializationData specData(spec);
+    return createPipeline(
+      tuneParams.accType == 32
+        ? "hgemm_cooperative_matrix_nhwc_1x1_acc_fp32"
+        : "hgemm_cooperative_matrix_nhwc_1x1_acc_fp16",
+      tuneParams.accType == 32
+        ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32
+        : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16,
+      3,
+      sizeof(HGemmCooperativeMatrixParams),
+      pipeline,
+      &specData.info,
+      spec.localSizeX,
+      spec.localSizeY,
+      spec.localSizeZ,
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+    );
   }
 
   VkResult ComputePipelines::createWinogradInputTransformBnAct(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, int activation, const VulkanParams& vulkanParams) {

@@ -14,6 +14,112 @@
 
 namespace vkcompute {
 
+  void convertNCHWToNHWC(
+    const VulkanDevice* device,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* input,
+    VulkanBuffer* output,
+    int batchSize,
+    int channels,
+    int spatialSize,
+    int spatialStride,
+    int logicalSpatialSize,
+    VkResult* result
+  );
+
+  void convertNHWCToNCHW(
+    const VulkanDevice* device,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* input,
+    VulkanBuffer* output,
+    int batchSize,
+    int channels,
+    int spatialSize,
+    int spatialStride,
+    int logicalSpatialSize,
+    VkResult* result
+  );
+
+  void im2colNHWC(
+    const VulkanDevice* device,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* input,
+    VulkanBuffer* output,
+    const VulkanBuffer* scale,
+    const VulkanBuffer* bias,
+    const VulkanBuffer* mask,
+    int batchSize,
+    int xSize,
+    int ySize,
+    int logicalSpatialSize,
+    int spatialSize,
+    int maskSpatialStride,
+    int channels,
+    int channelsPadded,
+    int kSize,
+    int logicalKSize,
+    int convYSize,
+    int convXSize,
+    int activation,
+    VkResult* result
+  );
+
+  void convertNHWCMatrixToNCHW(
+    const VulkanDevice* device,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* input,
+    VulkanBuffer* output,
+    int batchSize,
+    int channels,
+    int logicalSpatialSize,
+    int spatialSize,
+    int outputSpatialStride,
+    int matrixChannels,
+    VkResult* result
+  );
+
+  void doHgemmCooperativeMatrixNHWC(
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* A,
+    const VulkanBuffer* B,
+    VulkanBuffer* C,
+    int batchSize,
+    int M,
+    int N,
+    int K,
+    const vk_shader::tune::HGemmCooperativeMatrixTuneParams& params,
+    VkResult* result
+  );
+
+  void doHgemmCooperativeMatrixNHWC(
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const VulkanBuffer* A,
+    const VulkanBuffer* B,
+    VulkanBuffer* C,
+    int batchSize,
+    int M,
+    int N,
+    int K,
+    const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
+    VkResult* result
+  );
+
   void winogradFilterTransform3x3_2x2(float& a0, float& a1, float& a2, float& a3);
 
   void winogradFilterTransform3x3_4x4(float& a0, float& a1, float& a2, float& a3, float& a4, float& a5);
@@ -30,6 +136,16 @@ namespace vkcompute {
     uint32_t convX,
     uint32_t inTileYSize,
     uint32_t inTileXSize
+  );
+
+  std::vector<float> convWeightsToNHWCIm2Col(
+    const std::vector<float>& weights,
+    uint32_t inChannels,
+    uint32_t outChannels,
+    uint32_t convY,
+    uint32_t convX,
+    uint32_t kSize,
+    uint32_t nSize
   );
 
   void convInputsToWinogradDomain(

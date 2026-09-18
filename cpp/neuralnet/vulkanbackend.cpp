@@ -806,6 +806,11 @@ struct ConvLayer {
 
   bool usingHgemmCooperativeMatrix;
   bool usingHgemmCooperativeMatrixNCHW;
+  bool usingNhwcConversion;
+  bool usingNHWCIm2Col;
+  int nhwcSpatialSize;
+  int nhwcKSize;
+  int nhwcNSize;
 
   VulkanBuffer* filterBuf = nullptr;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -815,6 +820,12 @@ struct ConvLayer {
   VkDescriptorSet winogradOutputTransformDS = VK_NULL_HANDLE;
   VkDescriptorSet xgemmBatchedDS = VK_NULL_HANDLE;
   VkDescriptorSet hgemmCooperativeMatrixDS = VK_NULL_HANDLE;
+  VkDescriptorSet hgemmCooperativeMatrixNHWCDS = VK_NULL_HANDLE;
+  VkDescriptorSet hgemmCooperativeMatrixNHWC1x1DS = VK_NULL_HANDLE;
+  VkDescriptorSet im2colNHWCDS = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcMatrixToNchwDS = VK_NULL_HANDLE;
+  VkDescriptorSet nchwToNhwcDS = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcToNchwDS = VK_NULL_HANDLE;
 
   VulkanBuffer* bnScaleBuf = nullptr; // For batchnorm scale
   VulkanBuffer* bnBiasBuf = nullptr;  // For batchnorm bias
@@ -852,6 +863,11 @@ struct ConvLayer {
 
     usingHgemmCooperativeMatrix = false;
     usingHgemmCooperativeMatrixNCHW = false;
+    usingNhwcConversion = false;
+    usingNHWCIm2Col = false;
+    nhwcSpatialSize = 0;
+    nhwcKSize = 0;
+    nhwcNSize = 0;
     VkResult res;
     numTilesX = 0;
     numTilesY = 0;
@@ -869,6 +885,7 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         hgemmParams.isValid();
+      usingNhwcConversion = usingHgemmCooperativeMatrix;
     }
 
     // if ( convYSize == 3 || convYSize == 5 ) {
@@ -897,19 +914,57 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         hgemmParams.isValid() &&
-        inChannels % hgemmParams.KWG == 0 &&
-        outChannels % hgemmParams.NWG == 0;
-      std::vector<float> transWeights(inChannels * outChannels);
-      for (int oc = 0; oc < outChannels; oc++) {
-        for (int ic = 0; ic < inChannels; ic++) {
-          transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
-        }
+        handle_->tuneParams.vulkan.canUseFP16Compute;
+      usingNhwcConversion = usingNhwcConversion || usingHgemmCooperativeMatrixNCHW;
+    }
+
+    usingNHWCIm2Col = usingNhwcConversion;
+    if(usingNHWCIm2Col) {
+      const int logicalSpatialSize = nnXLen * nnYLen;
+      if(convXSize == 1 && convYSize == 1) {
+        const auto& params = handle_->tuneParams.hgemmCooperativeMatrixNCHW;
+        nhwcSpatialSize = vk_helper::roundUpToMultipleInt(logicalSpatialSize, params.MWG);
+        nhwcKSize = vk_helper::roundUpToMultipleInt(inChannels, params.KWG);
+        nhwcNSize = vk_helper::roundUpToMultipleInt(outChannels, params.NWG);
+      } else {
+        const auto& params = handle_->tuneParams.hgemmCooperativeMatrix;
+        nhwcSpatialSize = vk_helper::roundUpToMultipleInt(logicalSpatialSize, params.MWG);
+        nhwcKSize = vk_helper::roundUpToMultipleInt(convXSize * convYSize * inChannels, params.KWG);
+        nhwcNSize = vk_helper::roundUpToMultipleInt(outChannels, params.NWG);
       }
+    }
+
+    if (convXSize == 1 && convYSize == 1) {
+      if(usingNHWCIm2Col) {
+        std::vector<float> im2colWeights = vkcompute::convWeightsToNHWCIm2Col(
+          desc->weights, inChannels, outChannels, convYSize, convXSize,
+          nhwcKSize, nhwcNSize
+        );
+        filterBuf = vk_helper::createReadOnlyBuffer(
+          handle->vulkanDevice, im2colWeights, true, &res
+        );
+      } else {
+        std::vector<float> transWeights(inChannels * outChannels);
+        for (int oc = 0; oc < outChannels; oc++) {
+          for (int ic = 0; ic < inChannels; ic++) {
+            transWeights[ic * outChannels + oc] = desc->weights[oc * inChannels + ic];
+          }
+        }
+        filterBuf = vk_helper::createReadOnlyBuffer(
+          handle->vulkanDevice,
+          transWeights,
+          usingHgemmCooperativeMatrixNCHW || useFP16,
+          &res
+        );
+      }
+    } else if(usingNHWCIm2Col &&
+              ((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5))) {
+      std::vector<float> im2colWeights = vkcompute::convWeightsToNHWCIm2Col(
+        desc->weights, inChannels, outChannels, convYSize, convXSize,
+        nhwcKSize, nhwcNSize
+      );
       filterBuf = vk_helper::createReadOnlyBuffer(
-        handle->vulkanDevice,
-        transWeights,
-        usingHgemmCooperativeMatrixNCHW || useFP16,
-        &res
+        handle->vulkanDevice, im2colWeights, true, &res
       );
     } else if( (convXSize == 3 && convYSize == 3) || (convXSize==5 &&convYSize == 5)) {
       // outTilesY = handle->tuneParams.conv3x3.outTileYSize;
@@ -938,7 +993,7 @@ struct ConvLayer {
       std::vector<float> winogradWeights = vkcompute::convWeightsToWinogradDomain(
         desc->weights, inChannels, inChannelsPadded,
         outChannels, outChannelsPadded,
-        convYSize, convXSize, 
+        convYSize, convXSize,
         inTileYSize, inTileXSize
       );
 
@@ -986,10 +1041,142 @@ struct ConvLayer {
     int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
     int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
 
-    return ConvWorkspaceEltsNeeded {
+    ConvWorkspaceEltsNeeded needed {
       static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(inChannelsPadded) * static_cast<size_t>(inTileXYSize),
       static_cast<size_t>(numTilesTotalPadded) * static_cast<size_t>(outChannelsPadded) * static_cast<size_t>(inTileXYSize)
     };
+    if(usingNHWCIm2Col) {
+      const int inChannelsPaddedForNhwc = vk_helper::roundUpToMultipleInt(inChannels, 4);
+      const int outChannelsPaddedForNhwc = vk_helper::roundUpToMultipleInt(outChannels, 4);
+      const size_t conversionElts = maxBatchSize * static_cast<size_t>(nhwcSpatialSize) *
+        static_cast<size_t>(std::max(inChannelsPaddedForNhwc, outChannelsPaddedForNhwc));
+      const size_t im2colElts = maxBatchSize * static_cast<size_t>(nhwcSpatialSize) * static_cast<size_t>(nhwcKSize);
+      const size_t outputElts = maxBatchSize * static_cast<size_t>(nhwcSpatialSize) * static_cast<size_t>(nhwcNSize);
+      const size_t nhwcElts = std::max(conversionElts, std::max(im2colElts, outputElts));
+      needed.size1 = std::max(needed.size1, nhwcElts);
+      needed.size2 = std::max(needed.size2, nhwcElts);
+    }
+    return needed;
+  }
+
+  void convertInputToNHWC(VkCommandBuffer& cb, int batchSize, VulkanBuffer* input, VulkanBuffer* output) {
+    assert(usingNhwcConversion);
+    VkResult res = VK_ERROR_UNKNOWN;
+    const Pipeline& pipeline = handle->pipelines->nchwToNhwc;
+    if(nchwToNhwcDS == VK_NULL_HANDLE) {
+      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NCHW to NHWC descriptor set for ConvLayer: " + name, res);
+    }
+    vkcompute::convertNCHWToNHWC(
+      handle->vulkanDevice, &pipeline, cb, nchwToNhwcDS,
+      input, output, batchSize, inChannels, nhwcSpatialSize, paddedNNXYLen,
+      nnXLen * nnYLen, &res
+    );
+    CHECK_VK_MSG("Execute NCHW to NHWC conversion for ConvLayer: " + name, res);
+  }
+
+  void convertOutputToNCHW(VkCommandBuffer& cb, int batchSize, VulkanBuffer* input, VulkanBuffer* output) {
+    assert(usingNhwcConversion);
+    VkResult res = VK_ERROR_UNKNOWN;
+    const Pipeline& pipeline = handle->pipelines->nhwcToNchw;
+    if(nhwcToNchwDS == VK_NULL_HANDLE) {
+      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC to NCHW descriptor set for ConvLayer: " + name, res);
+    }
+    vkcompute::convertNHWCToNCHW(
+      handle->vulkanDevice, &pipeline, cb, nhwcToNchwDS,
+      input, output, batchSize, outChannels, nhwcSpatialSize, paddedNNXYLen,
+      nnXLen * nnYLen, &res
+    );
+    CHECK_VK_MSG("Execute NHWC to NCHW conversion for ConvLayer: " + name, res);
+  }
+
+  void doNHWCIm2ColConv(
+    VkCommandBuffer& cb,
+    int batchSize,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* convWorkspace1,
+    VulkanBuffer* convWorkspace2,
+    VulkanBuffer* bnScale,
+    VulkanBuffer* bnBias,
+    VulkanBuffer* mask,
+    int activation
+  ) {
+    assert(usingNHWCIm2Col);
+    assert(convWorkspace1 != nullptr && convWorkspace2 != nullptr);
+    VkResult res = VK_ERROR_UNKNOWN;
+    const Pipeline& im2colPipeline = handle->pipelines->im2colNHWC;
+    if(im2colNHWCDS == VK_NULL_HANDLE) {
+      im2colNHWCDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, im2colPipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC im2col descriptor set for ConvLayer: " + name, res);
+    }
+    const Pipeline* gemmPipeline = nullptr;
+    VkDescriptorSet* gemmDescriptorSet = nullptr;
+    if(convXSize == 1 && convYSize == 1) {
+      gemmPipeline = &handle->pipelines->hgemmCooperativeMatrix1x1NHWC;
+      gemmDescriptorSet = &hgemmCooperativeMatrixNHWC1x1DS;
+    } else {
+      gemmPipeline = &handle->pipelines->hgemmCooperativeMatrixNHWC;
+      gemmDescriptorSet = &hgemmCooperativeMatrixNHWCDS;
+    }
+    if(*gemmDescriptorSet == VK_NULL_HANDLE) {
+      *gemmDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, gemmPipeline->descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC cooperative matrix descriptor set for ConvLayer: " + name, res);
+    }
+    const Pipeline& outputPipeline = handle->pipelines->nhwcMatrixToNchw;
+    if(nhwcMatrixToNchwDS == VK_NULL_HANDLE) {
+      nhwcMatrixToNchwDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, outputPipeline.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("Allocate NHWC matrix output descriptor set for ConvLayer: " + name, res);
+    }
+
+    convertInputToNHWC(cb, batchSize, input, convWorkspace1);
+    VulkanBuffer* descriptorFallback = input;
+    vkcompute::im2colNHWC(
+      handle->vulkanDevice, &im2colPipeline, cb, im2colNHWCDS,
+      convWorkspace1, convWorkspace2,
+      bnScale != nullptr ? bnScale : descriptorFallback,
+      bnBias != nullptr ? bnBias : descriptorFallback,
+      mask != nullptr ? mask : descriptorFallback,
+      batchSize, nnXLen, nnYLen, nnXLen * nnYLen, nhwcSpatialSize, paddedNNXYLen,
+      inChannels, vk_helper::roundUpToMultipleInt(inChannels, 4),
+      nhwcKSize, convXSize * convYSize * inChannels,
+      convYSize, convXSize, activation, &res
+    );
+    CHECK_VK_MSG("Execute NHWC im2col for ConvLayer: " + name, res);
+
+    if(convXSize == 1 && convYSize == 1) {
+      vkcompute::doHgemmCooperativeMatrixNHWC(
+        handle->vulkanDevice, handle->tuneParams, gemmPipeline, cb, *gemmDescriptorSet,
+        convWorkspace2, filterBuf, convWorkspace1, batchSize,
+        nhwcSpatialSize, nhwcNSize, nhwcKSize,
+        handle->tuneParams.hgemmCooperativeMatrixNCHW, &res
+      );
+    } else {
+      vkcompute::doHgemmCooperativeMatrixNHWC(
+        handle->vulkanDevice, handle->tuneParams, gemmPipeline, cb, *gemmDescriptorSet,
+        convWorkspace2, filterBuf, convWorkspace1, batchSize,
+        nhwcSpatialSize, nhwcNSize, nhwcKSize,
+        handle->tuneParams.hgemmCooperativeMatrix, &res
+      );
+    }
+    CHECK_VK_MSG("Execute NHWC cooperative matrix ConvLayer: " + name, res);
+    vkcompute::convertNHWCMatrixToNCHW(
+      handle->vulkanDevice, &outputPipeline, cb, nhwcMatrixToNchwDS,
+      convWorkspace1, output, batchSize, outChannels, nnXLen * nnYLen,
+      nhwcSpatialSize, paddedNNXYLen, nhwcNSize, &res
+    );
+    CHECK_VK_MSG("Convert NHWC Conv output to NCHW: " + name, res);
   }
 
   bool canUseHgemmCooperativeMatrixFor(int batchSize) const {
@@ -1353,6 +1540,12 @@ struct ConvLayer {
     VulkanBuffer* convWorkspace2
   ) {
     assert(cb != VK_NULL_HANDLE);
+    if(usingNhwcConversion) {
+      assert(convWorkspace1 != nullptr);
+      assert(convWorkspace2 != nullptr);
+      doNHWCIm2ColConv(cb, batchSize, input, output, convWorkspace1, convWorkspace2, nullptr, nullptr, nullptr, -1);
+      return;
+    }
     if ( convXSize == 1 && convYSize == 1 ) {
       doConv1x1AsMatmulFp32(cb, batchSize,  input, output);
     } else if ( (convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5) ) {
@@ -1378,6 +1571,15 @@ struct ConvLayer {
     assert(cb != VK_NULL_HANDLE);
     assert(bnLayer != nullptr);
     assert(mask != nullptr);
+    if(usingNhwcConversion) {
+      assert(convWorkspace1 != nullptr);
+      assert(convWorkspace2 != nullptr);
+      doNHWCIm2ColConv(
+        cb, batchSize, input, output, convWorkspace1, convWorkspace2,
+        bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation
+      );
+      return;
+    }
     doWinogradConvolutionBnActMask(cb, batchSize, input, convWorkspace1, convWorkspace2, output, bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation);
   }
 

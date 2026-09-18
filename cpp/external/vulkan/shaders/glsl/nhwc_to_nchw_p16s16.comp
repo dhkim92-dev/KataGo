@@ -1,0 +1,47 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Read channel-last staging data with aligned vector loads, then scatter the
+// valid channels into the externally visible NCHW tensor. Padded channels are
+// never written to the destination.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+  f16vec4 inputData[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+  float16_t outputData[];
+};
+
+layout(push_constant) uniform NHWCToNCHWParams {
+  int batchSize;
+  int channels;
+  int spatialSize;
+  int spatialStride;
+  int channelsPadded;
+  int logicalSpatialSize;
+};
+
+void main() {
+  const int vectorIndex = int(gl_GlobalInvocationID.x);
+  const int vectorsPerSpatial = channelsPadded / 4;
+  const int totalVectors = batchSize * spatialSize * vectorsPerSpatial;
+  if(vectorIndex >= totalVectors)
+    return;
+
+  const int spatialIndex = vectorIndex / vectorsPerSpatial;
+  const int channelVector = vectorIndex - spatialIndex * vectorsPerSpatial;
+  const int channelBase = channelVector * 4;
+  const int batch = spatialIndex / spatialSize;
+  const int xy = spatialIndex - batch * spatialSize;
+  const int outputBatchBase = batch * channels * spatialStride;
+  const f16vec4 value = inputData[vectorIndex];
+
+  for(int lane = 0; lane < 4; ++lane) {
+    const int channel = channelBase + lane;
+    if(channel < channels && xy < logicalSpatialSize)
+      outputData[outputBatchBase + channel * spatialStride + xy] = value[lane];
+  }
+}
