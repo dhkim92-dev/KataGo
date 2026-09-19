@@ -639,12 +639,14 @@ namespace vk_shader {
       tuneParams.vulkan.shouldUseCooperativeMatrix ||
       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW;
     const bool useTransformerAttentionNHWC = tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
+    const bool useTransformerDualGemmSwiGLUNHWC =
+      tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
        tuneParams.vulkan.shouldUseFP16Compute &&
-       (useGenericNHWC || useTransformerAttentionNHWC)) {
+       (useGenericNHWC || useTransformerAttentionNHWC || useTransformerDualGemmSwiGLUNHWC)) {
       if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
       if(useGenericNHWC) {

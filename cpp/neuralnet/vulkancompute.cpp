@@ -1448,10 +1448,17 @@ void doTransformerDualGemmSwiGLU(
   const VkCommandBuffer cb,
   const VkDescriptorSet descriptorSet,
   const VulkanBuffer* input,
+  VulkanBuffer* nhwcInput,
   const VulkanBuffer* packedFilter,
+  VulkanBuffer* nhwcOutput,
   VulkanBuffer* output,
+  const Pipeline* nchwToNhwcPipeline,
+  const VkDescriptorSet nchwToNhwcDescriptorSet,
+  const Pipeline* nhwcToNchwPipeline,
+  const VkDescriptorSet nhwcToNchwDescriptorSet,
   const int batchSize,
   const int hwSize,
+  const int logicalSpatialSize,
   const int ffnSize,
   const int cSize,
   const int packedOCSize,
@@ -1461,21 +1468,44 @@ void doTransformerDualGemmSwiGLU(
   assert(pipeline != nullptr);
   assert(cb != VK_NULL_HANDLE);
   assert(descriptorSet != VK_NULL_HANDLE);
-  assert(input != nullptr && packedFilter != nullptr && output != nullptr);
+  assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
+  assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && nhwcInput != nullptr && packedFilter != nullptr && nhwcOutput != nullptr && output != nullptr);
   assert(result != nullptr);
 
   const auto& params = tuneParams.transformerDualGemmSwiGLU;
-  if(batchSize <= 0 || hwSize <= 0 || ffnSize <= 0 || cSize <= 0 || packedOCSize < 2 * ffnSize ||
+  if(batchSize <= 0 || hwSize <= 0 || logicalSpatialSize <= 0 || logicalSpatialSize > hwSize ||
+     ffnSize <= 0 || cSize <= 0 || packedOCSize < 2 * ffnSize ||
      !params.isValid() || hwSize % params.getRequiredSpatialAlignment() != 0 ||
      ffnSize % params.NWG != 0 || cSize % params.KWG != 0) {
     *result = VK_ERROR_INITIALIZATION_FAILED;
     return;
   }
 
+  const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, 4);
+  const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, 4);
+  convertNCHWToNHWC(
+    device,
+    nchwToNhwcPipeline,
+    cb,
+    nchwToNhwcDescriptorSet,
+    input,
+    nhwcInput,
+    batchSize,
+    cSize,
+    hwSize,
+    hwSize,
+    logicalSpatialSize,
+    result
+  );
+  CHECK_VK_MSG("Convert Transformer dual-GEMM input to NHWC", *result);
+  if(*result != VK_SUCCESS)
+    return;
+
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, nhwcInput),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, packedFilter),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, nhwcOutput)
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for transformerDualGemmSwiGLU", *result);
@@ -1485,7 +1515,7 @@ void doTransformerDualGemmSwiGLU(
     cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
   );
   const vk_shader::push::TransformerDualGemmSwiGLUPushParams pushParams = {
-    cSize, hwSize, packedOCSize, ffnSize
+    cSize, hwSize, packedOCSize, ffnSize, inputChannelStride, outputChannelStride
   };
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
   SHADER_PROFILE_START("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
@@ -1496,7 +1526,23 @@ void doTransformerDualGemmSwiGLU(
     static_cast<uint32_t>(batchSize)
   );
   SHADER_PROFILE_END("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
-  vk_helper::barrierCommandBufferForBuffer(cb, output);
+  vk_helper::barrierCommandBufferForBuffer(cb, nhwcOutput);
+
+  convertNHWCToNCHW(
+    device,
+    nhwcToNchwPipeline,
+    cb,
+    nhwcToNchwDescriptorSet,
+    nhwcOutput,
+    output,
+    batchSize,
+    ffnSize,
+    hwSize,
+    hwSize,
+    logicalSpatialSize,
+    result
+  );
+  CHECK_VK_MSG("Convert Transformer dual-GEMM output to NCHW", *result);
 }
 
 SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {

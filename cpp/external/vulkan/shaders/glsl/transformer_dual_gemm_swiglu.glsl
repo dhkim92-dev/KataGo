@@ -43,9 +43,9 @@ layout(constant_id = 10) const int NWAVE = 32;
 #define MWI (MWG / MWAVE)
 #define NWI (NWG / NWAVE)
 
-// A is [K, HW], interpreted as [HW, K] column-major. Each K row of the packed
-// filter is [main F, gate F, padding], with packedOCSize as its physical stride.
-// C is [F, HW], interpreted as [HW, F] column-major.
+// A is [HW, K] row-major NHWC staging data. Each K row of the packed filter is
+// [main F, gate F, padding], with packedOCSize as its physical stride. C is
+// [HW, F] row-major NHWC staging data.
 layout(set = 0, binding = 0) readonly buffer Input {
   float16_t d_input[];
 };
@@ -63,6 +63,8 @@ layout(push_constant) uniform TransformerDualGemmSwiGLUParams {
   int hwSize;
   int packedOCSize;
   int ffnSize;
+  int inputChannelStride;
+  int outputChannelStride;
 };
 
 #if SB == 1
@@ -127,11 +129,12 @@ void main() {
 
   const int groupMBase = groupM * MWG;
   const int groupNBase = groupN * NWG;
-  const int batchInputBase = batch * cSize * hwSize;
-  const int batchOutputBase = batch * ffnSize * hwSize;
+  const int batchInputBase = batch * hwSize * inputChannelStride;
+  const int batchOutputBase = batch * hwSize * outputChannelStride;
 
-  // As in NCHW HGEMM, K and the selected K tile dimensions are aligned by the
-  // host eligibility check. Load each A fragment once and feed both GEMMs.
+  // K and the selected K tile dimensions are aligned by the host eligibility
+  // check. The external input and output are NHWC staging tensors, so each
+  // position contains a contiguous, four-element-aligned channel row.
   for(int kBase = 0; kBase < cSize; kBase += KWG) {
 #if SB == 1
     loadBTiles(kBase, groupNBase);
@@ -141,13 +144,13 @@ void main() {
         const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
         const bool aFragmentInBounds = groupMBase + aLocalOffset < hwSize;
         const int aGlobalOffset =
-          batchInputBase + (kBase + kOffset) * hwSize + groupMBase + aLocalOffset;
+          batchInputBase + (groupMBase + aLocalOffset) * inputChannelStride + kBase + kOffset;
         if(aFragmentInBounds) {
           coopMatLoad(
             matA[aWaveId], d_input,
             aGlobalOffset,
-            hwSize,
-            gl_CooperativeMatrixLayoutColumnMajor
+            inputChannelStride,
+            gl_CooperativeMatrixLayoutRowMajor
           );
         }
       }
@@ -239,7 +242,7 @@ void main() {
       const float mainValue = float(mainCTileStorage.values[tileElement]);
       const float gateValue = float(gateCTileStorage.values[tileElement]);
       const float siluMain = mainValue / (1.0f + exp(-mainValue));
-      d_output[batchOutputBase + oc * hwSize + hw] = float16_t(siluMain * gateValue);
+      d_output[batchOutputBase + hw * outputChannelStride + oc] = float16_t(siluMain * gateValue);
     }
   }
 }

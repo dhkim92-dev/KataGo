@@ -1291,6 +1291,8 @@ struct LocalDimHash {
       int hwSize;
       int packedOCSize;
       int ffnSize;
+      int inputChannelStride;
+      int outputChannelStride;
     };
 
     /** Push constants for hgemm_cooperative_matrix. */
@@ -1518,6 +1520,8 @@ struct LocalDimHash {
       bool isValid() const {
         return HGemmCooperativeMatrixNCHWTuneParams::isValid() && VWM == 1 && VWN == 1;
       }
+
+      int getRequiredSpatialAlignment() const;
     };
 
     bool isValidCooperativeMatrixConfig(

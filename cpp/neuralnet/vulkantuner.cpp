@@ -688,6 +688,10 @@ int HGemmCooperativeMatrixNCHWTuneParams::getRequiredSpatialAlignment() const {
   return std::lcm(std::lcm(16, MWARP), VWM);
 }
 
+int TransformerDualGemmSwiGLUTuneParams::getRequiredSpatialAlignment() const {
+  return std::lcm(HGemmCooperativeMatrixNCHWTuneParams::getRequiredSpatialAlignment(), MWG);
+}
+
 bool HGemmCooperativeMatrixNCHWTuneParams::isSimple() const {
   if(MWAVE != MWARP && MWAVE == MWG)
     return false;
@@ -3813,6 +3817,8 @@ namespace {
       const VulkanTuneParams& legacyConfig,
       const TuningContext& context,
       const Pipeline* fusedPipeline,
+      const Pipeline* nchwToNhwcPipeline,
+      const Pipeline* nhwcToNchwPipeline,
       const Pipeline* legacyGemmPipeline,
       const Pipeline* swigluPipeline,
       bool legacyNCHW,
@@ -3831,7 +3837,8 @@ namespace {
       const int batchSize = std::max(1, context.batchSize);
       const int cSize = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
       const int ffnSize = context.modelInfo.transformerFFNChannels;
-      if(fusedPipeline == nullptr || legacyGemmPipeline == nullptr || swigluPipeline == nullptr ||
+      if(fusedPipeline == nullptr || nchwToNhwcPipeline == nullptr || nhwcToNchwPipeline == nullptr ||
+         legacyGemmPipeline == nullptr || swigluPipeline == nullptr ||
          batchSize <= 0 || hwSize <= 0 || cSize <= 0 || ffnSize <= 0 || packedOCSize < 2 * ffnSize) {
         error = "invalid Transformer dual-GEMM measurement dimensions or pipelines";
         return false;
@@ -3842,12 +3849,18 @@ namespace {
       activeResources = &resources;
       const auto activeResourcesGuard = makeScopeGuard([&]() { activeResources = nullptr; });
       vector<VulkanBuffer*>& buffers = resources.tuningBuffers;
-      if(!ensureBuffers(buffers, 7, 4, result, error, "Transformer dual-GEMM buffer"))
+      if(!ensureBuffers(buffers, 9, 4, result, error, "Transformer dual-GEMM buffer"))
         return false;
       const size_t inputElements = static_cast<size_t>(batchSize) * cSize * hwSize;
       const size_t filterElements = static_cast<size_t>(cSize) * packedOCSize;
       const size_t outputElements = static_cast<size_t>(batchSize) * ffnSize * hwSize;
       const size_t legacyGemmElements = static_cast<size_t>(batchSize) * packedOCSize * hwSize;
+      const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, 4);
+      const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, 4);
+      const size_t candidateInputNHWCElements =
+        static_cast<size_t>(batchSize) * hwSize * inputChannelStride;
+      const size_t candidateOutputNHWCElements =
+        static_cast<size_t>(batchSize) * hwSize * outputChannelStride;
       const bool legacyStorageHalf =
         legacyNCHW || (legacyConfig.vulkan.canUseFP16Storage && legacyConfig.vulkan.canUseFP16Compute &&
                        legacyConfig.vulkan.shouldUseFP16Storage);
@@ -3855,15 +3868,18 @@ namespace {
       const VkDeviceSize candidateInputBytes = inputElements * sizeof(half_t);
       const VkDeviceSize candidateFilterBytes = filterElements * sizeof(half_t);
       const VkDeviceSize candidateOutputBytes = outputElements * sizeof(half_t);
+      const VkDeviceSize candidateInputNHWCBytes = candidateInputNHWCElements * sizeof(half_t);
+      const VkDeviceSize candidateOutputNHWCBytes = candidateOutputNHWCElements * sizeof(half_t);
       const VkDeviceSize legacyInputBytes = inputElements * legacyElementBytes;
       const VkDeviceSize legacyFilterBytes = filterElements * legacyElementBytes;
       const VkDeviceSize legacyGemmBytes = legacyGemmElements * legacyElementBytes;
       const VkDeviceSize legacyOutputBytes = outputElements * legacyElementBytes;
       const VkDeviceSize requiredBytes[] = {
-        candidateInputBytes, candidateFilterBytes, candidateOutputBytes,
+        candidateInputBytes, candidateFilterBytes, candidateInputNHWCBytes,
+        candidateOutputNHWCBytes, candidateOutputBytes,
         legacyInputBytes, legacyFilterBytes, legacyGemmBytes, legacyOutputBytes
       };
-      for(size_t i = 0; i < 7; i++)
+      for(size_t i = 0; i < 9; i++)
         if(!ensureBuffer(buffers[i], requiredBytes[i], result, error, "Transformer dual-GEMM buffer"))
           return false;
 
@@ -3920,15 +3936,15 @@ namespace {
           legacyInputHalf[i] = half_float::half_cast<half_t>(inputSource[i]);
         for(size_t i = 0; i < filterElements; i++)
           legacyFilterHalf[i] = half_float::half_cast<half_t>(packedFilter[i]);
-        if(!upload(legacyInputHalf.data(), legacyInputBytes, buffers[3], "legacy packed-GEMM input") ||
-           !upload(legacyFilterHalf.data(), legacyFilterBytes, buffers[4], "legacy packed-GEMM filter"))
+        if(!upload(legacyInputHalf.data(), legacyInputBytes, buffers[5], "legacy packed-GEMM input") ||
+           !upload(legacyFilterHalf.data(), legacyFilterBytes, buffers[6], "legacy packed-GEMM filter"))
           return false;
       }
-      else if(!upload(inputSource.data(), legacyInputBytes, buffers[3], "legacy packed-GEMM input") ||
-              !upload(packedFilter.data(), legacyFilterBytes, buffers[4], "legacy packed-GEMM filter"))
+      else if(!upload(inputSource.data(), legacyInputBytes, buffers[5], "legacy packed-GEMM input") ||
+              !upload(packedFilter.data(), legacyFilterBytes, buffers[6], "legacy packed-GEMM filter"))
         return false;
 
-      if(!ensureDescriptorPool(9, 3, result, error) || !ensureQueryPool(20, result, error) ||
+      if(!ensureDescriptorPool(9, 5, result, error) || !ensureQueryPool(20, result, error) ||
          !ensureCommandResources(result, error))
         return false;
       const auto allocateDescriptorSet = [&](const Pipeline* pipeline, VkDescriptorSet& descriptorSet) {
@@ -3943,9 +3959,13 @@ namespace {
         return result == VK_SUCCESS;
       };
       VkDescriptorSet fusedDescriptorSet = VK_NULL_HANDLE;
+      VkDescriptorSet nchwToNhwcDescriptorSet = VK_NULL_HANDLE;
+      VkDescriptorSet nhwcToNchwDescriptorSet = VK_NULL_HANDLE;
       VkDescriptorSet legacyGemmDescriptorSet = VK_NULL_HANDLE;
       VkDescriptorSet swigluDescriptorSet = VK_NULL_HANDLE;
       if(!allocateDescriptorSet(fusedPipeline, fusedDescriptorSet) ||
+         !allocateDescriptorSet(nchwToNhwcPipeline, nchwToNhwcDescriptorSet) ||
+         !allocateDescriptorSet(nhwcToNchwPipeline, nhwcToNchwDescriptorSet) ||
          !allocateDescriptorSet(legacyGemmPipeline, legacyGemmDescriptorSet) ||
          !allocateDescriptorSet(swigluPipeline, swigluDescriptorSet))
         return false;
@@ -3965,14 +3985,18 @@ namespace {
       const auto recordFused = [&]() {
         vkcompute::doTransformerDualGemmSwiGLU(
           device, candidateConfig, fusedPipeline, commandBuffer, fusedDescriptorSet,
-          buffers[0], buffers[1], buffers[2], batchSize, hwSize, ffnSize, cSize, packedOCSize, &result
+          buffers[0], buffers[2], buffers[1], buffers[3], buffers[4],
+          nchwToNhwcPipeline, nchwToNhwcDescriptorSet,
+          nhwcToNchwPipeline, nhwcToNchwDescriptorSet,
+          batchSize, hwSize, static_cast<int>(logicalHW),
+          ffnSize, cSize, packedOCSize, &result
         );
       };
       const auto recordLegacy = [&]() {
         if(legacyNCHW) {
           vkcompute::doHgemmCooperativeMatrixNCHW(
             device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
-            buffers[3], buffers[4], buffers[5], batchSize, hwSize, packedOCSize, cSize, &result
+            buffers[5], buffers[6], buffers[7], batchSize, hwSize, packedOCSize, cSize, &result
           );
         }
         else {
@@ -3980,14 +4004,14 @@ namespace {
             device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
             hwSize, packedOCSize, cSize,
             cSize * hwSize, 0, packedOCSize * hwSize,
-            buffers[3], buffers[4], buffers[5], batchSize, &result
+            buffers[5], buffers[6], buffers[7], batchSize, &result
           );
         }
         if(result != VK_SUCCESS)
           return;
         vkcompute::doSwiGLU(
           device, commandBuffer, swigluDescriptorSet, *swigluPipeline, legacyConfig,
-          buffers[5], buffers[5], buffers[6], batchSize * ffnSize * hwSize,
+          buffers[7], buffers[7], buffers[8], batchSize * ffnSize * hwSize,
           packedOCSize * hwSize, ffnSize * hwSize
         );
       };
@@ -4076,7 +4100,7 @@ namespace {
 
       vector<half_t> outputHalf(outputElements);
       vk_helper::copyDeviceBufferToHost(
-        device, buffers[2], candidateOutputBytes, outputHalf.data(), true, &result
+        device, buffers[4], candidateOutputBytes, outputHalf.data(), true, &result
       );
       if(result != VK_SUCCESS) {
         error = "could not read Transformer dual-GEMM output: " + vk_helper::vkErrorToString(result);
@@ -6413,6 +6437,15 @@ namespace {
     vk_shader::ComputePipelines candidatePipelines(
       context.device->device, context.device->info, nullptr, false
     );
+    if((result = candidatePipelines.createNchwToNhwc(candidatePipelines.nchwToNhwc)) != VK_SUCCESS ||
+       (result = candidatePipelines.createNhwcToNchw(candidatePipelines.nhwcToNchw)) != VK_SUCCESS) {
+      if(context.logger != nullptr)
+        context.logger->write(
+          "Skipping Vulkan transformerDualGemmSwiGLU tuning: could not create NHWC conversion pipelines, " +
+          vk_helper::vkErrorToString(result)
+        );
+      return false;
+    }
     size_t candidateIndex = 0;
     bool printedReferenceHeartbeat = false;
     for(const TransformerDualGemmSwiGLUTuneParams& params: candidates) {
@@ -6444,6 +6477,8 @@ namespace {
       const bool measured = context.timer != nullptr && context.timer->measureTransformerDualGemmSwiGLU(
         candidateConfig, legacyConfig, context,
         &candidatePipelines.transformerDualGemmSwiGLU,
+        &candidatePipelines.nchwToNhwc,
+        &candidatePipelines.nhwcToNchw,
         legacyGemmPipeline, &legacyPipelines.transformerSwiGLU,
         legacyNCHW, hwSize, packedOCSize,
         fusedCallsPerSecond, legacyCallsPerSecond, errorProp, readback, error
