@@ -1023,6 +1023,7 @@ struct LocalDimHash {
       int ATTN_V_HEAD_DIM = 1;
       int COOP_Q_TILES_PER_WORKGROUP = 1;
       int COOP_PV_N_SIZE = 16;
+      uint32_t USE_NHWC = 0;
     };
 
     struct ScaleDotProductNaiveSpec {
@@ -1334,6 +1335,28 @@ struct LocalDimHash {
       int qBatchStride;
       int kBatchStride;
       int vBatchStride;
+      int useRope;
+      int learnableRope;
+      int ropeNumPairs;
+      int ropeReserved;
+    };
+
+    struct ScaleDotProductCooperativePushParam {
+      int seqLen;
+      int numHeads;
+      int numKVHeads;
+      float scale;
+      int qOffset;
+      int kOffset;
+      int vOffset;
+      int qBatchStride;
+      int kBatchStride;
+      int vBatchStride;
+      int qRowStride;
+      int kRowStride;
+      int vRowStride;
+      int outputBatchStride;
+      int outputRowStride;
       int useRope;
       int learnableRope;
       int ropeNumPairs;
@@ -1840,6 +1863,7 @@ struct LocalDimHash {
     Pipeline transformerApplyRoPENHWC;
     Pipeline transformerScaleDotProduct;
     Pipeline transformerScaleDotProductCooperative;
+    Pipeline transformerScaleDotProductCooperativeNHWC;
     Pipeline transformerScaleDotProductNaive;
     Pipeline transformerSwiGLU;
     Pipeline transformerDualGemmSwiGLU;
@@ -1899,7 +1923,7 @@ struct LocalDimHash {
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
-    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);

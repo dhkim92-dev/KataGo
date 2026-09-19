@@ -26,6 +26,7 @@ layout(constant_id = 6) const int ATTN_HEAD_DIM = 64;
 layout(constant_id = 7) const int ATTN_V_HEAD_DIM = 64;
 layout(constant_id = 8) const int COOP_Q_TILES_PER_WORKGROUP = 1;
 layout(constant_id = 9) const int COOP_PV_N_SIZE = 16;
+layout(constant_id = 10) const int USE_NHWC = 0;
 
 const int HEAD_DIM_PAD = ((ATTN_HEAD_DIM + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
 const int KV_PAD = ((COOP_N_SIZE + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
@@ -74,6 +75,11 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
   int qBatchStride;
   int kBatchStride;
   int vBatchStride;
+  int qRowStride;
+  int kRowStride;
+  int vRowStride;
+  int outputBatchStride;
+  int outputRowStride;
   int useRope;
   int learnableRope;
   int ropeNumPairs;
@@ -146,7 +152,10 @@ void loadQueryTile(int qBlockStart, int batchBase, int head) {
     const int q = i % Q_BLOCK;
     const int qPos = qBlockStart + q;
     if(d < ATTN_HEAD_DIM && qPos < seqLen) {
-      qTile[i] = float16_t(LOAD(Q, batchBase + qOffset + (head * ATTN_HEAD_DIM + d) * seqLen + qPos));
+      if(USE_NHWC == 1)
+        qTile[i] = float16_t(LOAD(Q, batchBase + qPos * qRowStride + qOffset + head * ATTN_HEAD_DIM + d));
+      else
+        qTile[i] = float16_t(LOAD(Q, batchBase + qOffset + (head * ATTN_HEAD_DIM + d) * seqLen + qPos));
     }
     else {
       qTile[i] = float16_t(0.0);
@@ -162,7 +171,10 @@ void loadKeyTile(int kvStart, int batchIndex, int batchBase, int kvHead) {
     const int k = i % COOP_N_SIZE;
     const int globalKPos = kvStart + k;
     if(d < ATTN_HEAD_DIM && globalKPos < seqLen) {
-      kTile[i] = float16_t(LOAD(K, batchBase + kOffset + (kvHead * ATTN_HEAD_DIM + d) * seqLen + globalKPos));
+      if(USE_NHWC == 1)
+        kTile[i] = float16_t(LOAD(K, batchBase + globalKPos * kRowStride + kOffset + kvHead * ATTN_HEAD_DIM + d));
+      else
+        kTile[i] = float16_t(LOAD(K, batchBase + kOffset + (kvHead * ATTN_HEAD_DIM + d) * seqLen + globalKPos));
     }
     else {
       kTile[i] = float16_t(0.0);
@@ -231,8 +243,11 @@ void loadValueTile(int kvStart, int batchBase, int kvHead) {
     const int d = i % V_HEAD_DIM_PAD;
     const int globalKPos = kvStart + k;
     if(k < COOP_N_SIZE && globalKPos < seqLen && d < ATTN_V_HEAD_DIM) {
-      vTile[i] = float16_t(LOAD(V, batchBase + vOffset +
-        (kvHead * ATTN_V_HEAD_DIM + d) * seqLen + globalKPos));
+      if(USE_NHWC == 1)
+        vTile[i] = float16_t(LOAD(V, batchBase + globalKPos * vRowStride + vOffset + kvHead * ATTN_V_HEAD_DIM + d));
+      else
+        vTile[i] = float16_t(LOAD(V, batchBase + vOffset +
+          (kvHead * ATTN_V_HEAD_DIM + d) * seqLen + globalKPos));
     }
     else {
       vTile[i] = float16_t(0.0);
@@ -255,7 +270,7 @@ float getScore(int qBase, int q, int k) {
 #endif
 }
 
-void main() {
+void runScaleDotProductCooperative() {
   const int localIdx = int(gl_LocalInvocationID.x);
   const int subgroupIdx = int(gl_SubgroupID);
   const int subgroupLocalIdx = int(gl_SubgroupInvocationID);
@@ -379,12 +394,33 @@ void main() {
   if(subgroupLocalIdx < COOP_M_SIZE && qPos < seqLen) {
     if(qMask == 0.0) {
       for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
-        STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(0.0));
+        if(USE_NHWC == 1)
+          STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + d, floatToReal(0.0));
+        else
+          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(0.0));
     }
     else {
       const float invSum = runningSum > 0.0 ? 1.0 / runningSum : 0.0;
       for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
-        STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(acc[d] * invSum));
+        if(USE_NHWC == 1)
+          STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + d, floatToReal(acc[d] * invSum));
+        else
+          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(acc[d] * invSum));
     }
   }
+}
+
+void transformerScaleDotProductCooperativeNCHW() {
+  runScaleDotProductCooperative();
+}
+
+void transformerScaleDotProductCooperativeNHWC() {
+  runScaleDotProductCooperative();
+}
+
+void main() {
+  if(USE_NHWC == 1)
+    transformerScaleDotProductCooperativeNHWC();
+  else
+    transformerScaleDotProductCooperativeNCHW();
 }

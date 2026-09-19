@@ -2011,9 +2011,18 @@ namespace {
       const size_t gemmElements = static_cast<size_t>(gemmBatch) * std::max({
         static_cast<size_t>(gemmM) * gemmK, static_cast<size_t>(gemmN) * gemmK, static_cast<size_t>(gemmM) * gemmN
       });
-      const size_t attentionOutputElements = static_cast<size_t>(batchSize) *
+      const bool transformerAttentionNHWC =
+        plan.kernelName == "transformerAttention" &&
+        !pipelines.empty() &&
+        pipelines[0]->name.find("_nhwc") != string::npos;
+      const size_t attentionOutputChannels = static_cast<size_t>(
         std::max(1, context.modelInfo.transformerNumHeads) *
-        std::max(1, context.modelInfo.transformerVHeadDim) * xySize;
+        std::max(1, context.modelInfo.transformerVHeadDim)
+      );
+      const size_t attentionOutputElements = static_cast<size_t>(batchSize) * xySize *
+        (transformerAttentionNHWC
+          ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
+          : attentionOutputChannels);
       const size_t transformElements = std::max({
         static_cast<size_t>(batchSize) * maxChannels * xySize,
         paddedTiles * paddedChannels * 36,
@@ -2273,7 +2282,15 @@ namespace {
                 const size_t vHeadDim = static_cast<size_t>(std::max(1, context.modelInfo.transformerVHeadDim));
                 const size_t channels = binding == 0 ? heads : kvHeads;
                 const size_t dimension = binding == 2 ? vHeadDim : headDim;
-                fillPaddedNCHWInput(data, channels * dimension, rand);
+                if(transformerAttentionNHWC) {
+                  const size_t rowChannels = vk_helper::roundUpToMultiple(channels * dimension, size_t(4));
+                  for(size_t n = 0; n < batchSize; n++)
+                    for(size_t xy = 0; xy < xySize; xy++)
+                      for(size_t c = 0; c < channels * dimension; c++)
+                        data[(n * xySize + xy) * rowChannels + c] = static_cast<float>(rand.nextDouble());
+                }
+                else
+                  fillPaddedNCHWInput(data, channels * dimension, rand);
               }
               else if(transformerRMSNormInput) {
                 const size_t channels = static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels));
@@ -2502,9 +2519,18 @@ namespace {
             return static_cast<size_t>(learnableRope ? tableHead * ropeNumPairs + pairIdx : pairIdx) *
               xySize + position;
           };
+          const int qChannelsPadded = vk_helper::roundUpToMultipleInt(heads * headDim, 4);
+          const int kChannelsPadded = vk_helper::roundUpToMultipleInt(kvHeads * headDim, 4);
+          const int vChannelsPadded = vk_helper::roundUpToMultipleInt(kvHeads * vHeadDim, 4);
+          const int outputChannelsPadded = vk_helper::roundUpToMultipleInt(heads * vHeadDim, 4);
+          vector<float> nhwcOutput;
+          if(transformerAttentionNHWC)
+            nhwcOutput.resize(static_cast<size_t>(cpuBatchSize) * xySize * outputChannelsPadded, 0.0f);
           for(int bh = 0; bh < cpuBatchSize * heads; bh++) {
             const int n = bh / heads;
+            const int head = bh % heads;
             const int kvBase = n * kvHeads + (bh % heads) / (heads / kvHeads);
+            const int kvHead = (bh % heads) / (heads / kvHeads);
             const int qRopeTableHead = (bh % heads) * kvHeads / heads;
             const int kRopeTableHead = kvBase % kvHeads;
             vector<float> output(vHeadDim * cpuXYSize, 0.0f);
@@ -2514,7 +2540,9 @@ namespace {
               }
               vector<float> rotatedQuery(headDim);
               for(int d = 0; d < headDim; d++)
-                rotatedQuery[d] = query[(bh * headDim + d) * cpuXYSize + qPos];
+                rotatedQuery[d] = transformerAttentionNHWC
+                  ? query[(static_cast<size_t>(n) * xySize + qPos) * qChannelsPadded + head * headDim + d]
+                  : query[(bh * headDim + d) * cpuXYSize + qPos];
               if(useRope) {
                 for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
                   const size_t tableIndex = ropeTableIndex(qRopeTableHead, pairIdx, qPos);
@@ -2534,7 +2562,9 @@ namespace {
                   continue;
                 vector<float> rotatedKey(headDim);
                 for(int d = 0; d < headDim; d++)
-                  rotatedKey[d] = key[(kvBase * headDim + d) * cpuXYSize + kPos];
+                  rotatedKey[d] = transformerAttentionNHWC
+                    ? key[(static_cast<size_t>(n) * xySize + kPos) * kChannelsPadded + kvHead * headDim + d]
+                    : key[(kvBase * headDim + d) * cpuXYSize + kPos];
                 if(useRope) {
                   for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
                     const size_t tableIndex = ropeTableIndex(kRopeTableHead, pairIdx, kPos);
@@ -2554,15 +2584,26 @@ namespace {
                 const float oldWeight = expf(runningMax - nextMax);
                 const float weight = expf(dot - nextMax);
                 for(int d = 0; d < vHeadDim; d++)
-                  accum[d] = accum[d] * oldWeight + weight * value[(kvBase * vHeadDim + d) * cpuXYSize + kPos];
+                  accum[d] = accum[d] * oldWeight + weight * (
+                    transformerAttentionNHWC
+                      ? value[(static_cast<size_t>(n) * xySize + kPos) * vChannelsPadded + kvHead * vHeadDim + d]
+                      : value[(kvBase * vHeadDim + d) * cpuXYSize + kPos]
+                  );
                 runningSum = runningSum * oldWeight + weight;
                 runningMax = nextMax;
               }
               for(int d = 0; d < vHeadDim; d++)
-                output[d * cpuXYSize + qPos] = runningSum > 0.0f ? accum[d] / runningSum : 0.0f;
+                if(transformerAttentionNHWC)
+                  nhwcOutput[(static_cast<size_t>(n) * xySize + qPos) * outputChannelsPadded + head * vHeadDim + d] =
+                    runningSum > 0.0f ? accum[d] / runningSum : 0.0f;
+                else
+                  output[d * cpuXYSize + qPos] = runningSum > 0.0f ? accum[d] / runningSum : 0.0f;
             }
-            cpuReference->insert(cpuReference->end(), output.begin(), output.end());
+            if(!transformerAttentionNHWC)
+              cpuReference->insert(cpuReference->end(), output.begin(), output.end());
           }
+          if(transformerAttentionNHWC)
+            cpuReference->insert(cpuReference->end(), nhwcOutput.begin(), nhwcOutput.end());
           return true;
         }
         if(name.find("transformer_rms_norm") == 0) {
@@ -2878,6 +2919,47 @@ namespace {
           const int qBatchStride = heads * std::max(1, context.modelInfo.transformerHeadDim) * pipelineXYSize;
           const int kBatchStride = kvHeads * std::max(1, context.modelInfo.transformerHeadDim) * pipelineXYSize;
           const int vBatchStride = kvHeads * std::max(1, context.modelInfo.transformerVHeadDim) * pipelineXYSize;
+          if(transformerAttentionNHWC) {
+            const int qChannels = heads * std::max(1, context.modelInfo.transformerHeadDim);
+            const int kChannels = kvHeads * std::max(1, context.modelInfo.transformerHeadDim);
+            const int vChannels = kvHeads * std::max(1, context.modelInfo.transformerVHeadDim);
+            const int qRowStride = vk_helper::roundUpToMultipleInt(qChannels, 4);
+            const int kRowStride = vk_helper::roundUpToMultipleInt(kChannels, 4);
+            const int vRowStride = vk_helper::roundUpToMultipleInt(vChannels, 4);
+            vk_shader::push::ScaleDotProductCooperativePushParam params = {
+              pipelineXYSize,
+              heads,
+              kvHeads,
+              1.0f / sqrtf((float)std::max(1, context.modelInfo.transformerHeadDim)),
+              0,
+              0,
+              0,
+              qRowStride * pipelineXYSize,
+              kRowStride * pipelineXYSize,
+              vRowStride * pipelineXYSize,
+              qRowStride,
+              kRowStride,
+              vRowStride,
+              static_cast<int>(vk_helper::roundUpToMultiple(
+                static_cast<size_t>(heads * std::max(1, context.modelInfo.transformerVHeadDim)), size_t(4)
+              ) * pipelineXYSize),
+              vk_helper::roundUpToMultipleInt(
+                heads * std::max(1, context.modelInfo.transformerVHeadDim), 4
+              ),
+              context.modelInfo.transformerUseRope ? 1 : 0,
+              context.modelInfo.transformerLearnableRope ? 1 : 0,
+              std::max(1, context.modelInfo.transformerHeadDim) / 2,
+              0
+            };
+            push(params);
+            dispatch(
+              (pipelineXYSize + config.transformer.ATTN_BLOCK_Q - 1) /
+                config.transformer.ATTN_BLOCK_Q,
+              static_cast<uint32_t>((batchSize * heads + pipeline->localSizeY - 1) / pipeline->localSizeY),
+              static_cast<uint32_t>((1 + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
+            );
+          }
+          else {
           vk_shader::push::ScaleDotProductPushParam params = {
             pipelineXYSize,
             heads,
@@ -2898,8 +2980,9 @@ namespace {
           if(config.transformer.USE_TILED_ATTN && pipeline->name.find("naive") == string::npos)
             dispatch((pipelineXYSize + config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD - 1) /
                        (config.transformer.ATTN_BLOCK_Q * config.transformer.Q_PER_THREAD), static_cast<uint32_t>(batchSize * heads));
-          else
+            else
             dispatch((pipelineXYSize + pipeline->localSizeX - 1) / pipeline->localSizeX, static_cast<uint32_t>(batchSize * heads));
+          }
         }
         else if(pipeline->name.find("transformer_rms_norm") == 0) {
           vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,pipelineXYSize,1e-6f,channels};
@@ -5878,14 +5961,15 @@ namespace {
       VkResult result;
       if(config.transformer.USE_COOPERATIVE_ATTN) {
         result = pipelines.createTransformerScaleDotProductCooperative(
-          pipelines.transformerScaleDotProductCooperative,
+          pipelines.transformerScaleDotProductCooperativeNHWC,
           config.transformer,
           context.modelInfo.transformerHeadDim,
           context.modelInfo.transformerVHeadDim,
-          config.vulkan
+          config.vulkan,
+          true
         );
         if(result == VK_SUCCESS)
-          targets.push_back(&pipelines.transformerScaleDotProductCooperative);
+          targets.push_back(&pipelines.transformerScaleDotProductCooperativeNHWC);
       }
       else if(config.transformer.USE_TILED_ATTN) {
         result = pipelines.createTransformerScaleDotProduct(pipelines.transformerScaleDotProduct, config.transformer, context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim, config.vulkan);

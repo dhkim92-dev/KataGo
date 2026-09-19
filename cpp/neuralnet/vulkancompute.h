@@ -103,6 +103,42 @@ namespace vkcompute {
     VkResult* result
   );
 
+  void transformerScaleDotProductCooperative(
+    const VulkanDevice* device,
+    const Pipeline* attentionPipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet attentionDescriptorSet,
+    const Pipeline* nchwToNhwcPipeline,
+    VkDescriptorSet nchwToNhwcDescriptorSet,
+    const Pipeline* nhwcToNchwPipeline,
+    VkDescriptorSet nhwcToNchwDescriptorSet,
+    const VulkanBuffer* packedQKV,
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcQKV,
+    VulkanBuffer* nhwcOutput,
+    VulkanBuffer* mask,
+    VulkanBuffer* ropeCosTable,
+    VulkanBuffer* ropeSinTable,
+    int batchSize,
+    int numHeads,
+    int numKVHeads,
+    int qHeadDim,
+    int vHeadDim,
+    int seqLen,
+    int logicalSpatialSize,
+    int spatialStride,
+    int qkvChannels,
+    int outputChannels,
+    int qTotalDim,
+    int kTotalDim,
+    float scale,
+    bool useRope,
+    bool learnableRope,
+    int ropeNumPairs,
+    const vk_shader::tune::TransformerTuneParams& tuneParams,
+    VkResult* result
+  );
+
   void extractChannel0(
     const VulkanDevice* device,
     const Pipeline* extractPipeline,

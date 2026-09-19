@@ -635,22 +635,27 @@ namespace vk_shader {
        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
       if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
     }
+    const bool useGenericNHWC =
+      tuneParams.vulkan.shouldUseCooperativeMatrix ||
+      tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW;
+    const bool useTransformerAttentionNHWC = tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
        tuneParams.vulkan.shouldUseFP16Compute &&
-       (tuneParams.vulkan.shouldUseCooperativeMatrix ||
-        tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW)) {
+       (useGenericNHWC || useTransformerAttentionNHWC)) {
       if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
-      if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
-      if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
-      if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
-        if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
-      }
-      if(tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
-        if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrix1x1NHWC, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
+      if(useGenericNHWC) {
+        if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
+        if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
+        if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
+          if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
+        }
+        if(tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
+          if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrix1x1NHWC, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
+        }
       }
     }
     if(tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU) {
@@ -751,7 +756,7 @@ namespace vk_shader {
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
       if(tuneParams.transformer.USE_COOPERATIVE_ATTN) {
-        if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+        if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperativeNHWC, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
       }
       if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }
@@ -816,6 +821,7 @@ namespace vk_shader {
     destroyPipeline(transformerApplyRoPENHWC);
     destroyPipeline(transformerScaleDotProduct);
     destroyPipeline(transformerScaleDotProductCooperative);
+    destroyPipeline(transformerScaleDotProductCooperativeNHWC);
     destroyPipeline(transformerScaleDotProductNaive);
     destroyPipeline(transformerSwiGLU);
     destroyPipeline(transformerDualGemmSwiGLU);
@@ -1702,7 +1708,8 @@ namespace vk_shader {
     const TransformerTuneParams& tuneParams,
     int qHeadDim,
     int vHeadDim,
-    const VulkanParams& vulkanParams
+    const VulkanParams& vulkanParams,
+    bool useNHWC
   ) {
     if(!tuneParams.USE_COOPERATIVE_ATTN ||
        !vulkanParams.canUseCooperativeMatrix ||
@@ -1723,21 +1730,23 @@ namespace vk_shader {
     spec.ATTN_V_HEAD_DIM = vHeadDim;
     spec.COOP_Q_TILES_PER_WORKGROUP = tuneParams.COOP_Q_TILES_PER_WORKGROUP;
     spec.COOP_PV_N_SIZE = tuneParams.COOP_PV_N_SIZE;
+    spec.USE_NHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
+    const std::string suffix = useNHWC ? "_nhwc" : "";
 
     if(tuneParams.COOP_ACC_TYPE == 16) {
       return createPipeline(
-        "transformer_scale_dot_product_cooperative_p16s16",
+        "transformer_scale_dot_product_cooperative_p16s16" + suffix,
         shaderModule_transformer_scale_dot_product_cooperative_p16s16,
-        7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info,
+        7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
         VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
       );
     }
     return createPipeline(
-      "transformer_scale_dot_product_cooperative_p32s16",
+      "transformer_scale_dot_product_cooperative_p32s16" + suffix,
       shaderModule_transformer_scale_dot_product_cooperative_p32s16,
-      7, sizeof(ScaleDotProductPushParam), pipeline, &specData.info,
+      7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
       spec.localSizeX, spec.localSizeY, spec.localSizeZ,
       VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
     );

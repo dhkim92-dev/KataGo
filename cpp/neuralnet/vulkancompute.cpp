@@ -360,6 +360,164 @@ void transformerRMSNorm(
   }
 }
 
+void transformerScaleDotProductCooperative(
+  const VulkanDevice* device,
+  const Pipeline* attentionPipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet attentionDescriptorSet,
+  const Pipeline* nchwToNhwcPipeline,
+  VkDescriptorSet nchwToNhwcDescriptorSet,
+  const Pipeline* nhwcToNchwPipeline,
+  VkDescriptorSet nhwcToNchwDescriptorSet,
+  const VulkanBuffer* packedQKV,
+  VulkanBuffer* output,
+  VulkanBuffer* nhwcQKV,
+  VulkanBuffer* nhwcOutput,
+  VulkanBuffer* mask,
+  VulkanBuffer* ropeCosTable,
+  VulkanBuffer* ropeSinTable,
+  int batchSize,
+  int numHeads,
+  int numKVHeads,
+  int qHeadDim,
+  int vHeadDim,
+  int seqLen,
+  int logicalSpatialSize,
+  int spatialStride,
+  int qkvChannels,
+  int outputChannels,
+  int qTotalDim,
+  int kTotalDim,
+  float scale,
+  bool useRope,
+  bool learnableRope,
+  int ropeNumPairs,
+  const vk_shader::tune::TransformerTuneParams& tuneParams,
+  VkResult* result
+) {
+  assert(device != nullptr && attentionPipeline != nullptr && cb != VK_NULL_HANDLE);
+  assert(attentionDescriptorSet != VK_NULL_HANDLE);
+  assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
+  assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
+  assert(packedQKV != nullptr && output != nullptr && nhwcQKV != nullptr && nhwcOutput != nullptr);
+  assert(mask != nullptr && ropeCosTable != nullptr && ropeSinTable != nullptr && result != nullptr);
+
+  if(batchSize <= 0 || numHeads <= 0 || numKVHeads <= 0 || qHeadDim <= 0 || vHeadDim <= 0 ||
+     seqLen <= 0 || logicalSpatialSize <= 0 || logicalSpatialSize > seqLen || spatialStride < seqLen ||
+     qkvChannels <= 0 || outputChannels <= 0 || qTotalDim <= 0 || kTotalDim <= 0 ||
+     qTotalDim + kTotalDim + numKVHeads * vHeadDim > qkvChannels ||
+     numHeads * vHeadDim > outputChannels || tuneParams.ATTN_BLOCK_Q <= 0) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  const int qkvChannelsPadded = vk_helper::roundUpToMultipleInt(qkvChannels, 4);
+  const int outputChannelsPadded = vk_helper::roundUpToMultipleInt(outputChannels, 4);
+  const int qkvBatchStride = seqLen * qkvChannelsPadded;
+  const int outputBatchStride = seqLen * outputChannelsPadded;
+
+  convertNCHWToNHWC(
+    device,
+    nchwToNhwcPipeline,
+    cb,
+    nchwToNhwcDescriptorSet,
+    packedQKV,
+    nhwcQKV,
+    batchSize,
+    qkvChannels,
+    seqLen,
+    spatialStride,
+    logicalSpatialSize,
+    result
+  );
+  CHECK_VK_MSG("Convert cooperative attention QKV input to NHWC", *result);
+  if(*result != VK_SUCCESS)
+    return;
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 0, nhwcQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 1, nhwcQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 2, nhwcQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 3, nhwcOutput),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 4, mask),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 5, ropeCosTable),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 6, ropeSinTable)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update cooperative attention NHWC descriptors", *result);
+  if(*result != VK_SUCCESS)
+    return;
+
+  vk_shader::push::ScaleDotProductCooperativePushParam params = {};
+  params.seqLen = seqLen;
+  params.numHeads = numHeads;
+  params.numKVHeads = numKVHeads;
+  params.scale = scale;
+  params.qOffset = 0;
+  params.kOffset = qTotalDim;
+  params.vOffset = qTotalDim + kTotalDim;
+  params.qBatchStride = qkvBatchStride;
+  params.kBatchStride = qkvBatchStride;
+  params.vBatchStride = qkvBatchStride;
+  params.qRowStride = qkvChannelsPadded;
+  params.kRowStride = qkvChannelsPadded;
+  params.vRowStride = qkvChannelsPadded;
+  params.outputBatchStride = outputBatchStride;
+  params.outputRowStride = outputChannelsPadded;
+  params.useRope = useRope ? 1 : 0;
+  params.learnableRope = learnableRope ? 1 : 0;
+  params.ropeNumPairs = ropeNumPairs;
+  params.ropeReserved = 0;
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, attentionPipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb,
+    VK_PIPELINE_BIND_POINT_COMPUTE,
+    attentionPipeline->layout,
+    0,
+    1,
+    &attentionDescriptorSet,
+    0,
+    nullptr
+  );
+  vkCmdPushConstants(
+    cb,
+    attentionPipeline->layout,
+    VK_SHADER_STAGE_COMPUTE_BIT,
+    0,
+    sizeof(params),
+    &params
+  );
+
+  const uint32_t qGroups = static_cast<uint32_t>(
+    (seqLen + tuneParams.ATTN_BLOCK_Q - 1) / tuneParams.ATTN_BLOCK_Q
+  );
+  const uint32_t bhGroups = static_cast<uint32_t>(
+    (batchSize * numHeads + attentionPipeline->localSizeY - 1) / attentionPipeline->localSizeY
+  );
+  const uint32_t zGroups = (1u + attentionPipeline->localSizeZ - 1u) / attentionPipeline->localSizeZ;
+  SHADER_PROFILE_START("scaleDotProductAttention_NHWC", cb);
+  vkCmdDispatch(cb, qGroups, bhGroups, zGroups);
+  SHADER_PROFILE_END("scaleDotProductAttention_NHWC", cb);
+  vk_helper::barrierCommandBufferForBuffer(cb, nhwcOutput);
+
+  convertNHWCToNCHW(
+    device,
+    nhwcToNchwPipeline,
+    cb,
+    nhwcToNchwDescriptorSet,
+    nhwcOutput,
+    output,
+    batchSize,
+    outputChannels,
+    seqLen,
+    spatialStride,
+    logicalSpatialSize,
+    result
+  );
+  CHECK_VK_MSG("Convert cooperative attention output to NCHW", *result);
+}
+
 void extractChannel0(
   const VulkanDevice* device,
   const Pipeline* extractPipeline,

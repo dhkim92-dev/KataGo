@@ -2757,9 +2757,15 @@ struct TransformerAttentionLayer {
   ComputeHandleInternal* handle;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
   VkDescriptorSet scalarDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nchwToNhwcDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcToNchwDescriptorSet = VK_NULL_HANDLE;
   Pipeline pipeline;
   Pipeline scalarPipeline;
   ScaleDotProductPushParam params;
+  const int numHeads;
+  const int numKVHeads;
+  const int qHeadDim;
+  const int vHeadDim;
   const bool useTiled;
   const bool useCooperative;
 
@@ -2767,8 +2773,12 @@ struct TransformerAttentionLayer {
     ComputeHandleInternal* handle,
     const int numHeads,
     const int numKVHeads
-  ): 
+  ):
     handle(handle),
+    numHeads(numHeads),
+    numKVHeads(numKVHeads),
+    qHeadDim(handle->qHeadDim),
+    vHeadDim(handle->vHeadDim),
     useTiled(handle->tuneParams.transformer.USE_TILED_ATTN != 0),
     useCooperative(handle->tuneParams.transformer.USE_COOPERATIVE_ATTN != 0)
   {
@@ -2779,7 +2789,7 @@ struct TransformerAttentionLayer {
     params.numKVHeads = numKVHeads;
     params.scale = 1.0f / sqrtf(static_cast<float>(handle->qHeadDim));
     if(useCooperative) {
-      pipeline = pipelines->transformerScaleDotProductCooperative;
+      pipeline = pipelines->transformerScaleDotProductCooperativeNHWC;
       scalarPipeline = pipelines->transformerScaleDotProduct;
     } else if(useTiled) {
       pipeline = pipelines->transformerScaleDotProduct;
@@ -2794,6 +2804,14 @@ struct TransformerAttentionLayer {
         handle->vulkanDevice, scalarPipeline.descriptorSetLayout, &res
       );
       CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create scalar fallback descriptor set", res);
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create NCHW-to-NHWC descriptor set", res);
+      nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, pipelines->nhwcToNchw.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create NHWC-to-NCHW descriptor set", res);
     }
   }
 
@@ -2804,6 +2822,8 @@ struct TransformerAttentionLayer {
     int batchSize,
     VulkanBuffer* packedQKV,
     VulkanBuffer* output,
+    VulkanBuffer* nhwcQKV,
+    VulkanBuffer* nhwcOutput,
     VulkanBuffer* mask,
     VulkanBuffer* ropeCosTable,
     VulkanBuffer* ropeSinTable,
@@ -2815,6 +2835,49 @@ struct TransformerAttentionLayer {
     const bool learnableRope,
     const int ropeNumPairs
   ) {
+    if(useCooperative) {
+      VkResult res = VK_SUCCESS;
+      const int seqLen = handle->paddedNNXYLen;
+      const int qkvChannels = batchStride / seqLen;
+      vkcompute::transformerScaleDotProductCooperative(
+        handle->vulkanDevice,
+        &pipeline,
+        cb,
+        descriptorSet,
+        &handle->pipelines->nchwToNhwc,
+        nchwToNhwcDescriptorSet,
+        &handle->pipelines->nhwcToNchw,
+        nhwcToNchwDescriptorSet,
+        packedQKV,
+        output,
+        nhwcQKV,
+        nhwcOutput,
+        mask,
+        ropeCosTable,
+        ropeSinTable,
+        batchSize,
+        numHeads,
+        numKVHeads,
+        qHeadDim,
+        vHeadDim,
+        seqLen,
+        handle->nnXLen * handle->nnYLen,
+        seqLen,
+        qkvChannels,
+        numHeads * vHeadDim,
+        numHeads * qHeadDim,
+        numKVHeads * qHeadDim,
+        params.scale,
+        useRope,
+        learnableRope,
+        ropeNumPairs,
+        handle->tuneParams.transformer,
+        &res
+      );
+      CHECK_VK_MSG("Execute cooperative Transformer attention in NHWC", res);
+      return;
+    }
+
     // The cooperative shader applies RoPE while loading Q/K. Its FP16
     // rounding is accepted only when the tuner has measured it within the
     // attention error tolerance.
@@ -2882,6 +2945,8 @@ struct TransformerAttentionLayer {
     int batchSize,
     VulkanBuffer* packedQKV,
     VulkanBuffer* output,
+    VulkanBuffer* nhwcQKV,
+    VulkanBuffer* nhwcOutput,
     VulkanBuffer* mask,
     VulkanBuffer* ropeCosTable,
     VulkanBuffer* ropeSinTable,
@@ -2901,6 +2966,8 @@ struct TransformerAttentionLayer {
       batchSize,
       packedQKV,
       output,
+      nhwcQKV,
+      nhwcOutput,
       mask,
       ropeCosTable,
       ropeSinTable,
@@ -3625,11 +3692,25 @@ struct TransformerAttentionBlock {
     // Step 3: Scaled dot product attention. RoPE has already been applied to
     // the packed Q and K regions, so the attention shader must not rotate them again.
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+    std::unique_ptr<SizedBuf<VulkanBuffer*>> nhwcQKV;
+    std::unique_ptr<SizedBuf<VulkanBuffer*>> nhwcAttnOut;
+    if(attention->useCooperative) {
+      nhwcQKV = std::make_unique<SizedBuf<VulkanBuffer*>>(
+        scratch->allocator,
+        scratch->getBufSizeXY(vk_helper::roundUpToMultipleInt(qkvPhysicalOutChannels, 4))
+      );
+      nhwcAttnOut = std::make_unique<SizedBuf<VulkanBuffer*>>(
+        scratch->allocator,
+        scratch->getBufSizeXY(vk_helper::roundUpToMultipleInt(numHeads * vHeadDim, 4))
+      );
+    }
     attention->forward(
       cb,
       batchSize,
       packedQKV.buf,
       attnOut.buf,
+      nhwcQKV != nullptr ? nhwcQKV->buf : nullptr,
+      nhwcAttnOut != nullptr ? nhwcAttnOut->buf : nullptr,
       mask,
       ropeCosTable,
       ropeSinTable,
@@ -3721,10 +3802,24 @@ struct TransformerAttentionBlock {
     }
 
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+    std::unique_ptr<SizedBuf<VulkanBuffer*>> nhwcQKV;
+    std::unique_ptr<SizedBuf<VulkanBuffer*>> nhwcAttnOut;
+    if(attention->useCooperative) {
+      nhwcQKV = std::make_unique<SizedBuf<VulkanBuffer*>>(
+        scratch->allocator,
+        scratch->getBufSizeXY(vk_helper::roundUpToMultipleInt(qkvPhysicalOutChannels, 4))
+      );
+      nhwcAttnOut = std::make_unique<SizedBuf<VulkanBuffer*>>(
+        scratch->allocator,
+        scratch->getBufSizeXY(vk_helper::roundUpToMultipleInt(numHeads * vHeadDim, 4))
+      );
+    }
     attention->debug(
       batchSize,
       packedQKV.buf,
       attnOut.buf,
+      nhwcQKV != nullptr ? nhwcQKV->buf : nullptr,
+      nhwcAttnOut != nullptr ? nhwcAttnOut->buf : nullptr,
       mask,
       ropeCosTable,
       ropeSinTable,
