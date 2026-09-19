@@ -636,8 +636,7 @@ namespace vk_shader {
       if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
     }
     const bool useGenericNHWC =
-      tuneParams.vulkan.shouldUseCooperativeMatrix ||
-      tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW;
+      tuneParams.vulkan.shouldUseCooperativeMatrix;
     const bool useTransformerAttentionNHWC = tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
     const bool useTransformerDualGemmSwiGLUNHWC =
       tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
@@ -654,9 +653,6 @@ namespace vk_shader {
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
         if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
           if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
-        }
-        if(tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
-          if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrix1x1NHWC, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
         }
       }
     }
@@ -706,8 +702,7 @@ namespace vk_shader {
       tuneParams.vulkan.canUseFP16Compute &&
       tuneParams.vulkan.shouldUseFP16Storage &&
       tuneParams.vulkan.shouldUseFP16Compute &&
-      (tuneParams.vulkan.shouldUseCooperativeMatrix ||
-       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
+       tuneParams.vulkan.shouldUseCooperativeMatrix;
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
@@ -740,7 +735,7 @@ namespace vk_shader {
     if((result = createExtractChannel0Fp32(
       extractChannel0Fp32,
       tuneParams.vulkan,
-      true
+      useNHWC
     )) != VK_SUCCESS) return result;
     if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if(useNHWC) {
@@ -751,9 +746,9 @@ namespace vk_shader {
       if((result = createTransformerApplyRoPE(transformerApplyRoPENHWC, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
     }
     if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createTransformerSpatialRMSNormApply(transformerSpatialRMSNormApply, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSpatialRMSNormApply(transformerSpatialRMSNormApply, tuneParams.spatialRMSNorm, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createTransformerSpatialRMSNormReduce(transformerSpatialRMSNormReduce, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSq, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSq, tuneParams.spatialRMSNorm, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -1783,9 +1778,10 @@ namespace vk_shader {
     return createPipeline("transformer_swiglu_fp32", shaderModule_transformer_swiglu_fp32, 3, sizeof(TransformerSwiGLUPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createTransformerSpatialRMSNormApply(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createTransformerSpatialRMSNormApply(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = TransformerSpatialRMSNormApplySpec();
     spec.APPLY_ELTS_PER_THREAD = tuneParams.APPLY_ELTS_PER_THREAD;
+    spec.useNHWC = useNHWC ? 1 : 0;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
@@ -1808,9 +1804,10 @@ namespace vk_shader {
     return createPipeline("transformer_spatial_rms_norm_reduce_fp32", shaderModule_transformer_spatial_rms_norm_reduce_fp32, 2, sizeof(TransformerSpatialRMSNormReducePushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = TransformerSpatialRMSNormSumSqSpec();
     spec.TILE_SIZE = tuneParams.TILE_SIZE;
+    spec.useNHWC = useNHWC ? 1 : 0;
     spec.localSizeX = spec.TILE_SIZE;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {

@@ -144,8 +144,6 @@ namespace vkcompute {
     const Pipeline* extractPipeline,
     VkCommandBuffer& commandBuffer,
     VkDescriptorSet& extractDescriptorSet,
-    const Pipeline* nchwToNhwcPipeline,
-    VkDescriptorSet& nchwToNhwcDescriptorSet,
     const VulkanBuffer* input,
     VulkanBuffer* output,
     VulkanBuffer* nhwcScratch,

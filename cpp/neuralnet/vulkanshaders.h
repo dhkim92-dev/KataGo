@@ -1046,6 +1046,7 @@ struct LocalDimHash {
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
       int APPLY_ELTS_PER_THREAD = 1;
+      int useNHWC = 0;
     };
 
     struct TransformerSpatialRMSNormReduceSpec {
@@ -1060,6 +1061,7 @@ struct LocalDimHash {
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
       int TILE_SIZE = 32;
+      int useNHWC = 0;
     };
   };
 
@@ -1376,6 +1378,7 @@ struct LocalDimHash {
       int cSize;
       int xySize;
       float eps;
+      int channelsPadded;
     };
 
     struct TransformerSpatialRMSNormReducePushParams {
@@ -1389,6 +1392,7 @@ struct LocalDimHash {
       int cSize;
       int xySize;
       int tilesPerGroup;
+      int channelsPadded;
     };
   };
 
@@ -1930,9 +1934,9 @@ struct LocalDimHash {
     VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
-    VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerSpatialRMSNormReduce(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
-    VkResult createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     void destroyPipeline(Pipeline& pipeline);
     VkResult createPipeline(
       std::string pipelineName,

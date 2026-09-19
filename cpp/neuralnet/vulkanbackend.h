@@ -76,7 +76,6 @@ struct ComputeHandleInternal {
   bool usingFP16Storage = false;
   bool usingFP16Compute = false;
   bool usingFP16TensorCores = false;
-  bool usingFP16TensorCoresFor1x1 = false;
 
 #ifdef SHADER_PROFILE
   uint64_t runCount = 0;
@@ -243,7 +242,10 @@ struct ScratchBuffers {
   }
 
   size_t getBufSizeXY(int channels) const {
-    return static_cast<size_t>(channels) * batchXYBytes;
+    const int storageChannels = handle->pipelines->useNHWC
+      ? vk_helper::roundUpToMultipleInt(channels, 4)
+      : channels;
+    return static_cast<size_t>(storageChannels) * batchXYBytes;
   }
 
   size_t getBufSizeXYFloat(int channels) const {

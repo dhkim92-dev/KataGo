@@ -156,29 +156,11 @@ void transformerApplyRoPE(
   }
 
   VulkanBuffer* shaderInput = input;
-  if(useNHWC) {
-    assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
-    assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
-    assert(nhwcScratch != nullptr);
-    convertNCHWToNHWC(
-      device,
-      nchwToNhwcPipeline,
-      cb,
-      nchwToNhwcDescriptorSet,
-      input,
-      nhwcScratch,
-      batchSize,
-      channels,
-      seqLen,
-      spatialStride,
-      logicalSpatialSize,
-      result
-    );
-    CHECK_VK_MSG("Convert TransformerApplyRoPE input to NHWC", *result);
-    if(*result != VK_SUCCESS)
-      return;
-    shaderInput = nhwcScratch;
-  }
+  (void)nchwToNhwcPipeline;
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcToNchwPipeline;
+  (void)nhwcToNchwDescriptorSet;
+  (void)nhwcScratch;
 
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(ropeDescriptorSet, 0, shaderInput),
@@ -237,23 +219,6 @@ void transformerApplyRoPE(
   SHADER_PROFILE_END(useNHWC ? "TransformerApplyRoPE_NHWC" : "TransformerApplyRoPE", cb);
   vk_helper::barrierCommandBufferForBuffer(cb, shaderInput);
 
-  if(useNHWC) {
-    convertNHWCToNCHW(
-      device,
-      nhwcToNchwPipeline,
-      cb,
-      nhwcToNchwDescriptorSet,
-      nhwcScratch,
-      input,
-      batchSize,
-      channels,
-      seqLen,
-      spatialStride,
-      logicalSpatialSize,
-      result
-    );
-    CHECK_VK_MSG("Convert TransformerApplyRoPE output to NCHW", *result);
-  }
 }
 
 void transformerRMSNorm(
@@ -291,22 +256,15 @@ void transformerRMSNorm(
   assert(weight != nullptr && beta != nullptr && mask != nullptr);
   assert(result != nullptr);
 
-  if(useNHWC) {
-    assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
-    assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
-    assert(nhwcInput != nullptr && nhwcOutput != nullptr);
-    convertNCHWToNHWC(
-      device, nchwToNhwcPipeline, cb, nchwToNhwcDescriptorSet,
-      input, nhwcInput, batchSize, channels, spatialSize, spatialStride,
-      logicalSpatialSize, result
-    );
-    CHECK_VK_MSG("Convert TransformerRMSNorm input to NHWC", *result);
-    if(*result != VK_SUCCESS)
-      return;
-  }
+  (void)nchwToNhwcPipeline;
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcToNchwPipeline;
+  (void)nhwcToNchwDescriptorSet;
+  (void)nhwcInput;
+  (void)nhwcOutput;
 
-  VulkanBuffer* shaderInput = useNHWC ? nhwcInput : input;
-  VulkanBuffer* shaderOutput = useNHWC ? nhwcOutput : output;
+  VulkanBuffer* shaderInput = input;
+  VulkanBuffer* shaderOutput = output;
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 0, shaderInput),
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 1, shaderOutput),
@@ -350,14 +308,6 @@ void transformerRMSNorm(
   SHADER_PROFILE_END(useNHWC ? "TransformerRMSNorm_NHWC" : "TransformerRMSNorm", cb);
   vk_helper::barrierCommandBufferForBuffer(cb, shaderOutput);
 
-  if(useNHWC) {
-    convertNHWCToNCHW(
-      device, nhwcToNchwPipeline, cb, nhwcToNchwDescriptorSet,
-      nhwcOutput, output, batchSize, channels, spatialSize, spatialStride,
-      logicalSpatialSize, result
-    );
-    CHECK_VK_MSG("Convert TransformerRMSNorm output to NCHW", *result);
-  }
 }
 
 void transformerScaleDotProductCooperative(
@@ -397,9 +347,7 @@ void transformerScaleDotProductCooperative(
 ) {
   assert(device != nullptr && attentionPipeline != nullptr && cb != VK_NULL_HANDLE);
   assert(attentionDescriptorSet != VK_NULL_HANDLE);
-  assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
-  assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
-  assert(packedQKV != nullptr && output != nullptr && nhwcQKV != nullptr && nhwcOutput != nullptr);
+  assert(packedQKV != nullptr && output != nullptr);
   assert(mask != nullptr && ropeCosTable != nullptr && ropeSinTable != nullptr && result != nullptr);
 
   if(batchSize <= 0 || numHeads <= 0 || numKVHeads <= 0 || qHeadDim <= 0 || vHeadDim <= 0 ||
@@ -416,29 +364,16 @@ void transformerScaleDotProductCooperative(
   const int qkvBatchStride = seqLen * qkvChannelsPadded;
   const int outputBatchStride = seqLen * outputChannelsPadded;
 
-  convertNCHWToNHWC(
-    device,
-    nchwToNhwcPipeline,
-    cb,
-    nchwToNhwcDescriptorSet,
-    packedQKV,
-    nhwcQKV,
-    batchSize,
-    qkvChannels,
-    seqLen,
-    spatialStride,
-    logicalSpatialSize,
-    result
-  );
-  CHECK_VK_MSG("Convert cooperative attention QKV input to NHWC", *result);
-  if(*result != VK_SUCCESS)
-    return;
+  (void)nchwToNhwcPipeline;
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcToNchwPipeline;
+  (void)nhwcToNchwDescriptorSet;
 
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 0, nhwcQKV),
-    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 1, nhwcQKV),
-    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 2, nhwcQKV),
-    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 3, nhwcOutput),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 0, packedQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 1, packedQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 2, packedQKV),
+    vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 3, output),
     vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 4, mask),
     vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 5, ropeCosTable),
     vk_helper::writeDescriptorSetBuffer(attentionDescriptorSet, 6, ropeSinTable)
@@ -499,23 +434,7 @@ void transformerScaleDotProductCooperative(
   SHADER_PROFILE_START("scaleDotProductAttention_NHWC", cb);
   vkCmdDispatch(cb, qGroups, bhGroups, zGroups);
   SHADER_PROFILE_END("scaleDotProductAttention_NHWC", cb);
-  vk_helper::barrierCommandBufferForBuffer(cb, nhwcOutput);
-
-  convertNHWCToNCHW(
-    device,
-    nhwcToNchwPipeline,
-    cb,
-    nhwcToNchwDescriptorSet,
-    nhwcOutput,
-    output,
-    batchSize,
-    outputChannels,
-    seqLen,
-    spatialStride,
-    logicalSpatialSize,
-    result
-  );
-  CHECK_VK_MSG("Convert cooperative attention output to NCHW", *result);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 void extractChannel0(
@@ -523,8 +442,6 @@ void extractChannel0(
   const Pipeline* extractPipeline,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& extractDescriptorSet,
-  const Pipeline* nchwToNhwcPipeline,
-  VkDescriptorSet& nchwToNhwcDescriptorSet,
   const VulkanBuffer* input,
   VulkanBuffer* output,
   VulkanBuffer* nhwcScratch,
@@ -539,10 +456,7 @@ void extractChannel0(
   assert(device != nullptr);
   assert(extractPipeline != nullptr);
   assert(input != nullptr && output != nullptr);
-  if(useNHWC) {
-    assert(nchwToNhwcPipeline != nullptr);
-    assert(nhwcScratch != nullptr);
-  }
+  (void)nhwcScratch;
 
   if(commandBuffer == VK_NULL_HANDLE)
     commandBuffer = vk_helper::allocateCommandBuffer(device);
@@ -553,31 +467,7 @@ void extractChannel0(
     CHECK_VK_MSG("Begin command buffer for ExtractChannel0", result);
   }
 
-  if(useNHWC && nchwToNhwcDescriptorSet == VK_NULL_HANDLE) {
-    nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-      device, nchwToNhwcPipeline->descriptorSetLayout, &result
-    );
-    CHECK_VK_MSG("Allocate NCHW to NHWC descriptor set for ExtractChannel0", result);
-  }
   const VulkanBuffer* extractInput = input;
-  if(useNHWC) {
-    convertNCHWToNHWC(
-      device,
-      nchwToNhwcPipeline,
-      commandBuffer,
-      nchwToNhwcDescriptorSet,
-      input,
-      nhwcScratch,
-      batchSize,
-      numInputChannels,
-      nhwcSpatialSize,
-      nchwSpatialStride,
-      logicalSpatialSize,
-      &result
-    );
-    CHECK_VK_MSG("Execute NCHW to NHWC conversion for ExtractChannel0", result);
-    extractInput = nhwcScratch;
-  }
 
   if(extractDescriptorSet == VK_NULL_HANDLE) {
     extractDescriptorSet = vk_helper::allocateDescriptorSet(
@@ -1468,9 +1358,7 @@ void doTransformerDualGemmSwiGLU(
   assert(pipeline != nullptr);
   assert(cb != VK_NULL_HANDLE);
   assert(descriptorSet != VK_NULL_HANDLE);
-  assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
-  assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
-  assert(input != nullptr && nhwcInput != nullptr && packedFilter != nullptr && nhwcOutput != nullptr && output != nullptr);
+  assert(input != nullptr && packedFilter != nullptr && output != nullptr);
   assert(result != nullptr);
 
   const auto& params = tuneParams.transformerDualGemmSwiGLU;
@@ -1484,28 +1372,17 @@ void doTransformerDualGemmSwiGLU(
 
   const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, 4);
   const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, 4);
-  convertNCHWToNHWC(
-    device,
-    nchwToNhwcPipeline,
-    cb,
-    nchwToNhwcDescriptorSet,
-    input,
-    nhwcInput,
-    batchSize,
-    cSize,
-    hwSize,
-    hwSize,
-    logicalSpatialSize,
-    result
-  );
-  CHECK_VK_MSG("Convert Transformer dual-GEMM input to NHWC", *result);
-  if(*result != VK_SUCCESS)
-    return;
+  (void)nchwToNhwcPipeline;
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcToNchwPipeline;
+  (void)nhwcToNchwDescriptorSet;
+  (void)nhwcInput;
+  (void)nhwcOutput;
 
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, nhwcInput),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, packedFilter),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, nhwcOutput)
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, output)
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for transformerDualGemmSwiGLU", *result);
@@ -1526,23 +1403,7 @@ void doTransformerDualGemmSwiGLU(
     static_cast<uint32_t>(batchSize)
   );
   SHADER_PROFILE_END("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
-  vk_helper::barrierCommandBufferForBuffer(cb, nhwcOutput);
-
-  convertNHWCToNCHW(
-    device,
-    nhwcToNchwPipeline,
-    cb,
-    nhwcToNchwDescriptorSet,
-    nhwcOutput,
-    output,
-    batchSize,
-    ffnSize,
-    hwSize,
-    hwSize,
-    logicalSpatialSize,
-    result
-  );
-  CHECK_VK_MSG("Convert Transformer dual-GEMM output to NCHW", *result);
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {

@@ -4,6 +4,7 @@
 #include "common.glsl"
 
 layout(constant_id = 3) const int TILE_SIZE = 32;
+layout(constant_id = 4) const int USE_NHWC = 0;
 
 
 layout(push_constant) uniform SpatialRMSNormSumSqParams{
@@ -11,6 +12,7 @@ layout(push_constant) uniform SpatialRMSNormSumSqParams{
     int cSize;
     int xySize;
     int tilesPerGroup;
+    int channelsPadded;
 };
 
 layout(set=0, binding=0) buffer readonly input_buffer {
@@ -46,7 +48,10 @@ void main() {
             int c = idx / xySize;
             int xy = idx % xySize;
             float maskVal = LOAD(mask, n * xySize + xy);
-            float val = LOAD(d_input, (n * cSize + c) * xySize + xy) * maskVal;
+            int inputIdx = USE_NHWC == 1
+                ? (n * xySize + xy) * channelsPadded + c
+                : (n * cSize + c) * xySize + xy;
+            float val = LOAD(d_input, inputIdx) * maskVal;
             acc += val * val;
         }
     }

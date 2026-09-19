@@ -4,6 +4,7 @@
 #include "common.glsl"
 
 layout(constant_id = 3) const int APPLY_ELTS_PER_THREAD = 1;
+layout(constant_id = 4) const int USE_NHWC = 0;
 
 
 layout(push_constant) uniform SpatialRmsNormApplyParams{
@@ -11,6 +12,7 @@ layout(push_constant) uniform SpatialRmsNormApplyParams{
     int cSize;
     int xySize;
     float eps;
+    int channelsPadded;
 };
 
 layout(set=0, binding=0) buffer readonly input_buffer {
@@ -60,9 +62,13 @@ void main() {
             int c = idx / xySize;
             int xy = idx % xySize;
             float maskVal = LOAD(mask, n * xySize + xy);
-            float val = LOAD(d_input, (n * cSize + c) * xySize + xy);
+            int inputIdx = USE_NHWC == 1
+                ? (n * xySize + xy) * channelsPadded + c
+                : (n * cSize + c) * xySize + xy;
+            int outputIdx = inputIdx;
+            float val = LOAD(d_input, inputIdx);
             float result = (val * rms * gamma[c] + beta[c]) * maskVal;
-            STORE(d_output, (n * cSize + c) * xySize + xy, floatToReal(result));
+            STORE(d_output, outputIdx, floatToReal(result));
         }
         idx += int(gl_WorkGroupSize.x);
     }

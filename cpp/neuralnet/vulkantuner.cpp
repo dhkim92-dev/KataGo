@@ -3005,7 +3005,7 @@ namespace {
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_sum_sq") == 0) {
           const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * pipelineXYSize);
-          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,pipelineXYSize,sizing.tilesPerGroupPass1};
+          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,pipelineXYSize,sizing.tilesPerGroupPass1,channels};
           push(params);
           dispatch(static_cast<uint32_t>(sizing.numCHWWorkgroups), static_cast<uint32_t>(batchSize));
         }
@@ -3016,7 +3016,7 @@ namespace {
           dispatch(1, static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_apply") == 0) {
-          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,pipelineXYSize,1e-6f};
+          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,pipelineXYSize,1e-6f,channels};
           push(params);
           dispatch(
             static_cast<uint32_t>((channels * pipelineXYSize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
