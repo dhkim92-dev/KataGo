@@ -2919,11 +2919,14 @@ struct TransformerRMSNormLayer {
   const int numChannels;
   const float epsilon;
   const int paddedNNXYLen;
-  TransformerRMSNormPushParams params;
+  const int channelsPadded;
+  const bool useNHWC;
+  const Pipeline* pipeline;
   VulkanBuffer* weightBuf;
   VulkanBuffer* zeroBetaBuf;
-  const Pipeline pipeline;
   VkDescriptorSet descriptorSet;
+  VkDescriptorSet nchwToNhwcDescriptorSet;
+  VkDescriptorSet nhwcToNchwDescriptorSet;
 
 
   TransformerRMSNormLayer(
@@ -2935,7 +2938,12 @@ struct TransformerRMSNormLayer {
     numChannels(desc->numChannels),
     epsilon(desc->epsilon),
     paddedNNXYLen(handle->paddedNNXYLen),
-    pipeline(handle->pipelines->transformerRmsNorm)
+    channelsPadded(vk_helper::roundUpToMultipleInt(desc->numChannels, 4)),
+    useNHWC(handle->pipelines->useNHWC),
+    pipeline(useNHWC ? &handle->pipelines->transformerRmsNormNHWC : &handle->pipelines->transformerRmsNorm),
+    descriptorSet(VK_NULL_HANDLE),
+    nchwToNhwcDescriptorSet(VK_NULL_HANDLE),
+    nhwcToNchwDescriptorSet(VK_NULL_HANDLE)
   {
     testAssert(desc->weight.size() == numChannels);
     vector<float> weight = desc->weight;
@@ -2946,11 +2954,18 @@ struct TransformerRMSNormLayer {
     vector<float> zeroBeta(numChannels, 0.0f);
     zeroBetaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeroBeta, useFP16, &res);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] create zeroBeta buf", res);
-    params.cSize = numChannels;
-    params.xySize = paddedNNXYLen;
-    params.epsilon = epsilon;
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline->descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate descriptor set.", res);
+    if(useNHWC) {
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NCHW-to-NHWC descriptor set", res);
+      nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NHWC-to-NCHW descriptor set", res);
+    }
   }
 
   ~TransformerRMSNormLayer() {
@@ -2963,35 +2978,39 @@ struct TransformerRMSNormLayer {
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output,
-    VulkanBuffer* mask
+    VulkanBuffer* mask,
+    VulkanBuffer* nhwcInput = nullptr,
+    VulkanBuffer* nhwcOutput = nullptr
   ) {
-    params.nSize = batchSize;
-    auto writeDescriptors = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, weightBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, zeroBetaBuf),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask),
-    };
-    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptors);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-
-    uint32_t wgXYSize = handle->tuneParams.rmsNorm.WG_XY_SIZE;
-    uint32_t numXYGroups = (paddedNNXYLen + wgXYSize - 1) / wgXYSize;
-    uint32_t globalSizes[3] = {pipeline.localSizeX * numXYGroups, static_cast<uint32_t>(batchSize), 1};
-
-    uint32_t wgCounts[3] = {
-      (globalSizes[0] + pipeline.localSizeX - 1) / pipeline.localSizeX,
-      (globalSizes[1] + pipeline.localSizeY - 1) / pipeline.localSizeY,
-      (globalSizes[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ
-    };
-
-    SHADER_PROFILE_START("TransformerRMSNorm", cb);
-    vkCmdDispatch(cb, wgCounts[0], wgCounts[1], wgCounts[2]);
-    SHADER_PROFILE_END("TransformerRMSNorm", cb);
-    vk_helper::barrierCommandBufferForBuffer(cb, output);
+    VkResult res = VK_SUCCESS;
+    vkcompute::transformerRMSNorm(
+      handle->vulkanDevice,
+      pipeline,
+      cb,
+      descriptorSet,
+      useNHWC ? &handle->pipelines->nchwToNhwc : nullptr,
+      nchwToNhwcDescriptorSet,
+      useNHWC ? &handle->pipelines->nhwcToNchw : nullptr,
+      nhwcToNchwDescriptorSet,
+      input,
+      output,
+      nhwcInput,
+      nhwcOutput,
+      weightBuf,
+      zeroBetaBuf,
+      mask,
+      batchSize,
+      numChannels,
+      paddedNNXYLen,
+      paddedNNXYLen,
+      handle->nnXLen * handle->nnYLen,
+      channelsPadded,
+      epsilon,
+      handle->tuneParams.rmsNorm,
+      useNHWC,
+      &res
+    );
+    CHECK_VK_MSG("Execute TransformerRMSNorm", res);
 
   }
 
@@ -2999,12 +3018,14 @@ struct TransformerRMSNormLayer {
     int batchSize,
     VulkanBuffer* input,
     VulkanBuffer* output,
-    VulkanBuffer* mask
+    VulkanBuffer* mask,
+    VulkanBuffer* nhwcInput = nullptr,
+    VulkanBuffer* nhwcOutput = nullptr
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for TransformerRMSNormLayer: " + name, res);
-    forward(commandBuffer, batchSize, input, output, mask);
+    forward(commandBuffer, batchSize, input, output, mask, nhwcInput, nhwcOutput);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerRMSNormLayer: " + name, res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
@@ -3135,6 +3156,7 @@ struct RMSNormLayer {
       params.cSize = numChannels;
       params.xySize = paddedNNXYLen;
       params.epsilon = epsilon;
+      params.channelsPadded = numChannels;
       vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
       vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &rmsNormDS, 0,nullptr);
       vkCmdPushConstants(cb,pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
@@ -3533,7 +3555,17 @@ struct TransformerAttentionBlock {
 
     // Step 1: RMSNorm
     // preLN: trunk -> trunkScratch (normalized)
-    preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+    if(preLN->useNHWC) {
+      SizedBuf<VulkanBuffer*> rmsNormInput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      SizedBuf<VulkanBuffer*> rmsNormOutput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      preLN->forward(cb, batchSize, trunk, trunkScratch, mask, rmsNormInput.buf, rmsNormOutput.buf);
+    } else {
+      preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+    }
 
     // Step 2: Combined Q/K/V projection into [Q | K | V | padding]
     SizedBuf<VulkanBuffer*> packedQKV(
@@ -3587,7 +3619,17 @@ struct TransformerAttentionBlock {
     const int vOffset = (qTotalDim + kTotalDim) * seqLen;
     const int packedBatchStride = qkvPhysicalOutChannels * seqLen;
 
-    preLN->debug(batchSize, trunk, trunkScratch, mask);
+    if(preLN->useNHWC) {
+      SizedBuf<VulkanBuffer*> rmsNormInput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      SizedBuf<VulkanBuffer*> rmsNormOutput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      preLN->debug(batchSize, trunk, trunkScratch, mask, rmsNormInput.buf, rmsNormOutput.buf);
+    } else {
+      preLN->debug(batchSize, trunk, trunkScratch, mask);
+    }
 
     SizedBuf<VulkanBuffer*> packedQKV(
       scratch->allocator,
@@ -3714,7 +3756,17 @@ struct TransformerFFNBlock {
     VulkanBuffer* convWorkspace
   ) {
      // Step 1: RMSNorm
-    preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+    if(preLN->useNHWC) {
+      SizedBuf<VulkanBuffer*> rmsNormInput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      SizedBuf<VulkanBuffer*> rmsNormOutput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      preLN->forward(cb, batchSize, trunk, trunkScratch, mask, rmsNormInput.buf, rmsNormOutput.buf);
+    } else {
+      preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
+    }
 
     // Step 2: write compact SwiGLU output for linear2.
     SizedBuf<VulkanBuffer*> ffnOutBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
@@ -3756,7 +3808,17 @@ struct TransformerFFNBlock {
     VulkanBuffer* convWorkspace
   ) {
     (void)maskSum;
-    preLN->debug(batchSize, trunk, trunkScratch, mask);
+    if(preLN->useNHWC) {
+      SizedBuf<VulkanBuffer*> rmsNormInput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      SizedBuf<VulkanBuffer*> rmsNormOutput(
+        scratch->allocator, scratch->getBufSizeXY(preLN->channelsPadded)
+      );
+      preLN->debug(batchSize, trunk, trunkScratch, mask, rmsNormInput.buf, rmsNormOutput.buf);
+    } else {
+      preLN->debug(batchSize, trunk, trunkScratch, mask);
+    }
 
     SizedBuf<VulkanBuffer*> ffnOutBuf(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
     if(usingTransformerDualGemmSwiGLU) {

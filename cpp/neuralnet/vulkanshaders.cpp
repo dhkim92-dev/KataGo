@@ -736,6 +736,9 @@ namespace vk_shader {
       true
     )) != VK_SUCCESS) return result;
     if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if(useNHWC) {
+      if((result = createTransformerRMSNorm(transformerRmsNormNHWC, tuneParams.rmsNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+    }
     if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSpatialRMSNormApply(transformerSpatialRMSNormApply, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -805,6 +808,7 @@ namespace vk_shader {
     destroyPipeline(extractChannel0Fp32);
 
     destroyPipeline(transformerRmsNorm);
+    destroyPipeline(transformerRmsNormNHWC);
     destroyPipeline(transformerApplyRoPE);
     destroyPipeline(transformerScaleDotProduct);
     destroyPipeline(transformerScaleDotProductCooperative);
@@ -1638,7 +1642,7 @@ namespace vk_shader {
     return createPipeline("extract_channel0_fp32", shaderModule_extract_channel0_fp32, 2, sizeof(ExtractChannel0Params), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createTransformerRMSNorm(Pipeline& pipeline, const TransformerRMSNormTuneParms& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createTransformerRMSNorm(Pipeline& pipeline, const TransformerRMSNormTuneParms& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = TransformerRMSNormSpec();
     spec.localSizeX = tuneParams.WG_C_SIZE * tuneParams.WG_XY_SIZE;
     spec.localSizeY = 1;
@@ -1646,13 +1650,15 @@ namespace vk_shader {
     spec.C_PER_THREAD = tuneParams.C_PER_THREAD;
     spec.WG_C_SIZE = tuneParams.WG_C_SIZE;
     spec.WG_XY_SIZE = tuneParams.WG_XY_SIZE;
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
+    const std::string suffix = useNHWC ? "_nhwc" : "";
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("transformer_rms_norm_p16s16", shaderModule_transformer_rms_norm_p16s16, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("transformer_rms_norm_p32s16", shaderModule_transformer_rms_norm_p32s16, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("transformer_rms_norm_p16s16" + suffix, shaderModule_transformer_rms_norm_p16s16, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_rms_norm_p32s16" + suffix, shaderModule_transformer_rms_norm_p32s16, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("transformer_rms_norm_fp32", shaderModule_transformer_rms_norm_fp32, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("transformer_rms_norm_fp32" + suffix, shaderModule_transformer_rms_norm_fp32, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createTransformerApplyRoPE(Pipeline& pipeline, const VulkanParams& vulkanParams) {

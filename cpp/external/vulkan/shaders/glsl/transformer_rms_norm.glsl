@@ -7,16 +7,18 @@
 layout(constant_id = 3) const int WG_C_SIZE = 64;
 layout(constant_id = 4) const int WG_XY_SIZE = 1;
 layout(constant_id = 5) const int C_PER_THREAD = 4;
+layout(constant_id = 6) const int USE_NHWC = 0;
 
 layout(push_constant) uniform TransformerRMSNormParams {
     int nSize;
     int cSize;
     int xySize;
     float eps;
+    int channelsPadded;
 };
 
 layout(set = 0, binding = 0) buffer readonly input_buffer {
-    realstore d_input[];// NCHW
+    realstore d_input[];
 };
 
 layout(set = 0, binding = 1) buffer writeonly output_buffer {
@@ -37,8 +39,7 @@ layout(set = 0, binding = 4) buffer readonly mask_buffer {
 
 shared float partials[WG_XY_SIZE * WG_C_SIZE];
 
-layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-void main() {
+void transformerRmsNormNCHW() {
     const int lid = int(gl_LocalInvocationID.x);
     const int lid_xy = lid % WG_XY_SIZE;
     const int lid_c = lid / WG_XY_SIZE;
@@ -86,4 +87,56 @@ void main() {
             }
         }
     }
+}
+
+void transformerRmsNormNHWC() {
+    const int lid = int(gl_LocalInvocationID.x);
+    const int lid_xy = lid % WG_XY_SIZE;
+    const int lid_c = lid / WG_XY_SIZE;
+    const int xy = int(gl_WorkGroupID.x) * WG_XY_SIZE + lid_xy;
+    const int n = int(gl_WorkGroupID.y);
+
+    if (n >= nSize) return;
+
+    float maskVal = (xy < xySize) ? LOAD(mask, n*xySize + xy) : 0.0f;
+    float acc = 0.0f;
+
+    for (int base = lid_c * C_PER_THREAD; base < cSize; base += WG_C_SIZE * C_PER_THREAD) {
+        for (int dc = 0; dc < C_PER_THREAD; dc++) {
+            int c = base + dc;
+            if (c < cSize && xy < xySize) {
+                float val = LOAD(d_input, (n*xySize + xy) * channelsPadded + c) * maskVal;
+                acc += val * val;
+            }
+        }
+    }
+
+    partials[lid_xy * WG_C_SIZE + lid_c] = acc;
+    for (int span = WG_C_SIZE / 2; span > 0; span /= 2) {
+        barrier();
+        if (lid_c < span)
+            partials[lid_xy * WG_C_SIZE + lid_c] += partials[lid_xy * WG_C_SIZE + lid_c + span];
+    }
+    barrier();
+
+    float rms = inversesqrt(partials[lid_xy * WG_C_SIZE] / float(cSize) + eps);
+
+    for (int base = lid_c * C_PER_THREAD; base < cSize; base += WG_C_SIZE * C_PER_THREAD) {
+        for (int dc = 0; dc < C_PER_THREAD; dc++) {
+            int c = base + dc;
+            if (c < cSize && xy < xySize) {
+                float val = LOAD(d_input, (n*xySize + xy) * channelsPadded + c);
+                float result = (val * rms * weight[c] + beta[c]) * maskVal;
+                STORE(d_output, (n*xySize + xy) * channelsPadded + c, floatToReal(result));
+            }
+        }
+    }
+}
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+void main() {
+    if (USE_NHWC == 1)
+        transformerRmsNormNHWC();
+    else
+        transformerRmsNormNCHW();
 }

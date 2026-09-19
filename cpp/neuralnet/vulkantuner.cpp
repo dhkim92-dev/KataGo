@@ -2902,7 +2902,7 @@ namespace {
             dispatch((pipelineXYSize + pipeline->localSizeX - 1) / pipeline->localSizeX, static_cast<uint32_t>(batchSize * heads));
         }
         else if(pipeline->name.find("transformer_rms_norm") == 0) {
-          vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,pipelineXYSize,1e-6f};
+          vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,pipelineXYSize,1e-6f,channels};
           push(params);
           dispatch(
             static_cast<uint32_t>((pipelineXYSize + config.rmsNorm.WG_XY_SIZE - 1) / config.rmsNorm.WG_XY_SIZE),

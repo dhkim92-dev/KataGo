@@ -45,6 +45,34 @@ namespace vkcompute {
     VkResult* result
   );
 
+  void transformerRMSNorm(
+    const VulkanDevice* device,
+    const Pipeline* rmsNormPipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet rmsNormDescriptorSet,
+    const Pipeline* nchwToNhwcPipeline,
+    VkDescriptorSet nchwToNhwcDescriptorSet,
+    const Pipeline* nhwcToNchwPipeline,
+    VkDescriptorSet nhwcToNchwDescriptorSet,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* nhwcInput,
+    VulkanBuffer* nhwcOutput,
+    VulkanBuffer* weight,
+    VulkanBuffer* beta,
+    VulkanBuffer* mask,
+    int batchSize,
+    int channels,
+    int spatialSize,
+    int spatialStride,
+    int logicalSpatialSize,
+    int channelsPadded,
+    float epsilon,
+    const vk_shader::tune::TransformerRMSNormTuneParms& tuneParams,
+    bool useNHWC,
+    VkResult* result
+  );
+
   void extractChannel0(
     const VulkanDevice* device,
     const Pipeline* extractPipeline,

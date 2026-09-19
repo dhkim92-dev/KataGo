@@ -111,6 +111,110 @@ void convertNHWCToNCHW(
   );
 }
 
+void transformerRMSNorm(
+  const VulkanDevice* device,
+  const Pipeline* rmsNormPipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet rmsNormDescriptorSet,
+  const Pipeline* nchwToNhwcPipeline,
+  VkDescriptorSet nchwToNhwcDescriptorSet,
+  const Pipeline* nhwcToNchwPipeline,
+  VkDescriptorSet nhwcToNchwDescriptorSet,
+  VulkanBuffer* input,
+  VulkanBuffer* output,
+  VulkanBuffer* nhwcInput,
+  VulkanBuffer* nhwcOutput,
+  VulkanBuffer* weight,
+  VulkanBuffer* beta,
+  VulkanBuffer* mask,
+  int batchSize,
+  int channels,
+  int spatialSize,
+  int spatialStride,
+  int logicalSpatialSize,
+  int channelsPadded,
+  float epsilon,
+  const vk_shader::tune::TransformerRMSNormTuneParms& tuneParams,
+  bool useNHWC,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(rmsNormPipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(rmsNormDescriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && output != nullptr);
+  assert(weight != nullptr && beta != nullptr && mask != nullptr);
+  assert(result != nullptr);
+
+  if(useNHWC) {
+    assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
+    assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
+    assert(nhwcInput != nullptr && nhwcOutput != nullptr);
+    convertNCHWToNHWC(
+      device, nchwToNhwcPipeline, cb, nchwToNhwcDescriptorSet,
+      input, nhwcInput, batchSize, channels, spatialSize, spatialStride,
+      logicalSpatialSize, result
+    );
+    CHECK_VK_MSG("Convert TransformerRMSNorm input to NHWC", *result);
+    if(*result != VK_SUCCESS)
+      return;
+  }
+
+  VulkanBuffer* shaderInput = useNHWC ? nhwcInput : input;
+  VulkanBuffer* shaderOutput = useNHWC ? nhwcOutput : output;
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 0, shaderInput),
+    vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 1, shaderOutput),
+    vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 2, weight),
+    vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 3, beta),
+    vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 4, mask)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update TransformerRMSNorm descriptors", *result);
+  if(*result != VK_SUCCESS)
+    return;
+
+  const vk_shader::push::TransformerRMSNormPushParams params = {
+    batchSize, channels, spatialSize, epsilon, channelsPadded
+  };
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, rmsNormPipeline->pipeline);
+  vkCmdPushConstants(
+    cb, rmsNormPipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT,
+    0, sizeof(params), &params
+  );
+  vkCmdBindDescriptorSets(
+    cb, VK_PIPELINE_BIND_POINT_COMPUTE, rmsNormPipeline->layout,
+    0, 1, &rmsNormDescriptorSet, 0, nullptr
+  );
+
+  const uint32_t numXYGroups = static_cast<uint32_t>(
+    (spatialSize + tuneParams.WG_XY_SIZE - 1) / tuneParams.WG_XY_SIZE
+  );
+  const uint32_t globalSizes[3] = {
+    rmsNormPipeline->localSizeX * numXYGroups,
+    static_cast<uint32_t>(batchSize),
+    1u
+  };
+  const uint32_t workgroupCounts[3] = {
+    (globalSizes[0] + rmsNormPipeline->localSizeX - 1) / rmsNormPipeline->localSizeX,
+    (globalSizes[1] + rmsNormPipeline->localSizeY - 1) / rmsNormPipeline->localSizeY,
+    (globalSizes[2] + rmsNormPipeline->localSizeZ - 1) / rmsNormPipeline->localSizeZ
+  };
+  SHADER_PROFILE_START(useNHWC ? "TransformerRMSNorm_NHWC" : "TransformerRMSNorm", cb);
+  vkCmdDispatch(cb, workgroupCounts[0], workgroupCounts[1], workgroupCounts[2]);
+  SHADER_PROFILE_END(useNHWC ? "TransformerRMSNorm_NHWC" : "TransformerRMSNorm", cb);
+  vk_helper::barrierCommandBufferForBuffer(cb, shaderOutput);
+
+  if(useNHWC) {
+    convertNHWCToNCHW(
+      device, nhwcToNchwPipeline, cb, nhwcToNchwDescriptorSet,
+      nhwcOutput, output, batchSize, channels, spatialSize, spatialStride,
+      logicalSpatialSize, result
+    );
+    CHECK_VK_MSG("Convert TransformerRMSNorm output to NCHW", *result);
+  }
+}
+
 void extractChannel0(
   const VulkanDevice* device,
   const Pipeline* extractPipeline,
