@@ -2633,18 +2633,24 @@ struct TransformerMatMulLayer {
 struct TransformerApplyRoPELayer {
 
   ComputeHandleInternal *handle;
+  const bool useNHWC;
+  const int channels;
+  const int channelsPadded;
   Pipeline pipeline;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-  TransformerApplyRoPEPushParams params;
+  VkDescriptorSet nchwToNhwcDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcToNchwDescriptorSet = VK_NULL_HANDLE;
 
   TransformerApplyRoPELayer(
-    ComputeHandleInternal *handle
-  ): 
-    handle(handle)
+    ComputeHandleInternal *handle,
+    int channels
+  ):
+    handle(handle),
+    useNHWC(handle->pipelines->useNHWC),
+    channels(channels),
+    channelsPadded(vk_helper::roundUpToMultipleInt(channels, 4)),
+    pipeline(useNHWC ? handle->pipelines->transformerApplyRoPENHWC : handle->pipelines->transformerApplyRoPE)
   {
-    const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
-    pipeline = pipelines->transformerApplyRoPE;
-    
     VkResult res = VK_ERROR_UNKNOWN;
     descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
@@ -2652,6 +2658,20 @@ struct TransformerApplyRoPELayer {
       &res
     );
     CHECK_VK_MSG("[TransformerApplyRoPE] allocate ropeDescriptorSet", res);
+    if(useNHWC) {
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice,
+        handle->pipelines->nchwToNhwc.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("[TransformerApplyRoPE] allocate NCHW to NHWC descriptorSet", res);
+      nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice,
+        handle->pipelines->nhwcToNchw.descriptorSetLayout,
+        &res
+      );
+      CHECK_VK_MSG("[TransformerApplyRoPE] allocate NHWC to NCHW descriptorSet", res);
+    }
   }
 
   ~TransformerApplyRoPELayer() = default;
@@ -2669,56 +2689,41 @@ struct TransformerApplyRoPELayer {
     const int numPairs,
     const int learnableInt,
     const int regionOffset,
-    const int batchStride
+    const int batchStride,
+    VulkanBuffer* nhwcScratch = nullptr
   ) {
     assert(cb != VK_NULL_HANDLE);
-    std::vector<WriteDescriptorSet> writeDescriptorSets = {
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, cosTable),
-      vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, sinTable)
-    };
-    vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-
-    params.nSize = batchSize; // 3
-    params.numBufHeads = numHeads; // 4
-    params.numKVHeads = numKVHeads; // 5
-    params.headDim = headDim;  // 6
-    params.xySize = seqLen; // 7
-    params.numPairs = numPairs;  //8 
-    params.learnableRope = learnableInt; //9
-    params.regionOffset = regionOffset;
-    params.batchStride = batchStride;
-
-    vkCmdPushConstants(
+    VkResult res = VK_ERROR_UNKNOWN;
+    vkcompute::transformerApplyRoPE(
+      handle->vulkanDevice,
+      &pipeline,
       cb,
-      pipeline.layout,
-      VK_SHADER_STAGE_COMPUTE_BIT,
-      0,
-      sizeof(TransformerApplyRoPEPushParams),
-      &params
+      descriptorSet,
+      useNHWC ? &handle->pipelines->nchwToNhwc : nullptr,
+      nchwToNhwcDescriptorSet,
+      useNHWC ? &handle->pipelines->nhwcToNchw : nullptr,
+      nhwcToNchwDescriptorSet,
+      input,
+      nhwcScratch,
+      cosTable,
+      sinTable,
+      batchSize,
+      numHeads,
+      numKVHeads,
+      headDim,
+      seqLen,
+      numPairs,
+      learnableInt,
+      regionOffset,
+      batchStride,
+      channels,
+      channelsPadded,
+      handle->paddedNNXYLen,
+      handle->nnXLen * handle->nnYLen,
+      useNHWC,
+      &res
     );
-    vkCmdBindDescriptorSets(
-      cb, 
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipeline.layout,
-      0,
-      1,
-      &descriptorSet,
-      0,
-      nullptr
-    );
-    uint32_t gs[3] = {
-      static_cast<uint32_t>(vk_helper::powerOf2ify(params.xySize)),
-      static_cast<uint32_t>(vk_helper::powerOf2ify(params.numPairs)),
-      static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize * params.numBufHeads))
-    };
-    uint32_t wgCountX = (gs[0] + pipeline.localSizeX - 1) / pipeline.localSizeX;
-    uint32_t wgCountY = (gs[1] + pipeline.localSizeY - 1) / pipeline.localSizeY;
-    uint32_t wgCountZ = (gs[2] + pipeline.localSizeZ - 1) / pipeline.localSizeZ;
-    SHADER_PROFILE_START("TransformerApplyRoPE", cb);
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
-    SHADER_PROFILE_END("TransformerApplyRoPE", cb);
+    CHECK_VK_MSG("Execute TransformerApplyRoPE", res);
   }
 
   void debug(
@@ -2733,16 +2738,17 @@ struct TransformerApplyRoPELayer {
     const int numPairs,
     const int learnableInt,
     const int regionOffset,
-    const int batchStride
+    const int batchStride,
+    VulkanBuffer* nhwcScratch = nullptr
   ) {
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     VkResult res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for TransformerApplyRoPELayer", res);
-    forward(commandBuffer, batchSize, input, cosTable, sinTable, numHeads, numKVHeads, headDim, seqLen, numPairs, learnableInt, regionOffset, batchStride);
+    forward(commandBuffer, batchSize, input, cosTable, sinTable, numHeads, numKVHeads, headDim, seqLen, numPairs, learnableInt, regionOffset, batchStride, nhwcScratch);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("End command buffer for TransformerApplyRoPELayer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer});
-    printDeviceBuffer("TransformerApplyRoPELayer Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(batchStride));
+    printDeviceBuffer("TransformerApplyRoPELayer Output : ", handle->vulkanDevice, input, static_cast<size_t>(batchSize) * static_cast<size_t>(channels) * static_cast<size_t>(handle->paddedNNXYLen));
   }
 };
 
@@ -3456,6 +3462,8 @@ struct TransformerAttentionBlock {
   TransformerRMSNormLayer* preLN;
   TransformerMatMulLayer* qkvProj;
   TransformerMatMulLayer* outProj;
+  TransformerApplyRoPELayer* qRoPE;
+  TransformerApplyRoPELayer* kRoPE;
   TransformerAttentionLayer* attention;
 
   // RoPE data
@@ -3493,6 +3501,8 @@ struct TransformerAttentionBlock {
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
     qkvProj(new TransformerMatMulLayer(handle, &qkvProjDesc)),
     outProj(new TransformerMatMulLayer(handle, &desc->outProj)),
+    qRoPE(new TransformerApplyRoPELayer(handle, qkvPhysicalOutChannels)),
+    kRoPE(new TransformerApplyRoPELayer(handle, qkvPhysicalOutChannels)),
     ropeCosTable(nullptr),
     ropeSinTable(nullptr),
     ropeNumPairs(0),
@@ -3533,6 +3543,9 @@ struct TransformerAttentionBlock {
     delete preLN;
     delete outProj;
     delete qkvProj;
+    delete qRoPE;
+    delete kRoPE;
+    delete attention;
   }
 
   void forward(
@@ -3574,9 +3587,43 @@ struct TransformerAttentionBlock {
     );
     qkvProj->forward(cb, batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
-    // Step 3: Scaled dot product attention. Q/K RoPE is applied while the
-    // attention shader loads the values, avoiding two extra dispatches and
-    // in-place writes to packedQKV.
+    if(useRope) {
+      const bool useNHWC = handle->pipelines->useNHWC;
+      const int channelsPadded = vk_helper::roundUpToMultipleInt(qkvPhysicalOutChannels, 4);
+      const int ropeBatchStride = useNHWC ? seqLen * channelsPadded : packedBatchStride;
+      const int qRegionOffset = useNHWC ? 0 : qOffset;
+      const int kRegionOffset = useNHWC ? qTotalDim : kOffset;
+      if(useNHWC) {
+        SizedBuf<VulkanBuffer*> nhwcScratch(
+          scratch->allocator,
+          scratch->getBufSizeXY(channelsPadded)
+        );
+        qRoPE->forward(
+          cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, qRegionOffset, ropeBatchStride, nhwcScratch.buf
+        );
+        kRoPE->forward(
+          cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, kRegionOffset, ropeBatchStride, nhwcScratch.buf
+        );
+      } else {
+        qRoPE->forward(
+          cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, qRegionOffset, ropeBatchStride
+        );
+        kRoPE->forward(
+          cb, batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, kRegionOffset, ropeBatchStride
+        );
+      }
+    }
+
+    // Step 3: Scaled dot product attention. RoPE has already been applied to
+    // the packed Q and K regions, so the attention shader must not rotate them again.
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
     attention->forward(
       cb,
@@ -3590,9 +3637,9 @@ struct TransformerAttentionBlock {
       kOffset,
       vOffset,
       packedBatchStride,
-      useRope,
-      learnableRope,
-      ropeNumPairs
+      false,
+      false,
+      0
     );
     vk_helper::barrierCommandBufferForBuffer(cb, attnOut.buf);
     // Step 4: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
@@ -3638,6 +3685,41 @@ struct TransformerAttentionBlock {
 
     qkvProj->debug(batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
+    if(useRope) {
+      const bool useNHWC = handle->pipelines->useNHWC;
+      const int channelsPadded = vk_helper::roundUpToMultipleInt(qkvPhysicalOutChannels, 4);
+      const int ropeBatchStride = useNHWC ? seqLen * channelsPadded : packedBatchStride;
+      const int qRegionOffset = useNHWC ? 0 : qOffset;
+      const int kRegionOffset = useNHWC ? qTotalDim : kOffset;
+      if(useNHWC) {
+        SizedBuf<VulkanBuffer*> nhwcScratch(
+          scratch->allocator,
+          scratch->getBufSizeXY(channelsPadded)
+        );
+        qRoPE->debug(
+          batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, qRegionOffset, ropeBatchStride, nhwcScratch.buf
+        );
+        kRoPE->debug(
+          batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, kRegionOffset, ropeBatchStride, nhwcScratch.buf
+        );
+      } else {
+        qRoPE->debug(
+          batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, qRegionOffset, ropeBatchStride
+        );
+        kRoPE->debug(
+          batchSize, packedQKV.buf, ropeCosTable, ropeSinTable,
+          numKVHeads, numKVHeads, qHeadDim, seqLen, ropeNumPairs,
+          learnableRope ? 1 : 0, kRegionOffset, ropeBatchStride
+        );
+      }
+    }
+
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
     attention->debug(
       batchSize,
@@ -3650,9 +3732,9 @@ struct TransformerAttentionBlock {
       kOffset,
       vOffset,
       packedBatchStride,
-      useRope,
-      learnableRope,
-      ropeNumPairs
+      false,
+      false,
+      0
     );
     outProj->debug(batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
 

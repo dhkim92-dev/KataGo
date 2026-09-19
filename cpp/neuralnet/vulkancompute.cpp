@@ -111,6 +111,151 @@ void convertNHWCToNCHW(
   );
 }
 
+void transformerApplyRoPE(
+  const VulkanDevice* device,
+  const Pipeline* ropePipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet ropeDescriptorSet,
+  const Pipeline* nchwToNhwcPipeline,
+  VkDescriptorSet nchwToNhwcDescriptorSet,
+  const Pipeline* nhwcToNchwPipeline,
+  VkDescriptorSet nhwcToNchwDescriptorSet,
+  VulkanBuffer* input,
+  VulkanBuffer* nhwcScratch,
+  VulkanBuffer* cosTable,
+  VulkanBuffer* sinTable,
+  int batchSize,
+  int numHeads,
+  int numKVHeads,
+  int headDim,
+  int seqLen,
+  int numPairs,
+  int learnableRope,
+  int regionOffset,
+  int batchStride,
+  int channels,
+  int channelsPadded,
+  int spatialStride,
+  int logicalSpatialSize,
+  bool useNHWC,
+  VkResult* result
+) {
+  assert(device != nullptr);
+  assert(ropePipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(ropeDescriptorSet != VK_NULL_HANDLE);
+  assert(input != nullptr && cosTable != nullptr && sinTable != nullptr);
+  assert(result != nullptr);
+
+  if(batchSize <= 0 || numHeads <= 0 || numKVHeads <= 0 || headDim <= 0 ||
+     seqLen <= 0 || numPairs < 0 || numPairs > headDim / 2 || channels <= 0 ||
+     channelsPadded < channels || channelsPadded % 4 != 0 || spatialStride < seqLen ||
+     logicalSpatialSize <= 0 || logicalSpatialSize > seqLen) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
+
+  VulkanBuffer* shaderInput = input;
+  if(useNHWC) {
+    assert(nchwToNhwcPipeline != nullptr && nhwcToNchwPipeline != nullptr);
+    assert(nchwToNhwcDescriptorSet != VK_NULL_HANDLE && nhwcToNchwDescriptorSet != VK_NULL_HANDLE);
+    assert(nhwcScratch != nullptr);
+    convertNCHWToNHWC(
+      device,
+      nchwToNhwcPipeline,
+      cb,
+      nchwToNhwcDescriptorSet,
+      input,
+      nhwcScratch,
+      batchSize,
+      channels,
+      seqLen,
+      spatialStride,
+      logicalSpatialSize,
+      result
+    );
+    CHECK_VK_MSG("Convert TransformerApplyRoPE input to NHWC", *result);
+    if(*result != VK_SUCCESS)
+      return;
+    shaderInput = nhwcScratch;
+  }
+
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(ropeDescriptorSet, 0, shaderInput),
+    vk_helper::writeDescriptorSetBuffer(ropeDescriptorSet, 1, cosTable),
+    vk_helper::writeDescriptorSetBuffer(ropeDescriptorSet, 2, sinTable)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update TransformerApplyRoPE descriptors", *result);
+  if(*result != VK_SUCCESS)
+    return;
+
+  vk_shader::push::TransformerApplyRoPEPushParams params = {};
+  params.nSize = batchSize;
+  params.numBufHeads = numHeads;
+  params.numKVHeads = numKVHeads;
+  params.headDim = headDim;
+  params.xySize = seqLen;
+  params.numPairs = numPairs;
+  params.learnableRope = learnableRope;
+  params.regionOffset = regionOffset;
+  params.batchStride = useNHWC ? seqLen * channelsPadded : batchStride;
+  params.channelsPadded = channelsPadded;
+
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ropePipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb,
+    VK_PIPELINE_BIND_POINT_COMPUTE,
+    ropePipeline->layout,
+    0,
+    1,
+    &ropeDescriptorSet,
+    0,
+    nullptr
+  );
+  vkCmdPushConstants(
+    cb,
+    ropePipeline->layout,
+    VK_SHADER_STAGE_COMPUTE_BIT,
+    0,
+    sizeof(params),
+    &params
+  );
+
+  const uint32_t globalSize[3] = {
+    static_cast<uint32_t>(vk_helper::powerOf2ify(seqLen)),
+    static_cast<uint32_t>(vk_helper::powerOf2ify(numPairs)),
+    static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize * numHeads))
+  };
+  const uint32_t workgroupCount[3] = {
+    (globalSize[0] + ropePipeline->localSizeX - 1u) / ropePipeline->localSizeX,
+    (globalSize[1] + ropePipeline->localSizeY - 1u) / ropePipeline->localSizeY,
+    (globalSize[2] + ropePipeline->localSizeZ - 1u) / ropePipeline->localSizeZ
+  };
+  SHADER_PROFILE_START(useNHWC ? "TransformerApplyRoPE_NHWC" : "TransformerApplyRoPE", cb);
+  vkCmdDispatch(cb, workgroupCount[0], workgroupCount[1], workgroupCount[2]);
+  SHADER_PROFILE_END(useNHWC ? "TransformerApplyRoPE_NHWC" : "TransformerApplyRoPE", cb);
+  vk_helper::barrierCommandBufferForBuffer(cb, shaderInput);
+
+  if(useNHWC) {
+    convertNHWCToNCHW(
+      device,
+      nhwcToNchwPipeline,
+      cb,
+      nhwcToNchwDescriptorSet,
+      nhwcScratch,
+      input,
+      batchSize,
+      channels,
+      seqLen,
+      spatialStride,
+      logicalSpatialSize,
+      result
+    );
+    CHECK_VK_MSG("Convert TransformerApplyRoPE output to NCHW", *result);
+  }
+}
+
 void transformerRMSNorm(
   const VulkanDevice* device,
   const Pipeline* rmsNormPipeline,

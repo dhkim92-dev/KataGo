@@ -22,10 +22,13 @@ layout(push_constant) uniform RoPEParams {
     int learnableRope; // 1 = per-head tables, 0 = shared tables
     int regionOffset;
     int batchStride;
+    int channelsPadded; // NHWC row stride in elements
 };
 
+layout(constant_id = 3) const int USE_NHWC = 0;
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-void main() {
+
+void transformerApplyRopeNCHW() {
     const int xy = int(gl_GlobalInvocationID.x);
     const int pairIdx = int(gl_GlobalInvocationID.y);
     const int nh = int(gl_GlobalInvocationID.z);
@@ -58,4 +61,46 @@ void main() {
         STORE(data, idx0, floatToReal(out0));
         STORE(data, idx1, floatToReal(out1));
     }
+}
+
+void transformerApplyRopeNHWC() {
+    const int xy = int(gl_GlobalInvocationID.x);
+    const int pairIdx = int(gl_GlobalInvocationID.y);
+    const int nh = int(gl_GlobalInvocationID.z);
+
+    int n = nh / numBufHeads;
+    int h = nh % numBufHeads;
+
+    if(n < nSize && pairIdx < numPairs && xy < xySize) {
+        int batchBase = n * batchStride;
+        int idx0 = batchBase + xy * channelsPadded + regionOffset + h * headDim + pairIdx * 2;
+        int idx1 = idx0 + 1;
+
+        float x0 = LOAD(data, idx0);
+        float x1 = LOAD(data, idx1);
+
+        int tableIdx;
+        if(learnableRope!=0) {
+            int kvh = h * numKVHeads / numBufHeads;
+            tableIdx = (kvh * numPairs + pairIdx) * xySize + xy;
+        } else {
+            tableIdx = pairIdx * xySize + xy;
+        }
+
+        float cosVal = cosTable[tableIdx];
+        float sinVal = sinTable[tableIdx];
+
+        float out0 = x0 * cosVal - x1 * sinVal;
+        float out1 = x0 * sinVal + x1 * cosVal;
+
+        STORE(data, idx0, floatToReal(out0));
+        STORE(data, idx1, floatToReal(out1));
+    }
+}
+
+void main() {
+    if(USE_NHWC != 0)
+        transformerApplyRopeNHWC();
+    else
+        transformerApplyRopeNCHW();
 }

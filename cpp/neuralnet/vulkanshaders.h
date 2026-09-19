@@ -998,6 +998,7 @@ struct LocalDimHash {
       uint32_t localSizeX = 64;
       uint32_t localSizeY = 1;
       uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
     };
 
     struct ScaleDotProductSpec {
@@ -1316,6 +1317,7 @@ struct LocalDimHash {
       int learnableRope;
       int regionOffset;
       int batchStride;
+      int channelsPadded;
     };
 
     /**
@@ -1835,6 +1837,7 @@ struct LocalDimHash {
     Pipeline transformerRmsNorm;
     Pipeline transformerRmsNormNHWC;
     Pipeline transformerApplyRoPE;
+    Pipeline transformerApplyRoPENHWC;
     Pipeline transformerScaleDotProduct;
     Pipeline transformerScaleDotProductCooperative;
     Pipeline transformerScaleDotProductNaive;
@@ -1894,7 +1897,7 @@ struct LocalDimHash {
     VkResult createAddChannelBiasNCSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
     VkResult createExtractChannel0Fp32(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
-    VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);

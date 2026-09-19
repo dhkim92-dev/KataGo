@@ -739,7 +739,10 @@ namespace vk_shader {
     if(useNHWC) {
       if((result = createTransformerRMSNorm(transformerRmsNormNHWC, tuneParams.rmsNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
     }
-    if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    if(useNHWC) {
+      if((result = createTransformerApplyRoPE(transformerApplyRoPENHWC, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+    }
     if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSpatialRMSNormApply(transformerSpatialRMSNormApply, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createTransformerSpatialRMSNormReduce(transformerSpatialRMSNormReduce, tuneParams.spatialRMSNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -810,6 +813,7 @@ namespace vk_shader {
     destroyPipeline(transformerRmsNorm);
     destroyPipeline(transformerRmsNormNHWC);
     destroyPipeline(transformerApplyRoPE);
+    destroyPipeline(transformerApplyRoPENHWC);
     destroyPipeline(transformerScaleDotProduct);
     destroyPipeline(transformerScaleDotProductCooperative);
     destroyPipeline(transformerScaleDotProductNaive);
@@ -1661,15 +1665,17 @@ namespace vk_shader {
     return createPipeline("transformer_rms_norm_fp32" + suffix, shaderModule_transformer_rms_norm_fp32, 5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createTransformerApplyRoPE(Pipeline& pipeline, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createTransformerApplyRoPE(Pipeline& pipeline, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = TransformerApplyRoPESpec();
+    spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
+    const std::string suffix = useNHWC ? "_nhwc" : "";
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {
       if(vulkanParams.shouldUseFP16Compute)
-        return createPipeline("transformer_apply_rope_p16s16", shaderModule_transformer_apply_rope_p16s16, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
-      return createPipeline("transformer_apply_rope_p32s16", shaderModule_transformer_apply_rope_p32s16, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+        return createPipeline("transformer_apply_rope_p16s16" + suffix, shaderModule_transformer_apply_rope_p16s16, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+      return createPipeline("transformer_apply_rope_p32s16" + suffix, shaderModule_transformer_apply_rope_p32s16, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
     }
-    return createPipeline("transformer_apply_rope_fp32", shaderModule_transformer_apply_rope_fp32, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
+    return createPipeline("transformer_apply_rope_fp32" + suffix, shaderModule_transformer_apply_rope_fp32, 3, sizeof(TransformerApplyRoPEPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
   VkResult ComputePipelines::createTransformerScaleDotProduct(Pipeline& pipeline, const TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {

@@ -45,6 +45,36 @@ namespace vkcompute {
     VkResult* result
   );
 
+  void transformerApplyRoPE(
+    const VulkanDevice* device,
+    const Pipeline* ropePipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet ropeDescriptorSet,
+    const Pipeline* nchwToNhwcPipeline,
+    VkDescriptorSet nchwToNhwcDescriptorSet,
+    const Pipeline* nhwcToNchwPipeline,
+    VkDescriptorSet nhwcToNchwDescriptorSet,
+    VulkanBuffer* input,
+    VulkanBuffer* nhwcScratch,
+    VulkanBuffer* cosTable,
+    VulkanBuffer* sinTable,
+    int batchSize,
+    int numHeads,
+    int numKVHeads,
+    int headDim,
+    int seqLen,
+    int numPairs,
+    int learnableRope,
+    int regionOffset,
+    int batchStride,
+    int channels,
+    int channelsPadded,
+    int spatialStride,
+    int logicalSpatialSize,
+    bool useNHWC,
+    VkResult* result
+  );
+
   void transformerRMSNorm(
     const VulkanDevice* device,
     const Pipeline* rmsNormPipeline,
