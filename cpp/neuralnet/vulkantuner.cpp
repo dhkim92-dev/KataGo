@@ -5269,7 +5269,9 @@ namespace {
           : VulkanTuner::computeTuningScore(callsPerSecond, errorProp, plan.errorTolerance);
         measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
-        if(logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)) {
+        const bool logEveryNHWCCooperativeCandidate =
+          Tuner::name() == "hgemmCooperativeMatrixNHWC";
+        if(logEveryNHWCCooperativeCandidate || (logSuccessfulResults && (!context.printOnlyOnImprovement || isBest))) {
           logTuningResult(
             context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
             isBest
@@ -5798,7 +5800,16 @@ namespace {
     static vector<VulkanTuneParams> vectorCandidates(const VulkanTuneParams& seed, bool, const TuningContext& context) {
       vector<VulkanTuneParams> configs;
       for(int vwk: {1, 2, 4}) for(int vwn: {1, 2, 4}) {
-        VulkanTuneParams c = seed; c.hgemmCooperativeMatrixNHWC.VWK = vwk; c.hgemmCooperativeMatrixNHWC.VWN = vwn;
+        VulkanTuneParams c = seed;
+        c.hgemmCooperativeMatrixNHWC.VWK = vwk;
+        c.hgemmCooperativeMatrixNHWC.VWN = vwn;
+        // Vectorized cooperative loads require shared staging on the
+        // corresponding operand. Do not let the earlier SA=SB=0 beam seed
+        // suppress all VWK/VWN values above one.
+        if(vwk != 1)
+          c.hgemmCooperativeMatrixNHWC.SA = 1;
+        if(vwn != 1)
+          c.hgemmCooperativeMatrixNHWC.SB = 1;
         if(isValidCooperativeMatrixTuneParams(context, c.hgemmCooperativeMatrixNHWC)) configs.push_back(c);
       }
       return configs;
