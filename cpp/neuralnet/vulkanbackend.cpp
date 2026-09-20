@@ -970,7 +970,7 @@ struct ConvLayer {
 
     if ((convXSize == 1 && convYSize == 1) ||
         (convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrix;
+      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrixNHWC;
       usingHgemmCooperativeMatrix =
         handle_->usingFP16Storage &&
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -1002,7 +1002,7 @@ struct ConvLayer {
 
     usingNHWCIm2Col = usingNhwcConversion;
     if(usingNHWCIm2Col) {
-      const auto& params = handle_->tuneParams.hgemmCooperativeMatrix;
+      const auto& params = handle_->tuneParams.hgemmCooperativeMatrixNHWC;
       const int outputChannelStride = vk_helper::roundUpToMultipleInt(outChannels, 4);
       if(outChannels % params.NWG != 0 || outputChannelStride != outChannels) {
         throw StringError(
@@ -1202,27 +1202,17 @@ struct ConvLayer {
         handle->vulkanDevice, handle->tuneParams, gemmPipeline, cb, *gemmDescriptorSet,
         convWorkspace2, filterBuf, output, batchSize,
         nhwcSpatialSize, nhwcNSize, nhwcKSize,
-         handle->tuneParams.hgemmCooperativeMatrix, &res
+         handle->tuneParams.hgemmCooperativeMatrixNHWC, &res
       );
     } else {
       vkcompute::doHgemmCooperativeMatrixNHWC(
         handle->vulkanDevice, handle->tuneParams, gemmPipeline, cb, *gemmDescriptorSet,
         convWorkspace2, filterBuf, output, batchSize,
         nhwcSpatialSize, nhwcNSize, nhwcKSize,
-        handle->tuneParams.hgemmCooperativeMatrix, &res
+        handle->tuneParams.hgemmCooperativeMatrixNHWC, &res
       );
     }
     CHECK_VK_MSG("Execute NHWC cooperative matrix ConvLayer: " + name, res);
-  }
-
-  bool canUseHgemmCooperativeMatrixFor(int batchSize) const {
-    if(!usingHgemmCooperativeMatrix || batchSize <= 0)
-      return false;
-    const auto& params = handle->tuneParams.hgemmCooperativeMatrix;
-    const int M = vk_helper::roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
-    const int N = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-    const int K = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
-    return M % params.MWG == 0 && N % params.NWG == 0 && K % params.KWG == 0;
   }
 
   void doConv1x1AsMatmulFp32(
@@ -1278,13 +1268,8 @@ struct ConvLayer {
     VkResult res = VK_ERROR_UNKNOWN;
     const auto *pipelines = this->handle->pipelines;
     Pipeline winogradInputTransformBnActMaskPipeline;
-    const bool useHgemmCooperativeMatrix = canUseHgemmCooperativeMatrixFor(batchSize);
-    Pipeline xgemmBatchedPipeline = useHgemmCooperativeMatrix
-      ? pipelines->hgemmCooperativeMatrix
-      : pipelines->xgemmBatchedFp32;
-    VkDescriptorSet& gemmDescriptorSet = useHgemmCooperativeMatrix
-      ? hgemmCooperativeMatrixDS
-      : xgemmBatchedDS;
+    Pipeline xgemmBatchedPipeline = pipelines->xgemmBatchedFp32;
+    VkDescriptorSet& gemmDescriptorSet = xgemmBatchedDS;
     Pipeline winogradOutputTransformPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradOutputTransform3x3 
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradOutputTransform5x5
                                          : throw StringError("Winograd convolution only supported for 3x3 and 5x5 kernels in layer " + name);
@@ -1384,17 +1369,10 @@ struct ConvLayer {
       const int M = vk_helper::roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
       const int N = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
       const int K = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
-      if(useHgemmCooperativeMatrix) {
-        vkcompute::doHgemmCooperativeMatrix(
-          handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
-          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, M, N, K, &res
-        );
-      } else {
-        vkcompute::xgemmBatched(
-          handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
-          M, N, K, convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
-        );
-      }
+      vkcompute::xgemmBatched(
+        handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
+        M, N, K, convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
+      );
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
     }
 
@@ -1441,13 +1419,8 @@ struct ConvLayer {
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradOutputTransform5x5
                                          : throw StringError("Winograd convolution only supported for 3x3 and 5x5 kernels in layer " + name);
 
-    const bool useHgemmCooperativeMatrix = canUseHgemmCooperativeMatrixFor(batchSize);
-    Pipeline xgemmPipeline = useHgemmCooperativeMatrix
-      ? pipelines->hgemmCooperativeMatrix
-      : pipelines->xgemmBatchedFp32;
-    VkDescriptorSet& gemmDescriptorSet = useHgemmCooperativeMatrix
-      ? hgemmCooperativeMatrixDS
-      : xgemmBatchedDS;
+    Pipeline xgemmPipeline = pipelines->xgemmBatchedFp32;
+    VkDescriptorSet& gemmDescriptorSet = xgemmBatchedDS;
 
     if (  winogradInputTransformDS == VK_NULL_HANDLE ) {
       winogradInputTransformDS = vk_helper::allocateDescriptorSet(
@@ -1505,19 +1478,11 @@ struct ConvLayer {
       SHADER_PROFILE_START("WINOGRAD_GEMM", cb);
       // // std::printf("[xGEMM] Before dispatch numTilesTotal=%u outChPadded=%u inChPadded=%u inTilesXYSize=%d descriptorSet=%p\n",
       //   numTilesTotal, outChannelsPadded, inChannelsPadded, this->inTilesXYSize, (void*)xgemmBatchedDS);
-      if(useHgemmCooperativeMatrix) {
-        vkcompute::doHgemmCooperativeMatrix(
-          device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
-          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize,
-          numTilesTotal, outChannelsPadded, inChannelsPadded, &res
-        );
-      } else {
-        vkcompute::xgemmBatched(
-          device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
-          numTilesTotal, outChannelsPadded, inChannelsPadded,
-          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
-        );
-      }
+      vkcompute::xgemmBatched(
+        device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
+        numTilesTotal, outChannelsPadded, inChannelsPadded,
+        convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
+      );
       SHADER_PROFILE_END("WINOGRAD_GEMM", cb);
     }
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
@@ -2325,7 +2290,7 @@ struct TransformerMatMulLayer {
   {
     testAssert(desc->weights.size() == static_cast<size_t>(inChannels * outChannels));
     std::vector<float> weights = desc->weights;
-    const auto& hgemmParams = handle->tuneParams.hgemmCooperativeMatrix;
+    const auto& hgemmParams = handle->tuneParams.hgemmCooperativeMatrixNHWC;
     usingHgemmCooperativeMatrixNHWC =
       handle->usingFP16Storage &&
       handle->tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -2410,7 +2375,7 @@ struct TransformerMatMulLayer {
         paddedNNXYLen,
         outChannels,
         inChannels,
-        handle->tuneParams.hgemmCooperativeMatrix,
+        handle->tuneParams.hgemmCooperativeMatrixNHWC,
         &res
       );
     }
@@ -5662,17 +5627,16 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
     tuneParams.transformerDualGemmSwiGLU.isValid() &&
     usingFP16Storage;
-  usingFP16TensorCores =
+  const bool usingFP16NHWCCooperativeMatrix =
     usingFP16Storage &&
     tuneParams.vulkan.canUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseFP16Compute &&
-    tuneParams.hgemmCooperativeMatrix.isValid();
-  if(usingFP16TensorCores || usingFP16TransformerDualGemmSwiGLU) {
+    tuneParams.hgemmCooperativeMatrixNHWC.isValid();
+  if(usingFP16NHWCCooperativeMatrix || usingFP16TransformerDualGemmSwiGLU) {
     int spatialAlignment = 1;
-    if(usingFP16TensorCores) {
-      spatialAlignment = std::lcm(spatialAlignment, tuneParams.hgemmCooperativeMatrix.MWG);
-    }
+    if(usingFP16NHWCCooperativeMatrix)
+      spatialAlignment = std::lcm(spatialAlignment, tuneParams.hgemmCooperativeMatrixNHWC.MWG);
     if(usingFP16TransformerDualGemmSwiGLU)
       spatialAlignment = std::lcm(spatialAlignment, tuneParams.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
     this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);

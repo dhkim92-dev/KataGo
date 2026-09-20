@@ -211,7 +211,7 @@ namespace vkcompute {
     int M,
     int N,
     int K,
-    const vk_shader::tune::HGemmCooperativeMatrixTuneParams& params,
+    const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
     VkResult* result
   );
 

@@ -36,6 +36,10 @@ namespace vk_shader {
       return std::string(stem) + "_vwm" + std::to_string(vwm) + "_vwn" + std::to_string(vwn) + suffix;
     }
 
+    std::string hgemmNHWCVariantName(const char* stem, const char* suffix, uint32_t vwk, uint32_t vwn) {
+      return std::string(stem) + "_vwk" + std::to_string(vwk) + "_vwn" + std::to_string(vwn) + suffix;
+    }
+
     const char* xgemmPrecisionName(int precision) {
       return precision == 0 ? "p32s32" : precision == 1 ? "p32s16" : "p16s16";
     }
@@ -102,6 +106,17 @@ namespace vk_shader {
   DEFINE_HGEMM_VARIANT(stem##_vwm4_vwn2##suffix) \
   DEFINE_HGEMM_VARIANT(stem##_vwm4_vwn4##suffix)
 
+#define DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(stem, suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn4##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn4##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn1##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn2##suffix) \
+  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn4##suffix)
+
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
@@ -114,12 +129,21 @@ namespace vk_shader {
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
+  DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
   DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
   DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
   DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
   DEFINE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DEFINE_HGEMM_WIDTH_VARIANTS
+#undef DEFINE_HGEMM_NHWC_WIDTH_VARIANTS
 #undef DEFINE_HGEMM_VARIANT
 
   // winograd_input_transform 
@@ -455,6 +479,16 @@ namespace vk_shader {
       {spirv_##stem##_vwm4_vwn1##suffix, spirv_##stem##_vwm4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
       {spirv_##stem##_vwm4_vwn2##suffix, spirv_##stem##_vwm4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
       {spirv_##stem##_vwm4_vwn4##suffix, spirv_##stem##_vwm4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
+#define HGEMM_NHWC_WIDTH_SOURCES(stem, suffix, base) \
+      {spirv_##stem##_vwk1_vwn1##suffix, spirv_##stem##_vwk1_vwn1##suffix##_size, &shaderModule_##base##_variants[0]}, \
+      {spirv_##stem##_vwk1_vwn2##suffix, spirv_##stem##_vwk1_vwn2##suffix##_size, &shaderModule_##base##_variants[1]}, \
+      {spirv_##stem##_vwk1_vwn4##suffix, spirv_##stem##_vwk1_vwn4##suffix##_size, &shaderModule_##base##_variants[2]}, \
+      {spirv_##stem##_vwk2_vwn1##suffix, spirv_##stem##_vwk2_vwn1##suffix##_size, &shaderModule_##base##_variants[3]}, \
+      {spirv_##stem##_vwk2_vwn2##suffix, spirv_##stem##_vwk2_vwn2##suffix##_size, &shaderModule_##base##_variants[4]}, \
+      {spirv_##stem##_vwk2_vwn4##suffix, spirv_##stem##_vwk2_vwn4##suffix##_size, &shaderModule_##base##_variants[5]}, \
+      {spirv_##stem##_vwk4_vwn1##suffix, spirv_##stem##_vwk4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
+      {spirv_##stem##_vwk4_vwn2##suffix, spirv_##stem##_vwk4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
+      {spirv_##stem##_vwk4_vwn4##suffix, spirv_##stem##_vwk4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -491,6 +525,14 @@ namespace vk_shader {
       {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32},
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0, hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1, hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0, hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1, hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb1)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0, hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb0)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1, hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
+      HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
       {spirv_extract_channel0_fp32, spirv_extract_channel0_fp32_size, &shaderModule_extract_channel0_fp32},
       {spirv_extract_channel0_p16s16, spirv_extract_channel0_p16s16_size, &shaderModule_extract_channel0_p16s16},
       {spirv_extract_channel0_p32s16, spirv_extract_channel0_p32s16_size, &shaderModule_extract_channel0_p32s16},
@@ -558,6 +600,7 @@ namespace vk_shader {
 #undef XGEMM_DIRECT_WIDTH_SOURCES
 #undef XGEMM_WIDTH_SOURCES
 #undef HGEMM_WIDTH_SOURCES
+#undef HGEMM_NHWC_WIDTH_SOURCES
     shaderModuleFields.clear();
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
@@ -619,22 +662,6 @@ namespace vk_shader {
     } guard{printPipelineCreation, printPipelineCreation};
     printPipelineCreation = print;
     VkResult result;
-    if(tuneParams.vulkan.canUseCooperativeMatrix &&
-       tuneParams.vulkan.shouldUseCooperativeMatrix &&
-       tuneParams.vulkan.canUseFP16Storage &&
-       tuneParams.vulkan.canUseFP16Compute &&
-       tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseFP16Compute) {
-      if((result = createHgemmCooperativeMatrix(hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
-    }
-    if(tuneParams.vulkan.canUseCooperativeMatrix &&
-       tuneParams.vulkan.canUseFP16Storage &&
-       tuneParams.vulkan.canUseFP16Compute &&
-       tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseFP16Compute &&
-       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
-      if((result = createHgemmCooperativeMatrixNCHW(hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW)) != VK_SUCCESS) return result;
-    }
     const bool useGenericNHWC =
       tuneParams.vulkan.shouldUseCooperativeMatrix;
     const bool useTransformerAttentionNHWC = tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
@@ -652,7 +679,7 @@ namespace vk_shader {
         if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
         if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
-          if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrix)) != VK_SUCCESS) return result;
+          if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrixNHWC)) != VK_SUCCESS) return result;
         }
       }
     }
@@ -1018,7 +1045,7 @@ namespace vk_shader {
 
   VkResult ComputePipelines::createHgemmCooperativeMatrixNHWC(
     Pipeline& pipeline,
-    const HGemmCooperativeMatrixTuneParams& tuneParams
+    const HGemmCooperativeMatrixNHWCTuneParams& tuneParams
   ) {
     if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -1035,13 +1062,45 @@ namespace vk_shader {
     spec.MWAVE = tuneParams.MWAVE;
     spec.NWAVE = tuneParams.NWAVE;
     SpecializationData specData(spec);
+    VkShaderModule* shaderModules = nullptr;
+    const char* shaderSuffix = nullptr;
+    const char* shaderStem = tuneParams.accType == 32
+      ? "hgemm_cooperative_matrix_nhwc_acc_fp32"
+      : "hgemm_cooperative_matrix_nhwc_acc_fp16";
+    switch((tuneParams.SA << 1) | tuneParams.SB) {
+      case 0:
+        shaderSuffix = "_sa0_sb0";
+        shaderModules = tuneParams.accType == 32
+          ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb0_variants
+          : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0_variants;
+        break;
+      case 1:
+        shaderSuffix = "_sa0_sb1";
+        shaderModules = tuneParams.accType == 32
+          ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1_variants
+          : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1_variants;
+        break;
+      case 2:
+        shaderSuffix = "_sa1_sb0";
+        shaderModules = tuneParams.accType == 32
+          ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0_variants
+          : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0_variants;
+        break;
+      case 3:
+        shaderSuffix = "_sa1_sb1";
+        shaderModules = tuneParams.accType == 32
+          ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1_variants
+          : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb1_variants;
+        break;
+      default:
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    const int variant = hgemmVariantIndex(tuneParams.VWK, tuneParams.VWN);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    const std::string name = hgemmNHWCVariantName(shaderStem, shaderSuffix, tuneParams.VWK, tuneParams.VWN);
     return createPipeline(
-      tuneParams.accType == 32
-        ? "hgemm_cooperative_matrix_nhwc_acc_fp32"
-        : "hgemm_cooperative_matrix_nhwc_acc_fp16",
-      tuneParams.accType == 32
-        ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32
-        : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16,
+      name, shaderModules[variant],
       3,
       sizeof(HGemmCooperativeMatrixParams),
       pipeline,

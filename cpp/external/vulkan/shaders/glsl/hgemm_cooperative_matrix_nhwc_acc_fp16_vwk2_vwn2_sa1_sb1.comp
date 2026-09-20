@@ -1,0 +1,7 @@
+#version 460
+#define ACC_TYPE 16
+#define SA 1
+#define SB 1
+#define VWK 2
+#define VWN 2
+#include "hgemm_cooperative_matrix_nhwc.glsl"

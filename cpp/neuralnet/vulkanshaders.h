@@ -84,12 +84,34 @@ extern "C" {
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+
+#define DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn4##suffix)
+
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
+
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DECLARE_HGEMM_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_NHWC_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_VARIANT
 
   // winograd_input_transform.glsl
@@ -507,12 +529,31 @@ namespace vk_shader {
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+#define DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn4##suffix)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
   DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
   DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
   DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
   DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
 
 #undef DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS
 #undef DECLARE_HGEMM_SPIRV_VARIANT
 
   extern const unsigned char* spirv_winograd_input_transform_fp32;
@@ -1487,6 +1528,27 @@ struct LocalDimHash {
       bool isSimple() const;
     };
 
+    /** Runtime tuning parameters for the row-major NHWC cooperative-matrix HGEMM. */
+    struct HGemmCooperativeMatrixNHWCTuneParams {
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      int accType = 16;
+      int SA = 0;
+      int SB = 0;
+      int VWK = 1;
+      int VWN = 1;
+
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
     /**
      * Runtime tuning parameters for hgemm_cooperative_matrix_nchw. SB selects the shader binary
      * (shared-memory or direct-filter load); MWG through NWAVE are passed as
@@ -1531,6 +1593,10 @@ struct LocalDimHash {
     bool isValidCooperativeMatrixConfig(
       const VulkanDeviceInfo& deviceInfo,
       const HGemmCooperativeMatrixTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixNHWCTuneParams& params
     );
     bool isValidCooperativeMatrixConfig(
       const VulkanDeviceInfo& deviceInfo,
@@ -1606,6 +1672,7 @@ struct LocalDimHash {
       ConvTuneParams conv3x3;
       ConvTuneParams conv5x5;
       HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
+      HGemmCooperativeMatrixNHWCTuneParams hgemmCooperativeMatrixNHWC;
       HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
       TransformerDualGemmSwiGLUTuneParams transformerDualGemmSwiGLU;
       XgemmTuneParams xgemm;
@@ -1749,6 +1816,17 @@ struct LocalDimHash {
     DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa1_sb1)
     DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
     DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
+#define DECLARE_HGEMM_NHWC_SHADER_MODULES(base) \
+    VkShaderModule shaderModule_##base##_variants[9] = {};
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
+#undef DECLARE_HGEMM_NHWC_SHADER_MODULES
 #undef DECLARE_HGEMM_SHADER_MODULES
     VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
@@ -1897,7 +1975,7 @@ struct LocalDimHash {
     VkResult createNhwcToNchw(Pipeline& pipeline);
     VkResult createIm2ColNHWC(Pipeline& pipeline);
     VkResult createNHWCMatrixToNCHW(Pipeline& pipeline);
-    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNHWCTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
     VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
     VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
