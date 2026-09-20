@@ -792,7 +792,6 @@ namespace vk_shader {
     destroyPipeline(hgemmCooperativeMatrix);
     destroyPipeline(hgemmCooperativeMatrixNCHW);
     destroyPipeline(hgemmCooperativeMatrixNHWC);
-    destroyPipeline(hgemmCooperativeMatrix1x1NHWC);
     destroyPipeline(im2colNHWC);
     destroyPipeline(nhwcMatrixToNchw);
     destroyPipeline(nchwToNhwc);
@@ -1102,7 +1101,7 @@ namespace vk_shader {
     return createPipeline(
       name, shaderModules[variant],
       3,
-      sizeof(HGemmCooperativeMatrixParams),
+      sizeof(HGemmCooperativeMatrixNHWCParams),
       pipeline,
       &specData.info,
       spec.localSizeX,
@@ -1139,7 +1138,7 @@ namespace vk_shader {
         ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32
         : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16,
       3,
-      sizeof(HGemmCooperativeMatrixParams),
+      sizeof(HGemmCooperativeMatrixNHWCParams),
       pipeline,
       &specData.info,
       spec.localSizeX,

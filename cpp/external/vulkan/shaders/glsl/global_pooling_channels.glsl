@@ -33,6 +33,7 @@ layout(push_constant) uniform GlobalPoolingChannelsParams {
   int cSize;
   int xySize;
   int maskSpatialStride;
+  int channelsPadded;
 };
 
 layout(set = 0, binding = 0) readonly buffer g_input_block {
@@ -117,14 +118,14 @@ void globalPoolingChannelsNHWC()
   const int n = GlobalId2();
   const int localId1 = LocalId1();
   const int localId2 = LocalId2();
-  const int channelsPadded = (cSize + 3) & ~3;
+  const int channelStride = int(channelsPadded);
 
   float sum = 0.0f;
   float _max = -1.0f;
   if(n < nSize && c < cSize) {
     // Sum up the elements that this group member is responsible for.
     for(int xy = xyBase; xy < xySize; xy += XYSTRIDE) {
-      int idx = (n * xySize + xy) * channelsPadded + c;
+      int idx = (n * xySize + xy) * channelStride + c;
       float v = LOAD(g_input,idx);
       sum += v;
       int maskIdx = n * maskSpatialStride + xy;

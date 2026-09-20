@@ -1353,6 +1353,15 @@ namespace {
     bool printOnlyOnImprovement;
   };
 
+  bool usesGenericNHWC(const VulkanTuneParams& config) {
+    return config.vulkan.canUseCooperativeMatrix &&
+           config.vulkan.canUseFP16Storage &&
+           config.vulkan.canUseFP16Compute &&
+           config.vulkan.shouldUseFP16Storage &&
+           config.vulkan.shouldUseFP16Compute &&
+           config.vulkan.shouldUseCooperativeMatrix;
+  }
+
   bool isSupportedCooperativeMatrixShape(
     const TuningContext& context,
     int accType,
@@ -2008,6 +2017,14 @@ namespace {
       VkResult result = VK_SUCCESS;
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
+      const bool useNHWC = usesGenericNHWC(config);
+      const int nhwcSpatialAlignment = useNHWC
+        ? std::max(1, config.hgemmCooperativeMatrixNHWC.MWG) : 1;
+      const int nhwcChannelAlignment = useNHWC
+        ? std::max(1, config.hgemmCooperativeMatrixNHWC.NWG) : 1;
+      const size_t nhwcSpatialSize = vk_helper::roundUpToMultiple(
+        logicalXYSize, static_cast<size_t>(nhwcSpatialAlignment)
+      );
       const bool useNCHWCooperativeMatrix =
         config.vulkan.canUseCooperativeMatrix &&
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
@@ -2023,12 +2040,14 @@ namespace {
         config.vulkan.canUseCooperativeMatrix &&
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         config.hgemmCooperativeMatrixNCHW.isValid();
-      const size_t xySize = usePaddedNCHWXY || usePaddedGpoolXY
-        ? vk_helper::roundUpToMultiple(
+      const size_t xySize = useNHWC
+        ? nhwcSpatialSize
+        : (usePaddedNCHWXY || usePaddedGpoolXY
+          ? vk_helper::roundUpToMultiple(
             logicalXYSize,
             static_cast<size_t>(config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment())
           )
-        : logicalXYSize;
+          : logicalXYSize);
       const bool addChannelBiasesUsingFP16Storage =
         config.vulkan.canUseFP16Storage &&
         config.vulkan.canUseFP16Compute &&
@@ -2055,12 +2074,12 @@ namespace {
         (config.vulkan.shouldUseCooperativeMatrix ||
          config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
       const size_t addChannelBiasesSpatialSize = addChannelBiasesUseNHWC
-        ? logicalXYSize : addChannelBiasesXYSize;
+        ? nhwcSpatialSize : addChannelBiasesXYSize;
       const size_t addChannelBiasesChannels = static_cast<size_t>(
         std::max(1, context.modelInfo.trunkNumChannels)
       );
       const size_t addChannelBiasesChannelsPadded = addChannelBiasesUseNHWC
-        ? vk_helper::roundUpToMultiple(addChannelBiasesChannels, size_t(4))
+        ? vk_helper::roundUpToMultiple(addChannelBiasesChannels, static_cast<size_t>(nhwcChannelAlignment))
         : addChannelBiasesChannels;
       const XgemmTuneParams& xgemmParams =
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
@@ -2081,6 +2100,9 @@ namespace {
         context.modelInfo.transformerNumHeads * context.modelInfo.transformerHeadDim,
         context.modelInfo.transformerNumKVHeads * context.modelInfo.transformerVHeadDim
       }));
+      const size_t maxChannelsPadded = vk_helper::roundUpToMultiple(
+        maxChannels, static_cast<size_t>(nhwcChannelAlignment)
+      );
       const size_t maxConvChannels = static_cast<size_t>(std::max({
         1, context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels,
         context.modelInfo.regularNumChannels, context.modelInfo.maxConvChannels3x3,
@@ -2172,7 +2194,7 @@ namespace {
           ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
           : attentionOutputChannels);
       const size_t transformElements = std::max({
-        static_cast<size_t>(batchSize) * maxChannels * xySize,
+        static_cast<size_t>(batchSize) * maxChannelsPadded * xySize,
         paddedTiles * paddedChannels * 36,
         attentionOutputElements
       });
@@ -2263,10 +2285,15 @@ namespace {
         return true;
       };
       const auto fillPaddedNCHWInput = [&](vector<float>& data, size_t channels, Rand& rand) {
+        const size_t channelStride = vk_helper::roundUpToMultiple(
+          channels, static_cast<size_t>(nhwcChannelAlignment)
+        );
         for(size_t n = 0; n < batchSize; n++)
           for(size_t c = 0; c < channels; c++)
             for(size_t xy = 0; xy < logicalXYSize; xy++)
-              data[(n * channels + c) * xySize + xy] = static_cast<float>(rand.nextDouble());
+              data[useNHWC
+                ? (n * xySize + xy) * channelStride + c
+                : (n * channels + c) * xySize + xy] = static_cast<float>(rand.nextDouble());
       };
       const auto fillTransformerRopeTable = [&](vector<float>& data, bool sine) {
         const int headDim = std::max(1, context.modelInfo.transformerHeadDim);
@@ -2393,10 +2420,15 @@ namespace {
               }
               else if(globalPoolingInput) {
                 const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
+                const size_t gpoolChannelsPadded = vk_helper::roundUpToMultiple(
+                  static_cast<size_t>(gpoolChannels), static_cast<size_t>(nhwcChannelAlignment)
+                );
                 for(size_t n = 0; n < batchSize; n++)
                   for(int c = 0; c < gpoolChannels; c++)
                     for(size_t xy = 0; xy < logicalXYSize; xy++)
-                      data[(n * gpoolChannels + c) * xySize + xy] =
+                      data[useNHWC
+                        ? (n * xySize + xy) * gpoolChannelsPadded + c
+                        : (n * gpoolChannels + c) * xySize + xy] =
                         static_cast<float>(rand.nextDouble());
               }
               else if(addPointwiseInput || swigluInput) {
@@ -2562,6 +2594,7 @@ namespace {
         const int cpuBatchSize = std::max(1, context.batchSize);
         const int cpuXYSize = static_cast<int>(xySize);
         const int cpuChannels = std::max(1, context.modelInfo.trunkNumChannels);
+        const int cpuChannelsPadded = vk_helper::roundUpToMultipleInt(cpuChannels, nhwcChannelAlignment);
 
         if(name.find("transformer_spatial_rms_norm_sum_sq") == 0 ||
            name.find("transformer_spatial_rms_norm_reduce") == 0)
@@ -2580,7 +2613,10 @@ namespace {
               float sum = 0.0f;
               float maximum = -1.0f;
               for(int xy = 0; xy < cpuXYSize; xy++) {
-                const float value = input[(n * channels + c) * cpuXYSize + xy];
+                const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment);
+                const float value = input[useNHWC
+                  ? (n * cpuXYSize + xy) * channelsPadded + c
+                  : (n * channels + c) * cpuXYSize + xy];
                 sum += value;
                 maximum = std::max(maximum, value + mask[n * cpuXYSize + xy] - 1.0f);
               }
@@ -2603,7 +2639,9 @@ namespace {
             for(int c = 0; c < channels; c++) {
               float sum = 0.0f;
               for(int xy = 0; xy < cpuXYSize; xy++)
-                sum += input[(n * channels + c) * cpuXYSize + xy];
+                sum += input[useNHWC
+                  ? (n * cpuXYSize + xy) * vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment) + c
+                  : (n * channels + c) * cpuXYSize + xy];
               means[c] = sum / divisor;
             }
             const float scale = (sqrtf(divisor) - 14.0f) * 0.1f;
@@ -2626,7 +2664,7 @@ namespace {
         if(name.find("add_pointwise") == 0) {
           const vector<float>& accum = buffer(0);
           const vector<float>& value = buffer(1);
-          const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannels * cpuXYSize;
+          const size_t count = static_cast<size_t>(cpuBatchSize) * cpuChannelsPadded * cpuXYSize;
           for(size_t i = 0; i < count; i++)
             cpuReference->push_back(accum[i] + value[i]);
           return true;
@@ -2635,7 +2673,10 @@ namespace {
           const vector<float>& input = buffer(0);
           const vector<float>& gate = buffer(1);
           const size_t count = static_cast<size_t>(cpuBatchSize) *
-            std::max(cpuChannels, context.modelInfo.transformerFFNChannels) * cpuXYSize;
+            vk_helper::roundUpToMultiple(
+              static_cast<size_t>(std::max(cpuChannels, context.modelInfo.transformerFFNChannels)),
+              static_cast<size_t>(nhwcChannelAlignment)
+            ) * cpuXYSize;
           for(size_t i = 0; i < count; i++)
             cpuReference->push_back(input[i] / (1.0f + expf(-input[i])) * gate[i]);
           return true;
@@ -2773,22 +2814,34 @@ namespace {
           const vector<float>& gamma = buffer(2);
           const vector<float>& beta = buffer(3);
           const vector<float>& mask = buffer(4);
+          vector<float> nhwcOutput;
+          if(useNHWC)
+            nhwcOutput.resize(static_cast<size_t>(cpuBatchSize) * cpuXYSize * cpuChannelsPadded, 0.0f);
           for(int n = 0; n < cpuBatchSize; n++) {
             vector<float> rms(cpuXYSize);
             for(int xy = 0; xy < cpuXYSize; xy++) {
               const float maskValue = mask[n * cpuXYSize + xy];
               float sumSq = 0.0f;
               for(int c = 0; c < cpuChannels; c++) {
-                const float value = input[(n * cpuChannels + c) * cpuXYSize + xy] * maskValue;
+                const float value = input[useNHWC
+                  ? (n * cpuXYSize + xy) * cpuChannelsPadded + c
+                  : (n * cpuChannels + c) * cpuXYSize + xy] * maskValue;
                 sumSq += value * value;
               }
               rms[xy] = 1.0f / sqrtf(sumSq / cpuChannels + 1e-6f);
             }
             for(int c = 0; c < cpuChannels; c++)
               for(int xy = 0; xy < cpuXYSize; xy++)
-                cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms[xy] * gamma[c] + beta[c]) *
-                  mask[n * cpuXYSize + xy]);
+                if(useNHWC)
+                  nhwcOutput[(n * cpuXYSize + xy) * cpuChannelsPadded + c] =
+                    (input[(n * cpuXYSize + xy) * cpuChannelsPadded + c] * rms[xy] * gamma[c] + beta[c]) *
+                    mask[n * cpuXYSize + xy];
+                else
+                  cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms[xy] * gamma[c] + beta[c]) *
+                    mask[n * cpuXYSize + xy]);
           }
+          if(useNHWC)
+            cpuReference->insert(cpuReference->end(), nhwcOutput.begin(), nhwcOutput.end());
           return true;
         }
         if(name.find("transformer_spatial_rms_norm_apply") == 0) {
@@ -2797,19 +2850,31 @@ namespace {
           const vector<float>& beta = buffer(3);
           const vector<float>& mask = buffer(4);
           const vector<float>& maskSum = buffer(5);
+          vector<float> nhwcOutput;
+          if(useNHWC)
+            nhwcOutput.resize(static_cast<size_t>(cpuBatchSize) * cpuXYSize * cpuChannelsPadded, 0.0f);
           for(int n = 0; n < cpuBatchSize; n++) {
             float sumSq = 0.0f;
             for(int c = 0; c < cpuChannels; c++)
               for(int xy = 0; xy < cpuXYSize; xy++) {
-                const float value = input[(n * cpuChannels + c) * cpuXYSize + xy] * mask[n * cpuXYSize + xy];
+                const float value = input[useNHWC
+                  ? (n * cpuXYSize + xy) * cpuChannelsPadded + c
+                  : (n * cpuChannels + c) * cpuXYSize + xy] * mask[n * cpuXYSize + xy];
                 sumSq += value * value;
               }
             const float rms = 1.0f / sqrtf(sumSq / (maskSum[n] * cpuChannels) + 1e-6f);
             for(int c = 0; c < cpuChannels; c++)
               for(int xy = 0; xy < cpuXYSize; xy++)
-                cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms * gamma[c] + beta[c]) *
-                  mask[n * cpuXYSize + xy]);
+                if(useNHWC)
+                  nhwcOutput[(n * cpuXYSize + xy) * cpuChannelsPadded + c] =
+                    (input[(n * cpuXYSize + xy) * cpuChannelsPadded + c] * rms * gamma[c] + beta[c]) *
+                    mask[n * cpuXYSize + xy];
+                else
+                  cpuReference->push_back((input[(n * cpuChannels + c) * cpuXYSize + xy] * rms * gamma[c] + beta[c]) *
+                    mask[n * cpuXYSize + xy]);
           }
+          if(useNHWC)
+            cpuReference->insert(cpuReference->end(), nhwcOutput.begin(), nhwcOutput.end());
           return true;
         }
         error = "no CPU reference implementation for " + name;
@@ -2966,7 +3031,9 @@ namespace {
           );
         }
         else if(pipeline->name.find("hgemm_cooperative_matrix_nhwc_") == 0) {
-          vk_shader::push::HGemmCooperativeMatrixParams params = {runGemmM, runGemmN, runGemmK};
+          vk_shader::push::HGemmCooperativeMatrixNHWCParams params = {
+            runGemmM, runGemmN, runGemmK, runGemmK, runGemmN
+          };
           push(params);
           dispatch(runGemmM / config.hgemmCooperativeMatrixNHWC.MWG, runGemmN / config.hgemmCooperativeMatrixNHWC.NWG, gemmBatch);
         }
@@ -3035,7 +3102,11 @@ namespace {
         }
         else if(pipeline->name.find("global_pooling_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-          vk_shader::push::GlobalPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize,pipelineXYSize};
+          const int gpoolChannelsPadded = vk_helper::roundUpToMultipleInt(gpoolChannels, nhwcChannelAlignment);
+          vk_shader::push::GlobalPoolingChannelsParams params = {
+            batchSize, gpoolChannels, pipelineXYSize, pipelineXYSize,
+            useNHWC ? gpoolChannelsPadded : gpoolChannels
+          };
           push(params);
           dispatch(
             1,
@@ -3045,7 +3116,11 @@ namespace {
         }
         else if(pipeline->name.find("value_head_pool_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
-          vk_shader::push::ValueHeadPoolingChannelsParams params = {batchSize,gpoolChannels,pipelineXYSize};
+          const int gpoolChannelsPadded = vk_helper::roundUpToMultipleInt(gpoolChannels, nhwcChannelAlignment);
+          vk_shader::push::ValueHeadPoolingChannelsParams params = {
+            batchSize, gpoolChannels, pipelineXYSize,
+            useNHWC ? gpoolChannelsPadded : gpoolChannels
+          };
           push(params);
           dispatch(
             1,
@@ -3063,15 +3138,21 @@ namespace {
           dispatch(1, 1, static_cast<uint32_t>((batchSize + pipeline->localSizeZ - 1) / pipeline->localSizeZ));
         }
         else if(pipeline->name.find("add_pointwise") == 0) {
-          vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(batchSize * channels * pipelineXYSize)};
+          const size_t storageChannels = vk_helper::roundUpToMultiple(
+            static_cast<size_t>(channels), static_cast<size_t>(nhwcChannelAlignment)
+          );
+          vk_shader::push::AddPointWiseParams params = {
+            static_cast<uint32_t>(batchSize * storageChannels * pipelineXYSize)
+          };
           push(params);
           dispatch((params.size + config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX - 1) /
                    (config.pointwise.ELTS_PER_THREAD * pipeline->localSizeX));
         }
         else if(pipeline->name.find("add_channel_bias_") == 0) {
+          const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment);
           vk_shader::push::AddChannelBiasNCHWParams params = {
             static_cast<uint32_t>(batchSize * channels), static_cast<uint32_t>(addChannelBiasesSpatialSize),
-            static_cast<uint32_t>(channels)
+            static_cast<uint32_t>(channels), static_cast<uint32_t>(useNHWC ? channelsPadded : channels)
           };
           push(params);
           dispatch(
@@ -3152,7 +3233,11 @@ namespace {
           }
         }
         else if(pipeline->name.find("transformer_rms_norm") == 0) {
-          vk_shader::push::TransformerRMSNormPushParams params = {batchSize,channels,pipelineXYSize,1e-6f,channels};
+          const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment);
+          vk_shader::push::TransformerRMSNormPushParams params = {
+            batchSize, channels, pipelineXYSize, 1e-6f,
+            useNHWC ? channelsPadded : channels
+          };
           push(params);
           dispatch(
             static_cast<uint32_t>((pipelineXYSize + config.rmsNorm.WG_XY_SIZE - 1) / config.rmsNorm.WG_XY_SIZE),
@@ -3168,7 +3253,11 @@ namespace {
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_sum_sq") == 0) {
           const vkcompute::SpatialRMSNormSizing sizing = vkcompute::computeSpatialRMSNormSizing(config.spatialRMSNorm.TILE_SIZE, channels * pipelineXYSize);
-          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {batchSize,channels,pipelineXYSize,sizing.tilesPerGroupPass1,channels};
+          const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment);
+          vk_shader::push::TransformerSpatialRMSNormSumSqPushParams params = {
+            batchSize, channels, pipelineXYSize, sizing.tilesPerGroupPass1,
+            useNHWC ? channelsPadded : channels
+          };
           push(params);
           dispatch(static_cast<uint32_t>(sizing.numCHWWorkgroups), static_cast<uint32_t>(batchSize));
         }
@@ -3179,7 +3268,11 @@ namespace {
           dispatch(1, static_cast<uint32_t>(batchSize));
         }
         else if(pipeline->name.find("transformer_spatial_rms_norm_apply") == 0) {
-          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {batchSize,channels,pipelineXYSize,1e-6f,channels};
+          const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, nhwcChannelAlignment);
+          vk_shader::push::TransformerSpatialRMSNormApplyPushParams params = {
+            batchSize, channels, pipelineXYSize, 1e-6f,
+            useNHWC ? channelsPadded : channels
+          };
           push(params);
           dispatch(
             static_cast<uint32_t>((channels * pipelineXYSize + config.spatialRMSNorm.APPLY_ELTS_PER_THREAD * pipeline->localSizeX - 1) /
@@ -3816,7 +3909,10 @@ namespace {
       if(plan.kernelName == "spatialRMSNorm" && !spatialValidationBuffers.empty()) {
         const Pipeline* applyPipeline = pipelines[2];
         const uint32_t binding = outputBinding(applyPipeline);
-        const size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
+        const size_t count = batchSize * vk_helper::roundUpToMultiple(
+          static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels)),
+          static_cast<size_t>(nhwcChannelAlignment)
+        ) * xySize;
         for(VulkanBuffer* validationBuffer: spatialValidationBuffers) {
           vector<float> output(count);
           if(halfBinding(applyPipeline, binding)) {
@@ -3846,9 +3942,15 @@ namespace {
           for(size_t pipelineIndex = 0; pipelineIndex < pipelines.size(); pipelineIndex++) {
             const Pipeline* pipeline = pipelines[pipelineIndex];
             const uint32_t binding = outputBinding(pipeline);
-            size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
+            size_t count = batchSize * vk_helper::roundUpToMultiple(
+              static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels)),
+              static_cast<size_t>(nhwcChannelAlignment)
+            ) * xySize;
             if(pipeline->name.find("transformer_swiglu") == 0)
-              count = batchSize * std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels) * xySize;
+              count = batchSize * vk_helper::roundUpToMultiple(
+                static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels)),
+                static_cast<size_t>(nhwcChannelAlignment)
+              ) * xySize;
             const size_t validationIndex = repeat * pipelines.size() + pipelineIndex;
             vector<float> output(count);
             if(halfBinding(pipeline, binding)) {
@@ -3877,11 +3979,17 @@ namespace {
       if((plan.kernelName == "addChannelBiases" || plan.kernelName == "transformerRMSNorm") &&
          !pointwiseValidationBuffers.empty()) {
         const uint32_t binding = outputBinding(pipelines[0]);
-        size_t count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * xySize;
+        size_t count = batchSize * vk_helper::roundUpToMultiple(
+          static_cast<size_t>(std::max(1, context.modelInfo.trunkNumChannels)),
+          static_cast<size_t>(nhwcChannelAlignment)
+        ) * xySize;
         if(pipelines[0]->name.find("add_channel_bias_") == 0)
-          count = batchSize * std::max(1, context.modelInfo.trunkNumChannels) * addChannelBiasesXYSize;
+          count = batchSize * addChannelBiasesChannelsPadded * addChannelBiasesSpatialSize;
         else if(pipelines[0]->name.find("transformer_swiglu") == 0)
-          count = batchSize * std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels) * xySize;
+          count = batchSize * vk_helper::roundUpToMultiple(
+            static_cast<size_t>(std::max(context.modelInfo.trunkNumChannels, context.modelInfo.transformerFFNChannels)),
+            static_cast<size_t>(nhwcChannelAlignment)
+          ) * xySize;
         for(VulkanBuffer* validationBuffer: pointwiseValidationBuffers) {
           vector<float> output(count);
           if(halfBinding(pipelines[0], binding)) {
@@ -5071,6 +5179,7 @@ namespace {
           pipelines.destroyPipeline(*pipeline);
         previousTargets.clear();
         vector<const Pipeline*> targets;
+        pipelines.useNHWC = usesGenericNHWC(candidate);
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
           if(isReferenceCandidate) {
@@ -6331,7 +6440,9 @@ namespace {
     static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
       if(context.modelInfo.transformerHeadDim <= 0)
         return VK_ERROR_FEATURE_NOT_PRESENT;
-      VkResult result = pipelines.createTransformerRMSNorm(pipelines.transformerRmsNorm, config.rmsNorm, config.vulkan);
+      VkResult result = pipelines.createTransformerRMSNorm(
+        pipelines.transformerRmsNorm, config.rmsNorm, config.vulkan, usesGenericNHWC(config)
+      );
       if(result == VK_SUCCESS) targets.push_back(&pipelines.transformerRmsNorm);
       return result;
     }
@@ -6355,13 +6466,18 @@ namespace {
       return configs;
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createTransformerSpatialRMSNormSumSq(pipelines.transformerSpatialRMSNormSumSq, config.spatialRMSNorm, config.vulkan);
+      const bool useNHWC = usesGenericNHWC(config);
+      VkResult result = pipelines.createTransformerSpatialRMSNormSumSq(
+        pipelines.transformerSpatialRMSNormSumSq, config.spatialRMSNorm, config.vulkan, useNHWC
+      );
       if(result != VK_SUCCESS) return result;
       targets.push_back(&pipelines.transformerSpatialRMSNormSumSq);
       result = pipelines.createTransformerSpatialRMSNormReduce(pipelines.transformerSpatialRMSNormReduce, config.spatialRMSNorm, config.vulkan);
       if(result != VK_SUCCESS) return result;
       targets.push_back(&pipelines.transformerSpatialRMSNormReduce);
-      result = pipelines.createTransformerSpatialRMSNormApply(pipelines.transformerSpatialRMSNormApply, config.spatialRMSNorm, config.vulkan);
+      result = pipelines.createTransformerSpatialRMSNormApply(
+        pipelines.transformerSpatialRMSNormApply, config.spatialRMSNorm, config.vulkan, useNHWC
+      );
       if(result == VK_SUCCESS)
         targets.push_back(&pipelines.transformerSpatialRMSNormApply);
       return result;
@@ -6374,13 +6490,18 @@ namespace {
   };
 
   void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
-    runTuner<Conv3x3InputTuner>(context, config);
-    runTuner<Conv3x3OutputTuner>(context, config);
-    config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
-    config.conv5x5.inputTransformLocalYSize = config.conv3x3.inputTransformLocalYSize;
-    config.conv5x5.outputTransformLocalXSize = config.conv3x3.outputTransformLocalXSize;
-    config.conv5x5.outputTransformLocalYSize = config.conv3x3.outputTransformLocalYSize;
-    config.conv5x5.outputTransformLocalZSize = config.conv3x3.outputTransformLocalZSize;
+    if(!config.vulkan.shouldUseCooperativeMatrix) {
+      runTuner<Conv3x3InputTuner>(context, config);
+      runTuner<Conv3x3OutputTuner>(context, config);
+      config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
+      config.conv5x5.inputTransformLocalYSize = config.conv3x3.inputTransformLocalYSize;
+      config.conv5x5.outputTransformLocalXSize = config.conv3x3.outputTransformLocalXSize;
+      config.conv5x5.outputTransformLocalYSize = config.conv3x3.outputTransformLocalYSize;
+      config.conv5x5.outputTransformLocalZSize = config.conv3x3.outputTransformLocalZSize;
+    }
+    else if(context.logger != nullptr) {
+      context.logger->write("Skipping Vulkan Winograd tuning because cooperative-matrix NHWC is selected");
+    }
     runTuner<GPoolTuner>(context, config);
     const bool hasTransformerModel =
       context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0 &&
@@ -6869,10 +6990,10 @@ void VulkanTuner::tune(
   runTuner<XgemmDirectTuner>(context, tunedConfig);
   const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
   tunedConfig.xgemm16 = tunedConfig.xgemm;
+  tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
   tuneCooperativeMatrices(
     context, tunedConfig, xgemmCallsPerSecond
   );
-  tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);

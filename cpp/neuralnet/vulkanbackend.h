@@ -187,6 +187,16 @@ struct ComputeHandleInternal {
       return tuneParams.xgemm16.KWG;
     return tuneParams.xgemm.KWG;
   }
+
+  int getNHWCChannelsPadded(int channels) const {
+    if(!pipelines->useNHWC)
+      return channels;
+    if(tuneParams.hgemmCooperativeMatrixNHWC.NWG <= 0)
+      return channels;
+    return vk_helper::roundUpToMultipleInt(
+      channels, tuneParams.hgemmCooperativeMatrixNHWC.NWG
+    );
+  }
 };
 
 
@@ -235,9 +245,7 @@ struct ScratchBuffers {
   }
 
   size_t getBufSizeXY(int channels) const {
-    const int storageChannels = handle->pipelines->useNHWC
-      ? vk_helper::roundUpToMultipleInt(channels, 4)
-      : channels;
+    const int storageChannels = handle->getNHWCChannelsPadded(channels);
     return static_cast<size_t>(storageChannels) * batchXYBytes;
   }
 

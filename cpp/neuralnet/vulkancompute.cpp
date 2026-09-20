@@ -336,6 +336,8 @@ void transformerScaleDotProductCooperative(
   int spatialStride,
   int qkvChannels,
   int outputChannels,
+  int qkvChannelsPadded,
+  int outputChannelsPadded,
   int qTotalDim,
   int kTotalDim,
   float scale,
@@ -359,8 +361,10 @@ void transformerScaleDotProductCooperative(
     return;
   }
 
-  const int qkvChannelsPadded = vk_helper::roundUpToMultipleInt(qkvChannels, 4);
-  const int outputChannelsPadded = vk_helper::roundUpToMultipleInt(outputChannels, 4);
+  if(qkvChannelsPadded < qkvChannels || outputChannelsPadded < outputChannels) {
+    *result = VK_ERROR_INITIALIZATION_FAILED;
+    return;
+  }
   const int qkvBatchStride = seqLen * qkvChannelsPadded;
   const int outputBatchStride = seqLen * outputChannelsPadded;
 
@@ -450,6 +454,7 @@ void extractChannel0(
   int nhwcSpatialSize,
   int nchwSpatialStride,
   int logicalSpatialSize,
+  int channelsPadded,
   bool useNHWC,
   bool begin
 ) {
@@ -498,7 +503,8 @@ void extractChannel0(
     numInputChannels,
     nhwcSpatialSize,
     nchwSpatialStride,
-    logicalSpatialSize
+    logicalSpatialSize,
+    channelsPadded
   };
   vkCmdPushConstants(
     commandBuffer,
@@ -650,12 +656,15 @@ void doHgemmCooperativeMatrixNHWCImpl(
   int M,
   int N,
   int K,
+  int aRowStride,
+  int cRowStride,
   const TuneParams& params,
   VkResult* result
 ) {
   assert(device != nullptr && pipeline != nullptr && cb != VK_NULL_HANDLE);
   assert(descriptorSet != VK_NULL_HANDLE && A != nullptr && B != nullptr && C != nullptr && result != nullptr);
-  if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 || !params.isValid() ||
+  if(batchSize <= 0 || M <= 0 || N <= 0 || K <= 0 ||
+     aRowStride < K || cRowStride < N || !params.isValid() ||
      M % params.MWG != 0 || N % params.NWG != 0 || K % params.KWG != 0) {
     *result = VK_ERROR_INITIALIZATION_FAILED;
     return;
@@ -671,7 +680,9 @@ void doHgemmCooperativeMatrixNHWCImpl(
   vkCmdBindDescriptorSets(
     cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
   );
-  const vk_shader::push::HGemmCooperativeMatrixParams pushParams = {M, N, K};
+  const vk_shader::push::HGemmCooperativeMatrixNHWCParams pushParams = {
+    M, N, K, aRowStride, cRowStride
+  };
   vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
   vkCmdDispatch(
     cb,
@@ -697,12 +708,15 @@ void doHgemmCooperativeMatrixNHWC(
   int M,
   int N,
   int K,
+  int aRowStride,
+  int cRowStride,
   const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
   VkResult* result
 ) {
   (void)tuneParams;
   doHgemmCooperativeMatrixNHWCImpl(
-    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K, params, result
+    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
+    aRowStride, cRowStride, params, result
   );
 }
 
@@ -719,12 +733,15 @@ void doHgemmCooperativeMatrixNHWC(
   int M,
   int N,
   int K,
+  int aRowStride,
+  int cRowStride,
   const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
   VkResult* result
 ) {
   (void)tuneParams;
   doHgemmCooperativeMatrixNHWCImpl(
-    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K, params, result
+    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
+    aRowStride, cRowStride, params, result
   );
 }
 
@@ -1370,8 +1387,9 @@ void doTransformerDualGemmSwiGLU(
     return;
   }
 
-  const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, 4);
-  const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, 4);
+  const int nhwcChannelAlignment = tuneParams.hgemmCooperativeMatrixNHWC.NWG;
+  const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, nhwcChannelAlignment);
+  const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, nhwcChannelAlignment);
   (void)nchwToNhwcPipeline;
   (void)nchwToNhwcDescriptorSet;
   (void)nhwcToNchwPipeline;

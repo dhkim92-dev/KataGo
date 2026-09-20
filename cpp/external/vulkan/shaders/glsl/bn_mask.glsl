@@ -16,6 +16,7 @@ layout(push_constant) uniform BatchNormMaskFp32Params {
     int cSize;
     int xySize;
     int maskSpatialStride;
+    int channelsPadded;
 };
 
 layout(constant_id = 3) const int USE_NHWC = 0;
@@ -70,9 +71,9 @@ void bnMaskNCHW(int xy, int c) {
 }
 
 void bnMaskNHWC(int xy, int c) {
-  const int channelsPadded = (cSize + 3) & ~3;
+  const int channelStride = int(channelsPadded);
   for(int n = 0; n < nSize; n++) {
-    const int idx = (n * xySize + xy) * channelsPadded + c;
+    const int idx = (n * xySize + xy) * channelStride + c;
     bnMaskElement(idx, n, c, xy);
   }
 }
@@ -88,4 +89,3 @@ void main() {
     }
   }
 }
-

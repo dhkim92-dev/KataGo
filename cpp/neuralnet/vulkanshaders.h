@@ -48,6 +48,7 @@ extern "C" {
   extern const unsigned char* _binary_nhwc_matrix_to_nchw_p16s16_end;
   extern const size_t _binary_nhwc_matrix_to_nchw_p16s16_size;
 
+
   extern const unsigned char _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_start[];
   extern const unsigned char* _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_end;
   extern const size_t _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_size;
@@ -1234,6 +1235,7 @@ struct LocalDimHash {
       uint32_t numChannels;
       uint32_t nnXYLen;
       uint32_t maskSpatialStride;
+      uint32_t channelsPadded;
     };
 
     /**
@@ -1264,6 +1266,7 @@ struct LocalDimHash {
       int cSize;
       int xySize;
       int maskSpatialStride;
+      int channelsPadded;
     };
 
     /**
@@ -1273,6 +1276,7 @@ struct LocalDimHash {
       int nSize;
       int cSize;
       int xySize;
+      int channelsPadded;
     };
 
     /**
@@ -1289,6 +1293,7 @@ struct LocalDimHash {
       uint32_t ncSize;
       uint32_t xySize;
       uint32_t cSize;
+      uint32_t channelsPadded;
     };
 
     /**
@@ -1313,6 +1318,7 @@ struct LocalDimHash {
       int nhwcSpatialSize;
       int nchwSpatialStride;
       int logicalSpatialSize;
+      int channelsPadded;
     };
 
     struct NCHWPushConstantParams {
@@ -1343,6 +1349,14 @@ struct LocalDimHash {
       int M;
       int N;
       int K;
+    };
+
+    struct HGemmCooperativeMatrixNHWCParams {
+      int M;
+      int N;
+      int K;
+      int aRowStride;
+      int cRowStride;
     };
 
     struct TransformerRMSNormPushParams {
@@ -1885,7 +1899,6 @@ struct LocalDimHash {
     Pipeline im2colNHWC;
     Pipeline nhwcMatrixToNchw;
     Pipeline hgemmCooperativeMatrixNHWC;
-    Pipeline hgemmCooperativeMatrix1x1NHWC;
     Pipeline winogradInputTransform3x3;
     Pipeline winogradInputTransform5x5;
 

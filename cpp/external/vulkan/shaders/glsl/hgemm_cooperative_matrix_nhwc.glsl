@@ -88,6 +88,8 @@ layout(push_constant) uniform HGemmCooperativeMatrixNHWCParams {
   int mSize;
   int nSize;
   int kSize;
+  int aRowStride;
+  int cRowStride;
 };
 
 #if SA == 1
@@ -126,7 +128,7 @@ void loadSharedTiles(int kwg, int baseA, int baseB, int groupMBase, int groupNBa
   for(int i = tid; i < aVectorCount; i += numThreads) {
     const int m = i / aVectorColumns;
     const int k = i - m * aVectorColumns;
-    aTile[i] = aData[(baseA + (groupMBase + m) * kSize + kwg + k * VWK) / VWK];
+    aTile[i] = aData[(baseA + (groupMBase + m) * aRowStride + kwg + k * VWK) / VWK];
   }
 #endif
 #if SB == 1
@@ -153,11 +155,11 @@ void main() {
   const int subgroupN = subgroupLinear / subgroupCountM;
   const int groupMBase = groupM * MWG;
   const int groupNBase = groupN * NWG;
-  const int baseA = batch * mSize * kSize;
+  const int baseA = batch * mSize * aRowStride;
   // The NHWC Conv filter is one shared [K,N] matrix for every batch item.
   // Only A and C carry the dispatch-z batch stride.
   const int baseB = 0;
-  const int baseC = batch * mSize * nSize;
+  const int baseC = batch * mSize * cRowStride;
 
   coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag[MWI];
   coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> bFrag;
@@ -185,8 +187,8 @@ void main() {
 #else
         coopMatLoad(
           aFrag[aWaveId], aData,
-          baseA + (groupMBase + aOffset) * kSize + kwg + kOffset,
-          kSize,
+          baseA + (groupMBase + aOffset) * aRowStride + kwg + kOffset,
+          aRowStride,
           gl_CooperativeMatrixLayoutRowMajor
         );
 #endif
@@ -226,7 +228,7 @@ void main() {
 #if ACC_TYPE == 16
       coopMatStore(
         cFrag[bWaveId][aWaveId], cData,
-        baseC + (groupMBase + aOffset) * nSize + groupNBase + bOffset, nSize,
+         baseC + (groupMBase + aOffset) * cRowStride + groupNBase + bOffset, cRowStride,
         gl_CooperativeMatrixLayoutRowMajor
       );
 #else
@@ -248,7 +250,7 @@ void main() {
   for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
     const int m = tileVector / tileVectorColumns;
     const int n = (tileVector - m * tileVectorColumns) * VWN;
-    const int cIndex = (baseC + (groupMBase + m) * nSize + groupNBase + n) / VWN;
+    const int cIndex = (baseC + (groupMBase + m) * cRowStride + groupNBase + n) / VWN;
 #if VWN == 1
     cData[cIndex] = float16_t(cTile[m * NWG + n]);
 #else

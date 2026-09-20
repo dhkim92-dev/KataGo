@@ -20,6 +20,7 @@ layout(push_constant) uniform ExtractChannel0Params {
     int nhwcSpatialSize; // NHWC staging spatial size
     int nchwSpatialStride; // External NCHW spatial stride
     int logicalSpatialSize; // Unpadded spatial size
+    int channelsPadded; // NHWC row stride in elements
 };
 
 // Descriptor Set bindings
@@ -40,9 +41,9 @@ void extractNCHW(const int nIdx, const int xyIdx) {
 }
 
 void extractNHWC(const int nIdx, const int xyIdx) {
-    const int channelsPadded = (cSize + 3) & ~3;
+    const int channelStride = int(channelsPadded);
     real result = xyIdx < logicalSpatialSize
-        ? LOAD(d_input, (nIdx * nhwcSpatialSize + xyIdx) * channelsPadded)
+        ? LOAD(d_input, (nIdx * nhwcSpatialSize + xyIdx) * channelStride)
         : ZERO;
     STORE(d_output, nIdx * nchwSpatialStride + xyIdx, result);
 }

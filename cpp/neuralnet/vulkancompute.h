@@ -129,6 +129,8 @@ namespace vkcompute {
     int spatialStride,
     int qkvChannels,
     int outputChannels,
+    int qkvChannelsPadded,
+    int outputChannelsPadded,
     int qTotalDim,
     int kTotalDim,
     float scale,
@@ -152,6 +154,7 @@ namespace vkcompute {
     int nhwcSpatialSize,
     int nchwSpatialStride,
     int logicalSpatialSize,
+    int channelsPadded,
     bool useNHWC,
     bool begin = true
   );
@@ -211,6 +214,8 @@ namespace vkcompute {
     int M,
     int N,
     int K,
+    int aRowStride,
+    int cRowStride,
     const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
     VkResult* result
   );
@@ -228,6 +233,8 @@ namespace vkcompute {
     int M,
     int N,
     int K,
+    int aRowStride,
+    int cRowStride,
     const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
     VkResult* result
   );
