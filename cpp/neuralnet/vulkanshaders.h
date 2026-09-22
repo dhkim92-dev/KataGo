@@ -106,6 +106,23 @@ extern "C" {
   DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
   DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
 
+#define DECLARE_IMPLICIT_CONV_VARIANTS(stem, acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn1_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn2_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn4_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn1_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn2_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn4_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn1_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn2_acc##acc) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn4_acc##acc)
+
+  DECLARE_IMPLICIT_CONV_VARIANTS(implicit_cm_im2col_conv, 16)
+  DECLARE_IMPLICIT_CONV_VARIANTS(implicit_cm_im2col_conv, 32)
+  DECLARE_IMPLICIT_CONV_VARIANTS(implicit_im2col_cm_conv_bnact, 16)
+  DECLARE_IMPLICIT_CONV_VARIANTS(implicit_im2col_cm_conv_bnact, 32)
+#undef DECLARE_IMPLICIT_CONV_VARIANTS
+
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
   DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
@@ -1007,6 +1024,30 @@ struct LocalDimHash {
       int NWAVE = 32;
     };
 
+    /** Specialization constants for implicit_cm_im2col_conv, IDs 0 through 19. */
+    struct Im2ColConvSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int CM = 16;
+      int CN = 16;
+      int CK = 16;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MDIMC = 2;
+      int NDIMC = 2;
+      int MDIMA = 32;
+      int KDIMA = 4;
+      int KDIMB = 4;
+      int NDIMB = 32;
+      int SA = 32;
+      int SB = 32;
+      int doubleBuffer = 1;
+      int filterSize = 3;
+      int activation = 0;
+    };
+
     /**
      * Specialization constants for hgemm_cooperative_matrix_nchw. The first three fields map to
      * local_size_*_id 0..2; the remaining fields map to constant IDs 3..10 in
@@ -1359,6 +1400,21 @@ struct LocalDimHash {
       int cRowStride;
     };
 
+    struct Im2ColConvParams {
+      int inputBatchStride;
+      int outputBatchStride;
+      int xSize;
+      int ySize;
+      int logicalSpatialSize;
+      int spatialSize;
+      int channels;
+      int channelsPadded;
+      int outChannels;
+      int outChannelsPadded;
+      int logicalKSize;
+      int paddedKSize;
+    };
+
     struct TransformerRMSNormPushParams {
       int nSize;
       int cSize;
@@ -1563,6 +1619,31 @@ struct LocalDimHash {
       bool isSimple() const;
     };
 
+    /** Pipeline parameters for the native NHWC implicit-GEMM convolution. */
+    struct Im2colConvTuneParams {
+      int CM = 16;
+      int CN = 16;
+      int CK = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MDIMC = 2;
+      int NDIMC = 2;
+      int MDIMA = 32;
+      int KDIMA = 4;
+      int KDIMB = 4;
+      int NDIMB = 32;
+      int SA = 32;
+      int SB = 32;
+      int doubleBuffer = 1;
+      int accType = 16;
+      int VWK = 1;
+      int VWN = 1;
+
+      bool isValid() const;
+    };
+
     /**
      * Runtime tuning parameters for hgemm_cooperative_matrix_nchw. SB selects the shader binary
      * (shared-memory or direct-filter load); MWG through NWAVE are passed as
@@ -1687,6 +1768,8 @@ struct LocalDimHash {
       ConvTuneParams conv5x5;
       HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
       HGemmCooperativeMatrixNHWCTuneParams hgemmCooperativeMatrixNHWC;
+      HGemmCooperativeMatrixNHWCTuneParams hgemmCooperativeMatrixNHWC3x3;
+      HGemmCooperativeMatrixNHWCTuneParams hgemmCooperativeMatrixNHWC5x5;
       HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
       TransformerDualGemmSwiGLUTuneParams transformerDualGemmSwiGLU;
       XgemmTuneParams xgemm;
@@ -1841,6 +1924,13 @@ struct LocalDimHash {
     DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
     DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
 #undef DECLARE_HGEMM_NHWC_SHADER_MODULES
+#define DECLARE_IMPLICIT_CONV_SHADER_MODULES(base) \
+    VkShaderModule shaderModule_##base##_variants[9] = {};
+    DECLARE_IMPLICIT_CONV_SHADER_MODULES(implicit_cm_im2col_conv_acc16)
+    DECLARE_IMPLICIT_CONV_SHADER_MODULES(implicit_cm_im2col_conv_acc32)
+    DECLARE_IMPLICIT_CONV_SHADER_MODULES(implicit_im2col_cm_conv_bnact_acc16)
+    DECLARE_IMPLICIT_CONV_SHADER_MODULES(implicit_im2col_cm_conv_bnact_acc32)
+#undef DECLARE_IMPLICIT_CONV_SHADER_MODULES
 #undef DECLARE_HGEMM_SHADER_MODULES
     VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
@@ -1897,6 +1987,16 @@ struct LocalDimHash {
     Pipeline nchwToNhwc;
     Pipeline nhwcToNchw;
     Pipeline im2colNHWC;
+    Pipeline im2colConv3x3;
+    Pipeline im2colConv5x5;
+    Pipeline im2colConv3x3_bnact_identity;
+    Pipeline im2colConv3x3_bnact_relu;
+    Pipeline im2colConv3x3_bnact_silu;
+    Pipeline im2colConv3x3_bnact_gelu;
+    Pipeline im2colConv5x5_bnact_identity;
+    Pipeline im2colConv5x5_bnact_relu;
+    Pipeline im2colConv5x5_bnact_silu;
+    Pipeline im2colConv5x5_bnact_gelu;
     Pipeline nhwcMatrixToNchw;
     Pipeline hgemmCooperativeMatrixNHWC;
     Pipeline winogradInputTransform3x3;
@@ -1987,6 +2087,14 @@ struct LocalDimHash {
     VkResult createNchwToNhwc(Pipeline& pipeline);
     VkResult createNhwcToNchw(Pipeline& pipeline);
     VkResult createIm2ColNHWC(Pipeline& pipeline);
+    VkResult createIm2ColConv(
+      Pipeline& pipeline,
+      const tune::HGemmCooperativeMatrixNHWCTuneParams& tuneParams,
+      int convSize,
+      int activation = 0,
+      bool fuseBNAct = false
+    );
+    const Pipeline& getIm2ColConvBnActPipeline(int convSize, int activation) const;
     VkResult createNHWCMatrixToNCHW(Pipeline& pipeline);
     VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNHWCTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
