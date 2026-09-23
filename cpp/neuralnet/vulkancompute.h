@@ -201,66 +201,6 @@ namespace vkcompute {
     VkResult* result
   );
 
-  void im2colConv(
-    const VulkanDevice* device,
-    const Pipeline* pipeline,
-    VkCommandBuffer cb,
-    VkDescriptorSet descriptorSet,
-    const VulkanBuffer* input,
-    const VulkanBuffer* filter,
-    VulkanBuffer* output,
-    int batchSize,
-    int M,
-    int N,
-    int K,
-    int inputBatchStride,
-    int outputBatchStride,
-    int xSize,
-    int ySize,
-    int logicalSpatialSize,
-    int spatialSize,
-    int channels,
-    int channelsPadded,
-    int outChannels,
-    int outChannelsPadded,
-    int logicalKSize,
-    int convYSize,
-    int convXSize,
-    const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
-    VkResult* result
-  );
-
-  void im2colConvBnAct(
-    const VulkanDevice* device,
-    const Pipeline* pipeline,
-    VkCommandBuffer cb,
-    VkDescriptorSet descriptorSet,
-    const VulkanBuffer* input,
-    const VulkanBuffer* filter,
-    VulkanBuffer* output,
-    const VulkanBuffer* scale,
-    const VulkanBuffer* bias,
-    int batchSize,
-    int M,
-    int N,
-    int K,
-    int inputBatchStride,
-    int outputBatchStride,
-    int xSize,
-    int ySize,
-    int logicalSpatialSize,
-    int spatialSize,
-    int channels,
-    int channelsPadded,
-    int outChannels,
-    int outChannelsPadded,
-    int logicalKSize,
-    int convYSize,
-    int convXSize,
-    const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
-    VkResult* result
-  );
-
   void doHgemmCooperativeMatrixNHWC(
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
@@ -323,6 +263,7 @@ namespace vkcompute {
     uint32_t outChannels,
     uint32_t convY,
     uint32_t convX,
+    uint32_t kChannelStride,
     uint32_t kSize,
     uint32_t nSize
   );

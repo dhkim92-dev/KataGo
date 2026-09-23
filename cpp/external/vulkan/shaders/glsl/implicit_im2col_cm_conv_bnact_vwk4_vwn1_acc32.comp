@@ -1,5 +1,0 @@
-#version 460
-#define VWK 4
-#define VWN 1
-#define ACC_BITS 32
-#include "implicit_im2col_cm_conv_bnact.glsl"

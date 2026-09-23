@@ -117,17 +117,6 @@ namespace vk_shader {
   DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn2##suffix) \
   DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn4##suffix)
 
-#define DEFINE_IMPLICIT_CONV_VARIANTS(stem, acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn1_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn2_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk1_vwn4_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn1_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn2_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk2_vwn4_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn1_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn2_acc##acc) \
-  DEFINE_HGEMM_VARIANT(stem##_vwk4_vwn4_acc##acc)
-
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
@@ -140,11 +129,6 @@ namespace vk_shader {
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
   DEFINE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
-  DEFINE_IMPLICIT_CONV_VARIANTS(implicit_cm_im2col_conv, 16)
-  DEFINE_IMPLICIT_CONV_VARIANTS(implicit_cm_im2col_conv, 32)
-  DEFINE_IMPLICIT_CONV_VARIANTS(implicit_im2col_cm_conv_bnact, 16)
-  DEFINE_IMPLICIT_CONV_VARIANTS(implicit_im2col_cm_conv_bnact, 32)
-#undef DEFINE_IMPLICIT_CONV_VARIANTS
   DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
   DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
   DEFINE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
@@ -505,16 +489,6 @@ namespace vk_shader {
       {spirv_##stem##_vwk4_vwn1##suffix, spirv_##stem##_vwk4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
       {spirv_##stem##_vwk4_vwn2##suffix, spirv_##stem##_vwk4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
       {spirv_##stem##_vwk4_vwn4##suffix, spirv_##stem##_vwk4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
-#define IMPLICIT_CONV_WIDTH_SOURCES(stem, acc, base) \
-      {spirv_##stem##_vwk1_vwn1_acc##acc, spirv_##stem##_vwk1_vwn1_acc##acc##_size, &shaderModule_##base##_variants[0]}, \
-      {spirv_##stem##_vwk1_vwn2_acc##acc, spirv_##stem##_vwk1_vwn2_acc##acc##_size, &shaderModule_##base##_variants[1]}, \
-      {spirv_##stem##_vwk1_vwn4_acc##acc, spirv_##stem##_vwk1_vwn4_acc##acc##_size, &shaderModule_##base##_variants[2]}, \
-      {spirv_##stem##_vwk2_vwn1_acc##acc, spirv_##stem##_vwk2_vwn1_acc##acc##_size, &shaderModule_##base##_variants[3]}, \
-      {spirv_##stem##_vwk2_vwn2_acc##acc, spirv_##stem##_vwk2_vwn2_acc##acc##_size, &shaderModule_##base##_variants[4]}, \
-      {spirv_##stem##_vwk2_vwn4_acc##acc, spirv_##stem##_vwk2_vwn4_acc##acc##_size, &shaderModule_##base##_variants[5]}, \
-      {spirv_##stem##_vwk4_vwn1_acc##acc, spirv_##stem##_vwk4_vwn1_acc##acc##_size, &shaderModule_##base##_variants[6]}, \
-      {spirv_##stem##_vwk4_vwn2_acc##acc, spirv_##stem##_vwk4_vwn2_acc##acc##_size, &shaderModule_##base##_variants[7]}, \
-      {spirv_##stem##_vwk4_vwn4_acc##acc, spirv_##stem##_vwk4_vwn4_acc##acc##_size, &shaderModule_##base##_variants[8]},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -559,10 +533,6 @@ namespace vk_shader {
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1, hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1)
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
-      IMPLICIT_CONV_WIDTH_SOURCES(implicit_cm_im2col_conv, 16, implicit_cm_im2col_conv_acc16)
-      IMPLICIT_CONV_WIDTH_SOURCES(implicit_cm_im2col_conv, 32, implicit_cm_im2col_conv_acc32)
-      IMPLICIT_CONV_WIDTH_SOURCES(implicit_im2col_cm_conv_bnact, 16, implicit_im2col_cm_conv_bnact_acc16)
-      IMPLICIT_CONV_WIDTH_SOURCES(implicit_im2col_cm_conv_bnact, 32, implicit_im2col_cm_conv_bnact_acc32)
       {spirv_extract_channel0_fp32, spirv_extract_channel0_fp32_size, &shaderModule_extract_channel0_fp32},
       {spirv_extract_channel0_p16s16, spirv_extract_channel0_p16s16_size, &shaderModule_extract_channel0_p16s16},
       {spirv_extract_channel0_p32s16, spirv_extract_channel0_p32s16_size, &shaderModule_extract_channel0_p32s16},
@@ -631,8 +601,6 @@ namespace vk_shader {
 #undef XGEMM_WIDTH_SOURCES
 #undef HGEMM_WIDTH_SOURCES
 #undef HGEMM_NHWC_WIDTH_SOURCES
-#undef IMPLICIT_CONV_WIDTH_SOURCES
-#undef IMPLICIT_CONV_ACC32_WIDTH_SOURCES
     shaderModuleFields.clear();
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
@@ -686,7 +654,7 @@ namespace vk_shader {
     }
   }
 
-  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print) {
+  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool useNHWCMode, bool print) {
     struct PrintGuard {
       bool& value;
       bool oldValue;
@@ -695,10 +663,21 @@ namespace vk_shader {
     printPipelineCreation = print;
     VkResult result;
     const bool useGenericNHWC =
-      tuneParams.vulkan.shouldUseCooperativeMatrix;
-    const bool useTransformerAttentionNHWC = tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
+      useNHWCMode && tuneParams.vulkan.shouldUseCooperativeMatrix;
+    const bool useTransformerAttentionNHWC = useNHWCMode && tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
     const bool useTransformerDualGemmSwiGLUNHWC =
-      tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
+      useNHWCMode && tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
+    if(tuneParams.vulkan.canUseCooperativeMatrix &&
+       tuneParams.vulkan.canUseFP16Storage &&
+       tuneParams.vulkan.canUseFP16Compute &&
+       tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseFP16Compute &&
+       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
+      if((result = createHgemmCooperativeMatrixNCHW(
+           hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW
+         )) != VK_SUCCESS)
+        return result;
+    }
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
@@ -709,32 +688,6 @@ namespace vk_shader {
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
       if(useGenericNHWC) {
         if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
-        if((result = createIm2ColConv(
-             im2colConv3x3, tuneParams.hgemmCooperativeMatrixNHWC3x3, 3
-           )) != VK_SUCCESS)
-          return result;
-        if((result = createIm2ColConv(
-             im2colConv5x5, tuneParams.hgemmCooperativeMatrixNHWC5x5, 5
-           )) != VK_SUCCESS)
-          return result;
-        struct PipelineActivation { Pipeline* pipeline; int convSize; int activation; };
-        const PipelineActivation implicitConvBnActPipelines[] = {
-          {&im2colConv3x3_bnact_identity, 3, 0},
-          {&im2colConv3x3_bnact_relu, 3, 1},
-          {&im2colConv3x3_bnact_silu, 3, 2},
-          {&im2colConv3x3_bnact_gelu, 3, 3},
-          {&im2colConv5x5_bnact_identity, 5, 0},
-          {&im2colConv5x5_bnact_relu, 5, 1},
-          {&im2colConv5x5_bnact_silu, 5, 2},
-          {&im2colConv5x5_bnact_gelu, 5, 3},
-        };
-        for(const PipelineActivation& entry: implicitConvBnActPipelines) {
-          const HGemmCooperativeMatrixNHWCTuneParams& params = entry.convSize == 3
-            ? tuneParams.hgemmCooperativeMatrixNHWC3x3
-            : tuneParams.hgemmCooperativeMatrixNHWC5x5;
-          if((result = createIm2ColConv(*entry.pipeline, params, entry.convSize, entry.activation, true)) != VK_SUCCESS)
-            return result;
-        }
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
         if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
           if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrixNHWC)) != VK_SUCCESS) return result;
@@ -781,13 +734,16 @@ namespace vk_shader {
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    useNHWC =
+    this->useNHWC =
+      useNHWCMode &&
       tuneParams.vulkan.canUseCooperativeMatrix &&
       tuneParams.vulkan.canUseFP16Storage &&
       tuneParams.vulkan.canUseFP16Compute &&
       tuneParams.vulkan.shouldUseFP16Storage &&
       tuneParams.vulkan.shouldUseFP16Compute &&
-       tuneParams.vulkan.shouldUseCooperativeMatrix;
+      (tuneParams.vulkan.shouldUseCooperativeMatrix ||
+       tuneParams.transformer.USE_COOPERATIVE_ATTN != 0 ||
+       tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU);
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskMish(batchNormMaskMish, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
@@ -796,12 +752,12 @@ namespace vk_shader {
     if(useNHWC) {
       if((result = createBatchNormMaskSilu(batchNormMaskSiluNCHW, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     }
-    if((result = createGlobalPoolingChannelsFp32(globalPoolingChannelsFp32, tuneParams.gPool, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createGlobalPoolingChannelsFp32(globalPoolingChannelsFp32, tuneParams.gPool, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     for(uint32_t localSizeY = 1; localSizeY <= static_cast<uint32_t>(tuneParams.gPool.CHANNELSTRIDE); localSizeY *= 2) {
       for(uint32_t localSizeZ = 1; localSizeZ <= static_cast<uint32_t>(tuneParams.gPool.BATCHSTRIDE); localSizeZ *= 2) {
         LocalDim dim = {tuneParams.gPool.XYSTRIDE, static_cast<int>(localSizeY), static_cast<int>(localSizeZ)};
         Pipeline pipeline;
-        if((result = createValueHeadPoolingChannels(pipeline, tuneParams.gPool, localSizeY, localSizeZ, tuneParams.vulkan)) != VK_SUCCESS) return result;
+        if((result = createValueHeadPoolingChannels(pipeline, tuneParams.gPool, localSizeY, localSizeZ, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
         valueHeadPoolingChannels.emplace(dim, pipeline);
       }
     }
@@ -811,7 +767,7 @@ namespace vk_shader {
       if((result = createSumChannels(pipeline, tuneParams.gPool, localSizeZ, tuneParams.vulkan)) != VK_SUCCESS) return result;
       sumChannels.emplace(dim, pipeline);
     }
-    if((result = createAddChannelBias(addChannelBias, tuneParams.addChannelBiases, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createAddChannelBias(addChannelBias, tuneParams.addChannelBiases, tuneParams.vulkan, useNHWC)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCIdentity(addChannelBiasNCIdentity, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCRelu(addChannelBiasNCRelu, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createAddChannelBiasNCMish(addChannelBiasNCMish, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -851,16 +807,6 @@ namespace vk_shader {
     destroyPipeline(hgemmCooperativeMatrixNCHW);
     destroyPipeline(hgemmCooperativeMatrixNHWC);
     destroyPipeline(im2colNHWC);
-    destroyPipeline(im2colConv3x3);
-    destroyPipeline(im2colConv5x5);
-    destroyPipeline(im2colConv3x3_bnact_identity);
-    destroyPipeline(im2colConv3x3_bnact_relu);
-    destroyPipeline(im2colConv3x3_bnact_silu);
-    destroyPipeline(im2colConv3x3_bnact_gelu);
-    destroyPipeline(im2colConv5x5_bnact_identity);
-    destroyPipeline(im2colConv5x5_bnact_relu);
-    destroyPipeline(im2colConv5x5_bnact_silu);
-    destroyPipeline(im2colConv5x5_bnact_gelu);
     destroyPipeline(nhwcMatrixToNchw);
     destroyPipeline(nchwToNhwc);
     destroyPipeline(nhwcToNchw);
@@ -1096,119 +1042,6 @@ namespace vk_shader {
     );
   }
 
-  VkResult ComputePipelines::createIm2ColConv(
-    Pipeline& pipeline,
-    const HGemmCooperativeMatrixNHWCTuneParams& tuneParams,
-    int convSize,
-    int activation,
-    bool fuseBNAct
-  ) {
-    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
-      return VK_ERROR_INITIALIZATION_FAILED;
-    Im2colConvTuneParams params;
-    params.CM = tuneParams.MWARP;
-    params.CN = tuneParams.NWARP;
-    params.CK = tuneParams.KDIM;
-    params.subgroupSize = tuneParams.subgroupSize;
-    params.MWG = tuneParams.MWG;
-    params.NWG = tuneParams.NWG;
-    params.KWG = tuneParams.KWG;
-    params.MDIMC = params.MWG / params.CM;
-    params.NDIMC = params.NWG / params.CN;
-    const int threadCount = params.MDIMC * params.NDIMC * static_cast<int>(params.subgroupSize);
-    params.MDIMA = tuneParams.MWAVE;
-    params.KDIMA = threadCount / params.MDIMA;
-    params.NDIMB = tuneParams.NWAVE;
-    params.KDIMB = threadCount / params.NDIMB;
-    params.SA = vk_helper::roundUpToMultipleInt(params.KWG + (tuneParams.SA ? tuneParams.VWK : 0), tuneParams.VWK);
-    params.SB = vk_helper::roundUpToMultipleInt(params.NWG + (tuneParams.SB ? tuneParams.VWN : 0), tuneParams.VWN);
-    params.doubleBuffer = tuneParams.SA;
-    params.accType = tuneParams.accType;
-    params.VWK = tuneParams.VWK;
-    params.VWN = tuneParams.VWN;
-    if(!params.isValid())
-      return VK_ERROR_INITIALIZATION_FAILED;
-
-    const auto& limits = deviceInfo.properties.limits;
-    const uint64_t workgroupSize = static_cast<uint64_t>(params.MDIMC) * params.NDIMC * params.subgroupSize;
-    if(workgroupSize > limits.maxComputeWorkGroupInvocations ||
-       workgroupSize > limits.maxComputeWorkGroupSize[0])
-      return VK_ERROR_INITIALIZATION_FAILED;
-
-    const uint64_t sharedTileCount = params.doubleBuffer != 0 ? 2ull : 1ull;
-    const uint64_t sharedABytes = sharedTileCount * params.MWG * params.SA * sizeof(uint16_t);
-    const uint64_t sharedBBytes = sharedTileCount * params.KWG * params.SB * sizeof(uint16_t);
-    const uint64_t sharedCBytes = static_cast<uint64_t>(params.MWG) * params.NWG *
-      (params.accType == 32 ? sizeof(float) : sizeof(uint16_t));
-    const uint64_t sharedBytes = sharedABytes + sharedBBytes + sharedCBytes;
-    if(sharedBytes > limits.maxComputeSharedMemorySize)
-      return VK_ERROR_INITIALIZATION_FAILED;
-
-    Im2ColConvSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(params.MDIMC * params.NDIMC) * params.subgroupSize;
-    spec.localSizeY = 1;
-    spec.localSizeZ = 1;
-    spec.CM = params.CM;
-    spec.CN = params.CN;
-    spec.CK = params.CK;
-    spec.MWG = params.MWG;
-    spec.NWG = params.NWG;
-    spec.KWG = params.KWG;
-    spec.MDIMC = params.MDIMC;
-    spec.NDIMC = params.NDIMC;
-    spec.MDIMA = params.MDIMA;
-    spec.KDIMA = params.KDIMA;
-    spec.KDIMB = params.KDIMB;
-    spec.NDIMB = params.NDIMB;
-    spec.SA = params.SA;
-    spec.SB = params.SB;
-    spec.doubleBuffer = params.doubleBuffer;
-    spec.filterSize = convSize;
-    spec.activation = activation;
-    SpecializationData specData(spec);
-    VkShaderModule* shaderModules = fuseBNAct
-      ? (params.accType == 32 ? shaderModule_implicit_im2col_cm_conv_bnact_acc32_variants
-                              : shaderModule_implicit_im2col_cm_conv_bnact_acc16_variants)
-      : (params.accType == 32 ? shaderModule_implicit_cm_im2col_conv_acc32_variants
-                              : shaderModule_implicit_cm_im2col_conv_acc16_variants);
-    const int variant = hgemmVariantIndex(tuneParams.VWK, tuneParams.VWN);
-    if(variant < 0)
-      return VK_ERROR_INITIALIZATION_FAILED;
-    const std::string stem = fuseBNAct ? "implicit_im2col_cm_conv_bnact" : "implicit_cm_im2col_conv";
-    const std::string name = stem + "_" + std::to_string(convSize) + "x" + std::to_string(convSize) +
-      "_vwk" + std::to_string(tuneParams.VWK) +
-      "_vwn" + std::to_string(tuneParams.VWN) +
-      "_acc" + std::to_string(tuneParams.accType) +
-      (fuseBNAct ? "_act" + std::to_string(activation) : "");
-    return createPipeline(
-      name, shaderModules[variant], fuseBNAct ? 5 : 3, sizeof(Im2ColConvParams), pipeline,
-      &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
-    );
-  }
-
-  const Pipeline& ComputePipelines::getIm2ColConvBnActPipeline(int convSize, int activation) const {
-    if(convSize == 3) {
-      switch(activation) {
-      case 0: return im2colConv3x3_bnact_identity;
-      case 1: return im2colConv3x3_bnact_relu;
-      case 2: return im2colConv3x3_bnact_silu;
-      case 3: return im2colConv3x3_bnact_gelu;
-      default: break;
-      }
-    }
-    else if(convSize == 5) {
-      switch(activation) {
-      case 0: return im2colConv5x5_bnact_identity;
-      case 1: return im2colConv5x5_bnact_relu;
-      case 2: return im2colConv5x5_bnact_silu;
-      case 3: return im2colConv5x5_bnact_gelu;
-      default: break;
-      }
-    }
-    throw StringError("Unsupported activation or convolution size for fused implicit NHWC convolution");
-  }
-
   VkResult ComputePipelines::createNHWCMatrixToNCHW(Pipeline& pipeline) {
     return createPipeline(
       "nhwc_matrix_to_nchw_p16s16",
@@ -1227,58 +1060,66 @@ namespace vk_shader {
     Pipeline& pipeline,
     const HGemmCooperativeMatrixNHWCTuneParams& tuneParams
   ) {
-    if(!isValidCooperativeMatrixConfig(deviceInfo, tuneParams))
+    // Direct cooperative-matrix loads from storage buffers produced input-dependent
+    // corruption on NVIDIA even though dense synthetic tuning inputs passed. Stage
+    // both operands through workgroup memory for every generic NHWC GEMM pipeline.
+    HGemmCooperativeMatrixNHWCTuneParams pipelineParams = tuneParams;
+    pipelineParams.SA = 1;
+    pipelineParams.SB = 1;
+    if(!isValidCooperativeMatrixConfig(deviceInfo, pipelineParams))
       return VK_ERROR_INITIALIZATION_FAILED;
     HGemmCooperativeMatrixSpec spec;
-    spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
-    spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
+    spec.localSizeX = static_cast<uint32_t>(pipelineParams.MWAVE / pipelineParams.MWARP) * pipelineParams.subgroupSize;
+    spec.localSizeY = static_cast<uint32_t>(pipelineParams.NWAVE / pipelineParams.NWARP);
     spec.localSizeZ = 1;
-    spec.MSize = tuneParams.MWARP;
-    spec.NSize = tuneParams.NWARP;
-    spec.KSize = tuneParams.KDIM;
-    spec.MWG = tuneParams.MWG;
-    spec.NWG = tuneParams.NWG;
-    spec.KWG = tuneParams.KWG;
-    spec.MWAVE = tuneParams.MWAVE;
-    spec.NWAVE = tuneParams.NWAVE;
+    spec.MSize = pipelineParams.MWARP;
+    spec.NSize = pipelineParams.NWARP;
+    spec.KSize = pipelineParams.KDIM;
+    spec.MWG = pipelineParams.MWG;
+    spec.NWG = pipelineParams.NWG;
+    spec.KWG = pipelineParams.KWG;
+    spec.MWAVE = pipelineParams.MWAVE;
+    spec.NWAVE = pipelineParams.NWAVE;
     SpecializationData specData(spec);
     VkShaderModule* shaderModules = nullptr;
     const char* shaderSuffix = nullptr;
-    const char* shaderStem = tuneParams.accType == 32
+    const char* shaderStem = pipelineParams.accType == 32
       ? "hgemm_cooperative_matrix_nhwc_acc_fp32"
       : "hgemm_cooperative_matrix_nhwc_acc_fp16";
-    switch((tuneParams.SA << 1) | tuneParams.SB) {
+    switch((pipelineParams.SA << 1) | pipelineParams.SB) {
       case 0:
         shaderSuffix = "_sa0_sb0";
-        shaderModules = tuneParams.accType == 32
+        shaderModules = pipelineParams.accType == 32
           ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb0_variants
           : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0_variants;
         break;
       case 1:
         shaderSuffix = "_sa0_sb1";
-        shaderModules = tuneParams.accType == 32
+        shaderModules = pipelineParams.accType == 32
           ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1_variants
           : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1_variants;
         break;
       case 2:
         shaderSuffix = "_sa1_sb0";
-        shaderModules = tuneParams.accType == 32
+        shaderModules = pipelineParams.accType == 32
           ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0_variants
           : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0_variants;
         break;
       case 3:
         shaderSuffix = "_sa1_sb1";
-        shaderModules = tuneParams.accType == 32
+        shaderModules = pipelineParams.accType == 32
           ? shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1_variants
           : shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb1_variants;
         break;
       default:
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    const int variant = hgemmVariantIndex(tuneParams.VWK, tuneParams.VWN);
+    const int variant = hgemmVariantIndex(pipelineParams.VWK, pipelineParams.VWN);
     if(variant < 0)
       return VK_ERROR_INITIALIZATION_FAILED;
-    const std::string name = hgemmNHWCVariantName(shaderStem, shaderSuffix, tuneParams.VWK, tuneParams.VWN);
+    const std::string name = hgemmNHWCVariantName(
+      shaderStem, shaderSuffix, pipelineParams.VWK, pipelineParams.VWN
+    );
     return createPipeline(
       name, shaderModules[variant],
       3,
@@ -1773,7 +1614,7 @@ namespace vk_shader {
     return createPipeline("bn_mask_silu_fp32", shaderModule_bn_mask_silu_fp32, 5, sizeof(BatchNormMaskParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createGlobalPoolingChannelsFp32(Pipeline& pipeline, const GPoolTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createGlobalPoolingChannelsFp32(Pipeline& pipeline, const GPoolTuneParams& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
     // TODO: create multiple local sizes pipelines to optimize performance.
     auto spec = GlobalPoolingChannelsSpec();
     spec.localSizeX = tuneParams.XYSTRIDE;
@@ -1789,7 +1630,7 @@ namespace vk_shader {
     return createPipeline("global_pooling_channels_fp32", shaderModule_global_pooling_channels_fp32, 4, sizeof(GlobalPoolingChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createValueHeadPoolingChannels(Pipeline& pipeline, const GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createValueHeadPoolingChannels(Pipeline& pipeline, const GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = ValueHeadPoolingChannelsSpec();
     spec.localSizeX = tuneParams.XYSTRIDE;
     spec.localSizeY = localSizeY;
@@ -1818,7 +1659,7 @@ namespace vk_shader {
     return createPipeline("sum_channels_fp32", shaderModule_sum_channels_fp32, 2, sizeof(SumChannelsParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createAddChannelBias(Pipeline& pipeline, const AddChannelBiasesNCHWTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createAddChannelBias(Pipeline& pipeline, const AddChannelBiasesNCHWTuneParams& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = AddChannelBiasNCHWSpec();
     spec.XY_ELTS_PER_THREAD = tuneParams.XY_ELTS_PER_THREAD;
     spec.NC_ELTS_PER_THREAD = tuneParams.NC_ELTS_PER_THREAD;
@@ -1830,8 +1671,7 @@ namespace vk_shader {
       vulkanParams.canUseFP16Compute &&
       vulkanParams.shouldUseFP16Storage &&
       vulkanParams.shouldUseFP16Compute &&
-      (vulkanParams.shouldUseCooperativeMatrix ||
-       vulkanParams.shouldUseHgemmCooperativeMatrixNCHW)
+      useNHWC
     ) ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage) {

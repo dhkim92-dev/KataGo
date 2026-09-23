@@ -34,6 +34,7 @@ struct VulkanDeviceInfo {
   VkPhysicalDeviceFeatures features;
   VkPhysicalDevice16BitStorageFeatures storage16BitFeatures;
   VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
+  VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures;
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
   VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
   VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures;

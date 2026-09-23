@@ -198,20 +198,10 @@ struct ComputeHandleInternal {
         return 1;
       return params.KWG > 0 ? std::lcm(params.NWG, params.KWG) : params.NWG;
     };
-    // Every NHWC row must satisfy all generic, 3x3, and 5x5 cooperative GEMM
-    // tile alignments because those paths share one model-wide tensor layout.
     int channelAlignmentValue = 1;
     channelAlignmentValue = std::lcm(
       channelAlignmentValue,
       channelAlignment(tuneParams.hgemmCooperativeMatrixNHWC)
-    );
-    channelAlignmentValue = std::lcm(
-      channelAlignmentValue,
-      channelAlignment(tuneParams.hgemmCooperativeMatrixNHWC3x3)
-    );
-    channelAlignmentValue = std::lcm(
-      channelAlignmentValue,
-      channelAlignment(tuneParams.hgemmCooperativeMatrixNHWC5x5)
     );
     return vk_helper::roundUpToMultipleInt(
       channels, channelAlignmentValue

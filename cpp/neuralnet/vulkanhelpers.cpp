@@ -333,6 +333,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     VkPhysicalDevice16BitStorageFeatures storage16BitFeatures = {};
     VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features = {};
+    VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
     VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features = {};
     VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures = {};
@@ -340,8 +341,10 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     features2.pNext = &storage16BitFeatures;
     shaderFloat16Int8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
     storage16BitFeatures.pNext = &shaderFloat16Int8Features;
+    vulkanMemoryModelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+    shaderFloat16Int8Features.pNext = &vulkanMemoryModelFeatures;
     cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
-    shaderFloat16Int8Features.pNext = &cooperativeMatrixFeatures;
+    vulkanMemoryModelFeatures.pNext = &cooperativeMatrixFeatures;
     maintenance4Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
     cooperativeMatrixFeatures.pNext = &maintenance4Features;
     subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
@@ -350,6 +353,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     deviceInfo.features = features2.features;
     deviceInfo.storage16BitFeatures = storage16BitFeatures;
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
+    deviceInfo.vulkanMemoryModelFeatures = vulkanMemoryModelFeatures;
     deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
     deviceInfo.maintenance4Features = maintenance4Features;
     deviceInfo.subgroupSizeControlFeatures = subgroupSizeControlFeatures;
@@ -364,6 +368,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     writeFeatureSupport("  Shader Float16 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Shader Int8 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderInt8 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Storage Buffer 16Bit Support: " + std::string(deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ? "Yes" : "No"));
+    writeFeatureSupport("  Vulkan Memory Model Support: " + std::string(deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Cooperative Matrix Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Cooperative Matrix Robust Buffer Access Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrixRobustBufferAccess == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Maintenance4 Support: " + std::string(deviceInfo.maintenance4Features.maintenance4 == VK_TRUE ? "Yes" : "No"));
@@ -500,6 +505,24 @@ VulkanDevice* vk_helper::createVulkanDevice(
      !subgroupSizeControlAlreadyRequested)
     requiredExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 
+  const bool vulkanMemoryModelCore =
+    VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) > 1 ||
+    (VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 && VK_VERSION_MINOR(deviceInfo.properties.apiVersion) >= 2);
+  const bool vulkanMemoryModelExtensionAvailable = std::any_of(
+    availableExtensions.begin(), availableExtensions.end(), [](const VkExtensionProperties& extension) {
+      return std::string(extension.extensionName) == VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME;
+    }
+  );
+  const bool vulkanMemoryModelAlreadyRequested = std::any_of(
+    requiredExtensions.begin(), requiredExtensions.end(), [](const char* extension) {
+      return std::string(extension) == VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME;
+    }
+  );
+  if(deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE &&
+     !vulkanMemoryModelCore && vulkanMemoryModelExtensionAvailable &&
+     !vulkanMemoryModelAlreadyRequested)
+    requiredExtensions.push_back(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+
   const float queuePriorities[2] = {1.0f, dummyQueuePriority};
   uint32_t queueFamilyPropertyCount = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyPropertyCount, nullptr);
@@ -577,10 +600,16 @@ VulkanDevice* vk_helper::createVulkanDevice(
     subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
   }
 
+  VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
+  vulkanMemoryModelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+  vulkanMemoryModelFeatures.vulkanMemoryModel =
+    deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel;
+
   cmFeatures.pNext = &m4Features;
   m4Features.pNext = enableComputeFullSubgroups ? &subgroupSizeControlFeatures : nullptr;
   storage16BitFeatures.pNext = &f16Feat;
-  f16Feat.pNext = &cmFeatures;
+  f16Feat.pNext = &vulkanMemoryModelFeatures;
+  vulkanMemoryModelFeatures.pNext = &cmFeatures;
 
   VkDeviceCreateInfo deviceCI = {};
   deviceCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

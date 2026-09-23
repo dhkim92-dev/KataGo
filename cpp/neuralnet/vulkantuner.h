@@ -13,11 +13,13 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 26;
+  constexpr int TUNER_VERSION = 30;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
-  constexpr double FP16_COMPUTE_MIN_THROUGHPUT_RATIO = 1.20;
+  // FP16 Winograd reduces transform, workspace, and pointwise bandwidth, so
+  // its GEMM may be modestly slower in isolation while the network is faster.
+  constexpr double FP16_COMPUTE_MIN_THROUGHPUT_RATIO = 0.85;
   constexpr double FP16_STORAGE_MIN_THROUGHPUT_RATIO = 1.20;
   constexpr double COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO = 1.10;
   constexpr double COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE = 0.001;
@@ -51,13 +53,6 @@ namespace VulkanTuner {
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
 
   struct ModelInfoForTuning {
-    struct ImplicitConvTuneWorkload {
-      int kernelSize = 0;
-      int inChannels = 0;
-      int outChannels = 0;
-      double weight = 0.0;
-    };
-
     int numInputChannels = 0;
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;
@@ -67,7 +62,6 @@ namespace VulkanTuner {
     int regularNumChannels = 0;
     int gpoolNumChannels = 0;
     int modelVersion = 0;
-    std::vector<ImplicitConvTuneWorkload> implicitConvTuneWorkloads;
     int transformerHeadDim = 0;
     int transformerVHeadDim = 0;
     int transformerNumHeads = 0;

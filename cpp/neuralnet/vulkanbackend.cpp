@@ -357,11 +357,13 @@ struct ComputeContext {
           if(!useFP16Storage || !useFP16Compute)
             tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
 
-          // NHWC is a whole-model execution mode.  A transformer model can
-          // use it only when its attention tuner also selected the
-          // cooperative attention kernel; otherwise every path must remain
-          // NCHW and no cooperative matrix kernel may be used.
+          // NHWC is opt-in for ResNet models and remains the default layout
+          // for transformer models while their NHWC kernels are being rebuilt.
+          const bool isTransformerModel = transformerHeadDims.first > 0 && transformerHeadDims.second > 0;
+          const bool useNHWC = usingNHWCMode == enabled_t::True ||
+            (usingNHWCMode == enabled_t::Auto && isTransformerModel);
           const bool useCooperativeMatrixMode =
+            useNHWC &&
             tuneParams.vulkan.shouldUseCooperativeMatrix &&
             tuneParams.vulkan.canUseCooperativeMatrix &&
             tuneParams.vulkan.canUseFP16Storage &&
@@ -370,13 +372,14 @@ struct ComputeContext {
             tuneParams.vulkan.shouldUseFP16Compute &&
             (transformerHeadDims.first == 0 || tuneParams.transformer.USE_COOPERATIVE_ATTN != 0);
           tuneParams.vulkan.shouldUseCooperativeMatrix = useCooperativeMatrixMode;
-          tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
           if(!useCooperativeMatrixMode) {
             tuneParams.transformer.USE_COOPERATIVE_ATTN = 0;
             tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
           }
           pipelines = new vk_shader::ComputePipelines(vulkanDevice->device, vulkanDevice->info, logger);
-          VkResult result = pipelines->createPipelines(tuneParams, transformerHeadDims.first, transformerHeadDims.second, true);
+          VkResult result = pipelines->createPipelines(
+            tuneParams, transformerHeadDims.first, transformerHeadDims.second, useNHWC, true
+          );
           if(result != VK_SUCCESS)
             throw StringError("Failed to create Vulkan compute pipelines: " + vk_helper::vkErrorToString(result));
         }
@@ -907,7 +910,6 @@ struct ConvLayer {
     None,
     ExplicitIm2Col,
     DirectMatmul1x1,
-    Implicit,
   };
 
   ComputeHandleInternal* handle;
@@ -930,6 +932,7 @@ struct ConvLayer {
   int outTileXYSize;
 
   bool usingHgemmCooperativeMatrix;
+  bool usingHgemmCooperativeMatrixNCHW;
   bool usingNhwcConversion;
   NhwcConvPath nhwcConvPath;
   int nhwcSpatialSize;
@@ -946,7 +949,6 @@ struct ConvLayer {
   VkDescriptorSet hgemmCooperativeMatrixDS = VK_NULL_HANDLE;
   VkDescriptorSet hgemmCooperativeMatrixNHWCDS = VK_NULL_HANDLE;
   VkDescriptorSet im2colNHWCDS = VK_NULL_HANDLE;
-  VkDescriptorSet im2colConvDS = VK_NULL_HANDLE;
 
   VulkanBuffer* bnScaleBuf = nullptr; // For batchnorm scale
   VulkanBuffer* bnBiasBuf = nullptr;  // For batchnorm bias
@@ -955,10 +957,6 @@ struct ConvLayer {
   uint32_t act;
 
   const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& getNhwcConvTuneParams() const {
-    if(convXSize == 3 && convYSize == 3)
-      return handle->tuneParams.hgemmCooperativeMatrixNHWC3x3;
-    if(convXSize == 5 && convYSize == 5)
-      return handle->tuneParams.hgemmCooperativeMatrixNHWC5x5;
     return handle->tuneParams.hgemmCooperativeMatrixNHWC;
   }
 
@@ -991,6 +989,7 @@ struct ConvLayer {
     }
 
     usingHgemmCooperativeMatrix = false;
+    usingHgemmCooperativeMatrixNCHW = false;
     usingNhwcConversion = false;
     nhwcConvPath = NhwcConvPath::None;
     nhwcSpatialSize = 0;
@@ -1017,6 +1016,19 @@ struct ConvLayer {
       usingNhwcConversion = handle_->pipelines->useNHWC && usingHgemmCooperativeMatrix;
     }
 
+    if(convXSize == 1 && convYSize == 1) {
+      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrixNCHW;
+      usingHgemmCooperativeMatrixNCHW =
+        handle_->usingFP16Storage &&
+        handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
+        handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+        handle_->tuneParams.vulkan.shouldUseFP16Compute &&
+        handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+        hgemmParams.isValid() &&
+        inChannels % hgemmParams.KWG == 0 &&
+        outChannels % hgemmParams.NWG == 0;
+    }
+
     // if ( convYSize == 3 || convYSize == 5 ) {
       // outTilesY = convYSize == 3 ? handle->tuneParams.conv3x3.outTileYSize : handle->tuneParams.conv5x5.outTileYSize;
       // outTilesX = convYSize == 3 ? handle->tuneParams.conv3x3.outTileXSize : handle->tuneParams.conv5x5.outTileXSize;
@@ -1035,13 +1047,12 @@ struct ConvLayer {
     int outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
 
     if(usingNhwcConversion) {
-      const auto& params = getNhwcConvTuneParams();
       // The NHWC tensor batch stride is the model-wide padded spatial stride.
       // Use the same extent for the im2col GEMM so its dispatch-z base agrees
       // with the physical tensor layout used by every other NHWC consumer.
       nhwcSpatialSize = handle_->paddedNNXYLen;
       if(convXSize == 1 && convYSize == 1) {
-        nhwcKSize = vk_helper::roundUpToMultipleInt(inChannels, params.KWG);
+        nhwcKSize = handle_->getNHWCChannelsPadded(inChannels);
         // The matrix N extent must cover the full model-wide NHWC row stride.
         // A smaller NWG-rounded extent would leave its tail unwritten, even
         // though a following 1x1 GEMM can consume that tail as K padding.
@@ -1051,9 +1062,9 @@ struct ConvLayer {
         // always contains the cooperative GEMM K padding.
         nhwcConvPath = NhwcConvPath::DirectMatmul1x1;
       } else if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-        nhwcKSize = vk_helper::roundUpToMultipleInt(convXSize * convYSize * inChannels, params.KWG);
+        nhwcKSize = convXSize * convYSize * handle_->getNHWCChannelsPadded(inChannels);
         nhwcNSize = handle_->getNHWCChannelsPadded(outChannels);
-        nhwcConvPath = NhwcConvPath::Implicit;
+        nhwcConvPath = NhwcConvPath::ExplicitIm2Col;
       } else {
         nhwcConvPath = NhwcConvPath::ExplicitIm2Col;
       }
@@ -1063,6 +1074,7 @@ struct ConvLayer {
       if(nhwcConvPath != NhwcConvPath::None) {
         std::vector<float> im2colWeights = vkcompute::convWeightsToNHWCIm2Col(
           desc->weights, inChannels, outChannels, convYSize, convXSize,
+          handle_->getNHWCChannelsPadded(inChannels),
           nhwcKSize, nhwcNSize
         );
         filterBuf = vk_helper::createReadOnlyBuffer(
@@ -1078,15 +1090,15 @@ struct ConvLayer {
         filterBuf = vk_helper::createReadOnlyBuffer(
           handle->vulkanDevice,
           transWeights,
-          useFP16,
+          usingHgemmCooperativeMatrixNCHW || useFP16,
           &res
         );
       }
-    } else if((nhwcConvPath == NhwcConvPath::ExplicitIm2Col ||
-               nhwcConvPath == NhwcConvPath::Implicit) &&
+    } else if(nhwcConvPath == NhwcConvPath::ExplicitIm2Col &&
               ((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5))) {
       std::vector<float> im2colWeights = vkcompute::convWeightsToNHWCIm2Col(
         desc->weights, inChannels, outChannels, convYSize, convXSize,
+        handle_->getNHWCChannelsPadded(inChannels),
         nhwcKSize, nhwcNSize
       );
       filterBuf = vk_helper::createReadOnlyBuffer(
@@ -1160,9 +1172,9 @@ struct ConvLayer {
 
   bool isBNActFusedPossible() {
     // KataGo's NormActConv is pre-activation (BN/activation before Conv),
-    // whereas the native implicit fused shader implements an output epilogue.
-    // Keep the existing Winograd input fusion, but do not substitute an
-    // output epilogue for the NHWC pre-activation operation.
+    // whereas the NHWC path uses an output epilogue. Keep the existing
+    // Winograd input fusion, but do not substitute an output epilogue for the
+    // NHWC pre-activation operation.
     return !handle->pipelines->useNHWC &&
       ((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5));
   }
@@ -1186,8 +1198,7 @@ struct ConvLayer {
       const size_t nhwcElts = std::max(conversionElts, std::max(im2colElts, outputElts));
       needed.size1 = std::max(needed.size1, nhwcElts);
       needed.size2 = std::max(needed.size2, nhwcElts);
-    } else if(nhwcConvPath == NhwcConvPath::DirectMatmul1x1 ||
-              nhwcConvPath == NhwcConvPath::Implicit) {
+    } else if(nhwcConvPath == NhwcConvPath::DirectMatmul1x1) {
       // These paths read the input tensor directly.  An in-place ConvLayer
       // invocation therefore needs a separate output tile before the result
       // is copied back to the model tensor.
@@ -1201,7 +1212,7 @@ struct ConvLayer {
 
   bool nhwcConvNeedsTemporaryOutput(VulkanBuffer* input, VulkanBuffer* output) const {
     return input == output &&
-      (nhwcConvPath == NhwcConvPath::DirectMatmul1x1 || nhwcConvPath == NhwcConvPath::Implicit);
+      nhwcConvPath == NhwcConvPath::DirectMatmul1x1;
   }
 
   void copyNhwcConvOutput(
@@ -1225,6 +1236,11 @@ struct ConvLayer {
       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT
     );
     vk_helper::recordBufferCopy(cb, source, destination, 0, 0, copySize);
+    vk_helper::barrierCommandBufferForBuffer(
+      cb, source,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+    );
     vk_helper::barrierCommandBufferForBuffer(
       cb, destination,
       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1285,74 +1301,6 @@ struct ConvLayer {
     CHECK_VK_MSG("Execute NHWC cooperative matrix ConvLayer: " + name, res);
   }
 
-  void doNHWCImplicitConv(
-    VkCommandBuffer& cb,
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output
-  ) {
-    assert(nhwcConvPath == NhwcConvPath::Implicit);
-    VkResult res = VK_ERROR_UNKNOWN;
-    const Pipeline& pipeline = convXSize == 3
-      ? handle->pipelines->im2colConv3x3
-      : handle->pipelines->im2colConv5x5;
-    const auto& params = getNhwcConvTuneParams();
-    if(im2colConvDS == VK_NULL_HANDLE) {
-      im2colConvDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
-      );
-      CHECK_VK_MSG("Allocate implicit NHWC Conv descriptor set for ConvLayer: " + name, res);
-    }
-    const int inputChannelsPadded = handle->getNHWCChannelsPadded(inChannels);
-    const int outputChannelsPadded = handle->getNHWCChannelsPadded(outChannels);
-    vkcompute::im2colConv(
-      handle->vulkanDevice, &pipeline, cb, im2colConvDS, input, filterBuf, output,
-      batchSize, nhwcSpatialSize, nhwcNSize, nhwcKSize,
-      nhwcSpatialSize * inputChannelsPadded,
-      nhwcSpatialSize * outputChannelsPadded,
-      nnXLen, nnYLen, nnXLen * nnYLen, nhwcSpatialSize,
-      inChannels, inputChannelsPadded, outChannels, outputChannelsPadded,
-      convXSize * convYSize * inChannels, convYSize, convXSize,
-      params, &res
-    );
-    CHECK_VK_MSG("Execute implicit NHWC ConvLayer: " + name, res);
-  }
-
-  void doNHWCImplicitConvBnAct(
-    VkCommandBuffer& cb,
-    int batchSize,
-    VulkanBuffer* input,
-    VulkanBuffer* output,
-    BatchNormLayer* bnLayer,
-    VulkanBuffer* mask
-  ) {
-    assert(nhwcConvPath == NhwcConvPath::Implicit);
-    assert(bnLayer != nullptr && mask != nullptr);
-    VkResult res = VK_ERROR_UNKNOWN;
-    const Pipeline& pipeline = handle->pipelines->getIm2ColConvBnActPipeline(convXSize, bnLayer->activation);
-    const auto& params = getNhwcConvTuneParams();
-    if(im2colConvDS == VK_NULL_HANDLE) {
-      im2colConvDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
-      );
-      CHECK_VK_MSG("Allocate fused implicit NHWC Conv descriptor set for ConvLayer: " + name, res);
-    }
-    const int inputChannelsPadded = handle->getNHWCChannelsPadded(inChannels);
-    const int outputChannelsPadded = handle->getNHWCChannelsPadded(outChannels);
-    vkcompute::im2colConvBnAct(
-      handle->vulkanDevice, &pipeline, cb, im2colConvDS, input, filterBuf, output,
-      bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf,
-      batchSize, nhwcSpatialSize, nhwcNSize, nhwcKSize,
-      nhwcSpatialSize * inputChannelsPadded,
-      nhwcSpatialSize * outputChannelsPadded,
-      nnXLen, nnYLen, nnXLen * nnYLen, nhwcSpatialSize,
-      inChannels, inputChannelsPadded, outChannels, outputChannelsPadded,
-      convXSize * convYSize * inChannels, convYSize, convXSize,
-      params, &res
-    );
-    CHECK_VK_MSG("Execute fused implicit NHWC ConvLayer: " + name, res);
-  }
-
   void doNHWCDirectConv1x1(
     VkCommandBuffer& cb,
     int batchSize,
@@ -1384,7 +1332,9 @@ struct ConvLayer {
     VulkanBuffer* output
   ) {
     VkResult res;
-    Pipeline targetPipeline = handle->pipelines->xgemmStridedBatchedFp32;
+    Pipeline targetPipeline = usingHgemmCooperativeMatrixNCHW
+      ? handle->pipelines->hgemmCooperativeMatrixNCHW
+      : handle->pipelines->xgemmStridedBatchedFp32;
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
       descriptorSet = vk_helper::allocateDescriptorSet(
@@ -1393,6 +1343,29 @@ struct ConvLayer {
         &res
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
+    }
+
+    if(usingHgemmCooperativeMatrixNCHW) {
+      SHADER_PROFILE_START("HGEMM1x1", cb);
+      vkcompute::doHgemmCooperativeMatrixNCHW(
+        handle->vulkanDevice,
+        handle->tuneParams,
+        &targetPipeline,
+        cb,
+        descriptorSet,
+        input,
+        filterBuf,
+        output,
+        batchSize,
+        paddedNNXYLen,
+        outChannels,
+        inChannels,
+        &res
+      );
+      SHADER_PROFILE_END("HGEMM1x1", cb);
+      CHECK_VK_MSG("Execute hgemmCooperativeMatrixNCHW for ConvLayer: " + name, res);
+      vk_helper::barrierCommandBufferForBuffer(cb, output);
+      return;
     }
 
     int filterStride = 0;
@@ -1690,8 +1663,6 @@ struct ConvLayer {
       }
       if(nhwcConvPath == NhwcConvPath::DirectMatmul1x1)
         doNHWCDirectConv1x1(cb, batchSize, input, convOutput);
-      else if(nhwcConvPath == NhwcConvPath::Implicit)
-        doNHWCImplicitConv(cb, batchSize, input, convOutput);
       else {
         assert(convWorkspace1 != nullptr);
         assert(convWorkspace2 != nullptr);
@@ -1729,17 +1700,12 @@ struct ConvLayer {
     if(handle->pipelines->useNHWC && !usingNhwcConversion)
       throw StringError("Vulkan ConvLayer " + name + " cannot fall back from the NHWC path to NCHW");
     if(usingNhwcConversion) {
-      if(nhwcConvPath != NhwcConvPath::Implicit)
-        throw StringError("Vulkan ConvLayer " + name + " has no fused NHWC implicit convolution path");
-      VulkanBuffer* convOutput = output;
-      if(nhwcConvNeedsTemporaryOutput(input, output)) {
-        if(convWorkspace1 == nullptr)
-          throw StringError("Vulkan ConvLayer " + name + " requires an output workspace for in-place NHWC convolution");
-        convOutput = convWorkspace1;
-      }
-      doNHWCImplicitConvBnAct(cb, batchSize, input, convOutput, bnLayer, mask);
-      if(convOutput != output)
-        copyNhwcConvOutput(cb, convOutput, output, batchSize);
+      if(nhwcConvPath != NhwcConvPath::ExplicitIm2Col)
+        throw StringError("Vulkan ConvLayer " + name + " has no fused NHWC explicit convolution path");
+      doNHWCIm2ColConv(
+        cb, batchSize, input, output, convWorkspace1, convWorkspace2,
+        bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation
+      );
       return;
     }
     doWinogradConvolutionBnActMask(cb, batchSize, input, convWorkspace1, convWorkspace2, output, bnLayer->mergedScaleBuf, bnLayer->mergedBiasBuf, mask, bnLayer->activation);
@@ -5833,7 +5799,13 @@ ComputeHandleInternal::ComputeHandleInternal(
     tuneParams.vulkan.shouldUseCooperativeMatrix &&
     tuneParams.vulkan.shouldUseFP16Compute &&
     tuneParams.hgemmCooperativeMatrixNHWC.isValid();
-  if(usingFP16NHWCCooperativeMatrix || usingFP16TransformerDualGemmSwiGLU) {
+  const bool usingFP16NCHWCooperativeMatrix =
+    usingFP16Storage &&
+    tuneParams.vulkan.canUseCooperativeMatrix &&
+    tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+    tuneParams.vulkan.shouldUseFP16Compute &&
+    tuneParams.hgemmCooperativeMatrixNCHW.isValid();
+  if(usingFP16NHWCCooperativeMatrix || usingFP16NCHWCooperativeMatrix || usingFP16TransformerDualGemmSwiGLU) {
     int spatialAlignment = 1;
     if(usingFP16NHWCCooperativeMatrix) {
       const auto addNhwcSpatialAlignment = [&](const auto& params) {
@@ -5841,9 +5813,11 @@ ComputeHandleInternal::ComputeHandleInternal(
           spatialAlignment = std::lcm(spatialAlignment, params.MWG);
       };
       addNhwcSpatialAlignment(tuneParams.hgemmCooperativeMatrixNHWC);
-      addNhwcSpatialAlignment(tuneParams.hgemmCooperativeMatrixNHWC3x3);
-      addNhwcSpatialAlignment(tuneParams.hgemmCooperativeMatrixNHWC5x5);
     }
+    if(usingFP16NCHWCooperativeMatrix)
+      spatialAlignment = std::lcm(
+        spatialAlignment, tuneParams.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment()
+      );
     if(usingFP16TransformerDualGemmSwiGLU)
       spatialAlignment = std::lcm(spatialAlignment, tuneParams.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
     this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
@@ -5986,6 +5960,7 @@ struct InputBuffers {
   float* ownershipResults; //Host pointer
   half_t* ownershipResultsHalf; //Host pointer
   int halfSpatialCapacity;
+  int spatialCapacity;
   int spatialSize;
   int inputStorageChannels;
   int policyStorageChannels;
@@ -5995,20 +5970,22 @@ struct InputBuffers {
     int inputChannelsPadded,
     int policyChannelsPadded,
     int ownershipChannelsPadded,
-    int paddedNNXYLen
+    int spatialCapacityNeeded,
+    int halfSpatialCapacityNeeded
   ) {
     bool inputStorageChanged = false;
-    if(inputChannelsPadded > inputStorageChannels) {
+    if(inputChannelsPadded > inputStorageChannels || spatialCapacityNeeded > spatialCapacity) {
       delete[] userInputBuffer;
-      inputStorageChannels = inputChannelsPadded;
+      inputStorageChannels = std::max(inputStorageChannels, inputChannelsPadded);
+      spatialCapacity = std::max(spatialCapacity, spatialCapacityNeeded);
       inputStorageChanged = true;
       userInputBuffer = new float[
-        static_cast<size_t>(inputStorageChannels) * maxBatchSize * spatialSize
+        static_cast<size_t>(inputStorageChannels) * maxBatchSize * spatialCapacity
       ];
-      userInputBufferElts = static_cast<size_t>(inputStorageChannels) * maxBatchSize * spatialSize;
+      userInputBufferElts = static_cast<size_t>(inputStorageChannels) * maxBatchSize * spatialCapacity;
     }
     if(
-      paddedNNXYLen > halfSpatialCapacity ||
+      halfSpatialCapacityNeeded > halfSpatialCapacity ||
       inputStorageChanged ||
       policyChannelsPadded > policyStorageChannels ||
       ownershipChannelsPadded > ownershipStorageChannels
@@ -6016,7 +5993,7 @@ struct InputBuffers {
       delete[] userInputBufferHalf;
       delete[] policyResultsHalf;
       delete[] ownershipResultsHalf;
-      halfSpatialCapacity = std::max(halfSpatialCapacity, paddedNNXYLen);
+      halfSpatialCapacity = std::max(halfSpatialCapacity, halfSpatialCapacityNeeded);
       policyStorageChannels = std::max(policyStorageChannels, policyChannelsPadded);
       ownershipStorageChannels = std::max(ownershipStorageChannels, ownershipChannelsPadded);
       userInputBufferHalf = new half_t[
@@ -6039,7 +6016,8 @@ struct InputBuffers {
     const int policyChannelsPadded = useNHWC ? policyStorageChannels : policyChannels;
     const int ownershipChannelsPadded = useNHWC ? ownershipStorageChannels : ownershipChannels;
     ensureStorageCapacity(
-      inputChannelsPadded, policyChannelsPadded, ownershipChannelsPadded, paddedNNXYLen
+      inputChannelsPadded, policyChannelsPadded, ownershipChannelsPadded,
+      useNHWC ? paddedNNXYLen : spatialCapacity, paddedNNXYLen
     );
   }
 
@@ -6072,6 +6050,7 @@ struct InputBuffers {
     inputStorageChannels = vk_helper::roundUpToMultipleInt(m.numInputChannels, 4);
     policyStorageChannels = vk_helper::roundUpToMultipleInt(m.numPolicyChannels, 4);
     ownershipStorageChannels = vk_helper::roundUpToMultipleInt(m.numOwnershipChannels, 4);
+    spatialCapacity = spatialSize;
     userInputBufferElts = static_cast<size_t>( inputStorageChannels ) * maxBatchSize * spatialSize;
     userInputGlobalBufferElts = static_cast<size_t>( m.numInputGlobalChannels ) * maxBatchSize;
     userInputMetaBufferElts = static_cast<size_t>( m.numInputMetaChannels ) * maxBatchSize;
@@ -6229,10 +6208,14 @@ void NeuralNet::getOutput(
   const int ownershipChannelStride = computeHandle->inputUsingNHWC
     ? handle->getNHWCChannelsPadded(computeHandle->model->numOwnershipChannels)
     : computeHandle->model->numOwnershipChannels;
+  const int inputSpatialStride = computeHandle->inputUsingNHWC
+    ? paddedNNXYLen
+    : nnXYLen;
   inputBuffers->ensureStorageCapacity(
-    inputChannelStride, policyChannelStride, ownershipChannelStride, paddedNNXYLen
+    inputChannelStride, policyChannelStride, ownershipChannelStride,
+    inputSpatialStride, paddedNNXYLen
   );
-  const size_t inputRowElts = static_cast<size_t>(inputChannelStride) * nnXLen * nnYLen;
+  const size_t inputRowElts = static_cast<size_t>(inputChannelStride) * inputSpatialStride;
   const size_t tightInputRowElts = static_cast<size_t>(numSpatialFeatures) * nnXLen * nnYLen;
   std::vector<float> tightSpatialInput;
   if(computeHandle->inputUsingNHWC)
@@ -6321,7 +6304,7 @@ void NeuralNet::getOutput(
             const size_t dst = (static_cast<size_t>(n) * paddedNNXYLen + xy) * inputChannelStride + c;
             const bool valid = xy < nnXYLen && c < numSpatialFeatures;
             inputBuffers->userInputBufferHalf[dst] = valid
-              ? half_float::half_cast<half_t>(inputBuffers->userInputBuffer[(static_cast<size_t>(n) * nnXYLen + xy) * inputChannelStride + c])
+              ? half_float::half_cast<half_t>(inputBuffers->userInputBuffer[(static_cast<size_t>(n) * inputSpatialStride + xy) * inputChannelStride + c])
               : half_float::half_cast<half_t>(0.0f);
           }
         }
@@ -6581,8 +6564,6 @@ void NeuralNet::getOutput(
         std::cerr << "Vulkan value-head nonfinite: batchSize=" << batchSize
                   << " useNHWC=" << (handle->pipelines->useNHWC ? 1 : 0)
                   << " generic1x1.accType=" << handle->tuneParams.hgemmCooperativeMatrixNHWC.accType
-                  << " implicit3x3.accType=" << handle->tuneParams.hgemmCooperativeMatrixNHWC3x3.accType
-                  << " implicit5x5.accType=" << handle->tuneParams.hgemmCooperativeMatrixNHWC5x5.accType
                   << " maskSums=";
         for(float maskSum: maskSums)
           std::cerr << " " << maskSum;
