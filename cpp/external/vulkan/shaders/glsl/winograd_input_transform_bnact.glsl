@@ -13,6 +13,7 @@ layout(constant_id = 8) const int INTILE_XOFFSET = -1;
 layout(constant_id = 9) const int CONV_YSIZE = 3;
 layout(constant_id = 10) const int CONV_XSIZE = 3;
 layout(constant_id = 11) const int ACTIVATION = 0; // 0: identity, 1: relu 2. mish, 12. mish-scale8
+layout(constant_id = 12) const int USE_NHWC = 0;
     
 layout(push_constant) uniform WinogradInputTransform{
   int nSize;
@@ -44,17 +45,14 @@ layout(set = 0, binding = 4) readonly buffer MaskBuffer {
 
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-// each work item process a tile in channel
-void main()
+void transformTile(bool useNHWC, int ntxty, int ic)
 {
-  int id0 = GlobalId0();
-  const int ntxty = id0;
+  int id0 = ntxty;
   const int tileX = id0 % numTilesX;
   id0 = int(id0 / numTilesX);
   const int tileY = id0 % numTilesY;
   id0 = int(id0 / numTilesY);
   const int n = id0;
-  const int ic = GlobalId1();
   const int nic = n * icSize + ic;
   const int xySize = xSize * ySize;
 
@@ -76,20 +74,21 @@ void main()
           // IDENTITY
           // value = (INPUT(nic,xy) * LOAD(scale, ic) + LOAD(bias,ic)) * LOAD(mask, n * xySize + xy) ;
           // value = fma(INPUT(nic,xy), LOAD(scale, ic), LOAD(bias,ic) * LOAD(mask, n * xySize + xy)) ;
-          value = (INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic)) * LOAD(mask, n * xyStride + xy);
+          value = (useNHWC ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic) : INPUT(nic,xy)) * LOAD(scale,ic) + LOAD(bias,ic);
+          value *= LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION == 1) {
           //RELU
-          value = max(INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic), ZERO) * LOAD(mask, n * xyStride + xy);
+          value = max((useNHWC ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic) : INPUT(nic,xy)) * LOAD(scale,ic) + LOAD(bias,ic), ZERO) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION == 2) {
-          float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
+          float a = (useNHWC ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic) : INPUT(nic,xy)) * LOAD(scale,ic) + LOAD(bias,ic);
           // value = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a*8.0f))) * LOAD(mask, n * xyStride + xy));
           value = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION == 12) {
           // MISH_SCALE8
-          float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
+          float a = (useNHWC ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic) : INPUT(nic,xy)) * LOAD(scale,ic) + LOAD(bias,ic);
           value = floatToReal(a < (LOG1PEXPTHRESHOLD*0.125f) ? a * tanh(log1p(exp(a*8.0f))) : a) * LOAD(mask, n * xyStride + xy);
         } else if (ACTIVATION == 3) {
-          float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
+          float a = (useNHWC ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic) : INPUT(nic,xy)) * LOAD(scale,ic) + LOAD(bias,ic);
           value = floatToReal(a / (1.0f + exp(-a))) * LOAD(mask, n * xyStride + xy);
         }
       }
@@ -186,7 +185,10 @@ void main()
   } else {
     // 
   }
-  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*icSizePadded + (_ic))*ntxtySizePadded + (_ntile),_value)
+  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) \
+    STORE(_transformed, useNHWC \
+      ? (((_suby) * INTILE_XSIZE + (_subx)) * ntxtySizePadded + (_ntile)) * icSizePadded + (_ic) \
+      : (((_suby) * INTILE_XSIZE + (_subx)) * icSizePadded + (_ic)) * ntxtySizePadded + (_ntile), _value)
 
   if(ntxty < ntxtySizePadded && ic < icSizePadded) {
     //Copy private tile out to transformed output
@@ -198,4 +200,19 @@ void main()
       }
     }
   }
+}
+
+void transformNCHW() {
+  transformTile(false, GlobalId0(), GlobalId1());
+}
+
+void transformNHWC() {
+  transformTile(true, GlobalId1(), GlobalId0());
+}
+
+void main() {
+  if(USE_NHWC != 0)
+    transformNHWC();
+  else
+    transformNCHW();
 }

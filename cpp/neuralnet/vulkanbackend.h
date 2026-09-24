@@ -9,12 +9,17 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <fstream>
 #include <cstdint>
 #include <iomanip>
+#include <cctype>
 #include <algorithm>
 #include <numeric>
 #include "../external/half-2.2.0/include/half.hpp"
+#include "../core/datetime.h"
+#include "../core/makedir.h"
 #include "../core/simpleallocator.h"
+#include "../dataio/homedata.h"
 #include "../neuralnet/activations.h"
 #include "../neuralnet/nninputs.h"
 #include "../neuralnet/nninterface.h"
@@ -24,20 +29,27 @@
 
 using half_t = half_float::half;
 
-// #define SHADER_PROFILE
-#ifdef SHADER_PROFILE
-#define SHADER_PROFILE_START(shaderName, cb) { \
-  uint64_t beginQueryIdx = handle->queryIdx; \
-  uint64_t endQueryIdx = handle->queryIdx+1; \
-  handle->queryIdx+=2; \
-  vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, handle->queryPool, beginQueryIdx);
-#define SHADER_PROFILE_END(shaderName, cb)  \
-  vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, handle->queryPool, endQueryIdx); \
-  handle->commandDispatchInfos.push_back( { shaderName, beginQueryIdx, endQueryIdx } );
-}
+// Vulkan shader benchmark timestamps are enabled independently of API debugging.
+#ifdef VK_BENCHMARK
+#define VK_BENCHMARK_START(benchmarkHandle, shaderName, cb) \
+  const bool benchmarkDispatchEnabled = \
+    benchmarkHandle != nullptr && benchmarkHandle->benchmarkEnabled; \
+  uint64_t benchmarkBeginQueryIdx = 0; \
+  uint64_t benchmarkEndQueryIdx = 0; \
+  if(benchmarkDispatchEnabled) { \
+    benchmarkBeginQueryIdx = benchmarkHandle->queryIdx; \
+    benchmarkEndQueryIdx = benchmarkHandle->queryIdx+1; \
+    benchmarkHandle->queryIdx+=2; \
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, benchmarkHandle->queryPool, benchmarkBeginQueryIdx); \
+  }
+#define VK_BENCHMARK_END(benchmarkHandle, shaderName, cb)  \
+  if(benchmarkDispatchEnabled) { \
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, benchmarkHandle->queryPool, benchmarkEndQueryIdx); \
+    benchmarkHandle->benchmarkDispatchInfos.push_back( { shaderName, benchmarkBeginQueryIdx, benchmarkEndQueryIdx } ); \
+  }
 #else 
-#define SHADER_PROFILE_START(shaderName, cb)
-#define SHADER_PROFILE_END(shaderName, cb) 
+#define VK_BENCHMARK_START(benchmarkHandle, shaderName, cb)
+#define VK_BENCHMARK_END(benchmarkHandle, shaderName, cb)
 #endif
 #define FLOAT16_SIZE_IN_BYTES 2
 
@@ -51,13 +63,13 @@ static size_t byteSizeofVectorContents(const typename std::vector<T>& vec) {
   return sizeof(T) * vec.size();
 }
 
-struct CommandDispatchInfo {
+struct VulkanBenchmarkDispatchInfo {
   std::string shaderName;
   uint64_t startQueryIdx;
   uint64_t endQueryIdx;
 };
 
-struct ShaderExecutionInfo {
+struct VulkanBenchmarkExecutionInfo {
   uint64_t callCount;
   uint64_t totalExecutionTimeNs;
 };
@@ -78,14 +90,18 @@ struct ComputeHandleInternal {
   bool usingFP16Storage = false;
   bool usingFP16Compute = false;
 
-#ifdef SHADER_PROFILE
+#ifdef VK_BENCHMARK
+  bool benchmarkEnabled = true;
   uint64_t runCount = 0;
   uint64_t queryIdx = 0;
   VkQueryPool queryPool = VK_NULL_HANDLE;
-  std::vector<CommandDispatchInfo> commandDispatchInfos;
-  std::unordered_map<std::string, ShaderExecutionInfo> shaderProfileInfos;
+  std::vector<VulkanBenchmarkDispatchInfo> benchmarkDispatchInfos;
+  std::unordered_map<std::string, VulkanBenchmarkExecutionInfo> benchmarkInfos;
 
-  void dumpShaderProfile() {
+  void dumpVulkanBenchmark(const std::string& modelName) {
+    if(!benchmarkEnabled)
+      return;
+
     runCount++;
 
     // Get timestampPeriod for tick -> nanosecond conversion
@@ -94,8 +110,8 @@ struct ComputeHandleInternal {
       timestampPeriod = static_cast<double>(vulkanDevice->info.properties.limits.timestampPeriod);
     }
 
-    // Query results for each dispatch and accumulate into shaderProfileInfos
-    for (const auto& dispatchInfo : commandDispatchInfos) {
+    // Query results for each dispatch and accumulate into benchmarkInfos.
+    for (const auto& dispatchInfo : benchmarkDispatchInfos) {
       const std::string& name = dispatchInfo.shaderName;
       uint64_t startIdx = dispatchInfo.startQueryIdx;
       uint64_t endIdx = dispatchInfo.endQueryIdx;
@@ -122,52 +138,97 @@ struct ComputeHandleInternal {
         executionNs = static_cast<uint64_t>(ns + 0.5);
       }
 
-      // Accumulate into shaderProfileInfos
-      auto iter = shaderProfileInfos.find(name);
-      if (iter == shaderProfileInfos.end()) {
-        ShaderExecutionInfo newInfo;
+      // Accumulate into benchmarkInfos.
+      auto iter = benchmarkInfos.find(name);
+      if (iter == benchmarkInfos.end()) {
+        VulkanBenchmarkExecutionInfo newInfo;
         newInfo.callCount = 1;
         newInfo.totalExecutionTimeNs = executionNs;
-        shaderProfileInfos[name] = newInfo;
+        benchmarkInfos[name] = newInfo;
       } else {
         iter->second.callCount += 1;
         iter->second.totalExecutionTimeNs += executionNs;
       }
     }
 
-    // Print profile results every 100 runs
-    if (runCount % 100 == 0) {
-      std::cout << "## Vulkan Shader Profile Results (Run " << runCount << "):\n";
-      std::cout << std::fixed << std::setprecision(3);
+    // Write one CSV report after the first 1000 model executions.
+    constexpr uint64_t benchmarkVisitCount = 1000;
+    if (runCount >= benchmarkVisitCount) {
+      auto sanitizeFileNamePart = [](const std::string& value) {
+        std::string result;
+        for(char c : value) {
+          if(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+            result += c;
+          else
+            result += '_';
+        }
+        return result.empty() ? std::string("unknown") : result;
+      };
 
-      for (auto& pair : shaderProfileInfos) {
+      const std::string benchmarkDirectory = HomeData::getHomeDataDir(true, "") + "/vulkan";
+      MakeDir::make(benchmarkDirectory);
+      const std::string benchmarkDirectoryWithReports = benchmarkDirectory + "/benchmarks";
+      MakeDir::make(benchmarkDirectoryWithReports);
+      const std::string outputPath = benchmarkDirectoryWithReports + "/" +
+        sanitizeFileNamePart(vulkanDevice->info.deviceName) + "-" +
+        sanitizeFileNamePart(modelName) + "-" +
+        DateTime::getCompactDateTimeString() + ".csv";
+
+      std::ofstream output(outputPath, std::ios::out);
+      if(!output)
+        throw StringError("Could not open Vulkan benchmark output file: " + outputPath);
+
+      uint64_t totalExecutionTimeNs = 0;
+      for (const auto& pair : benchmarkInfos)
+        totalExecutionTimeNs += pair.second.totalExecutionTimeNs;
+
+      output << "pipeline,average_ms,calls_per_sec,calls_per_visit,total_ms,calls,execution_percent\n";
+      output << std::fixed << std::setprecision(6);
+      for (const auto& pair : benchmarkInfos) {
         const std::string& name = pair.first;
-        const ShaderExecutionInfo& info = pair.second;
+        const VulkanBenchmarkExecutionInfo& info = pair.second;
 
-        double totalTimeSec = static_cast<double>(info.totalExecutionTimeNs) / 1e9;  // ns -> sec
-        double avgTimeMs = (info.callCount > 0)
-          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(info.callCount) / 1e6  // ns -> ms
+        double totalTimeSec = static_cast<double>(info.totalExecutionTimeNs) / 1e9;
+        double avgTimeMs = info.callCount > 0
+          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(info.callCount) / 1e6
+          : 0.0;
+        double callsPerSec = totalTimeSec > 0.0
+          ? static_cast<double>(info.callCount) / totalTimeSec
+          : 0.0;
+        double callsPerVisit = static_cast<double>(info.callCount) / static_cast<double>(benchmarkVisitCount);
+        double executionPercent = totalExecutionTimeNs > 0
+          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(totalExecutionTimeNs) * 100.0
           : 0.0;
 
-        std::cout << name << " / " << info.callCount
-                  << " / " << totalTimeSec << " s / " << avgTimeMs << " ms\n";
-
-        // Reset counters for next interval
-        pair.second.callCount = 0;
-        pair.second.totalExecutionTimeNs = 0;
+        output << name << ","
+               << avgTimeMs << ","
+               << callsPerSec << ","
+               << callsPerVisit << ","
+               << static_cast<double>(info.totalExecutionTimeNs) / 1e6 << ","
+               << info.callCount << ","
+               << executionPercent << "\n";
       }
+      output.flush();
+      if(!output)
+        throw StringError("Could not write Vulkan benchmark output file: " + outputPath);
 
-      std::cout << std::defaultfloat;
-      std::cout << "## End of Vulkan Shader Profile Results\n";
+      benchmarkEnabled = false;
+      benchmarkInfos.clear();
     }
 
-    // Clear dispatch infos and reset query pool for next batch
-    commandDispatchInfos.clear();
+    // Clear dispatch infos for the next batch. The query pool is reset by the
+    // next evaluation command buffer before any timestamp is written.
+    benchmarkDispatchInfos.clear();
     queryIdx = 0;
-    vkResetQueryPool(device, queryPool, 0, 4096);
   }
 
-  
+  ~ComputeHandleInternal() {
+#ifdef VK_BENCHMARK
+    if(queryPool != VK_NULL_HANDLE)
+      vkDestroyQueryPool(device, queryPool, nullptr);
+#endif
+  }
+
 #endif
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
@@ -190,8 +251,8 @@ struct ComputeHandleInternal {
     return tuneParams.xgemm.KWG;
   }
 
-  int getNHWCChannelsPadded(int channels) const {
-    if(!pipelines->useNHWC)
+  int getNHWCChannelsPadded(int channels, bool forceNHWC = false) const {
+    if(!pipelines->useNHWC && !forceNHWC)
       return channels;
     const auto channelAlignment = [](const auto& params) {
       if(params.NWG <= 0)
@@ -203,6 +264,7 @@ struct ComputeHandleInternal {
       channelAlignmentValue,
       channelAlignment(tuneParams.hgemmCooperativeMatrixNHWC)
     );
+    channelAlignmentValue = std::lcm(channelAlignmentValue, 4);
     return vk_helper::roundUpToMultipleInt(
       channels, channelAlignmentValue
     );
@@ -339,16 +401,6 @@ struct BlockStack {
     VulkanBuffer* convWorkspace2
   );
 
-  void debug(
-    int batchSize,
-    ScratchBuffers *scratch,
-    VulkanBuffer* trunk,
-    VulkanBuffer* trunkScratch,
-    VulkanBuffer* mask,
-    VulkanBuffer* maskSum,
-    VulkanBuffer* convWorkspace,
-    VulkanBuffer* convWorkspace2
-  );
 };
 
 #endif

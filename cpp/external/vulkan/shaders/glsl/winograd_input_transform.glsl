@@ -13,6 +13,7 @@ layout(constant_id = 7) const int INTILE_YOFFSET = -1;
 layout(constant_id = 8) const int INTILE_XOFFSET = -1;
 layout(constant_id = 9) const int CONV_YSIZE = 3;
 layout(constant_id = 10) const int CONV_XSIZE = 3;
+layout(constant_id = 11) const int USE_NHWC = 0;
     
 layout(push_constant) uniform WinogradInputTransform{
   int nSize;
@@ -34,17 +35,14 @@ layout(set = 0, binding = 1) writeonly buffer TransformedBuffer {
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-// each work item process a tile in channel
-void main()
+void transformTile(bool useNHWC, int ntxty, int ic)
 {
-  int id0 = GlobalId0();
-  const int ntxty = id0;
+  int id0 = ntxty;
   const int tileX = id0 % numTilesX;
   id0 = int(id0 / numTilesX);
   const int tileY = id0 % numTilesY;
   id0 = int(id0 / numTilesY);
   const int n = id0;
-  const int ic = GlobalId1();
   const int nic = n * icSize + ic;
   const int xySize = xSize * ySize;
 
@@ -62,7 +60,9 @@ void main()
       real value = ZERO;
       if(y >= 0 && y < ySize && x >= 0 && x < xSize && n < nSize && ic < icSize) {
         int xy = y * xSize + x;
-        value = INPUT(nic,xy);
+        value = useNHWC
+          ? LOAD(_input, (n * xyStride + xy) * icSizePadded + ic)
+          : INPUT(nic,xy);
       }
       WTILE(subY,subX) = value;
     }
@@ -157,7 +157,10 @@ void main()
   } else {
     // 
   }
-  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) STORE(_transformed,(((_suby) * INTILE_XSIZE + (_subx))*icSizePadded + (_ic))*ntxtySizePadded + (_ntile),_value)
+  #define WRITETRANS(_suby,_subx,_ic,_ntile,_value) \
+    STORE(_transformed, useNHWC \
+      ? (((_suby) * INTILE_XSIZE + (_subx)) * ntxtySizePadded + (_ntile)) * icSizePadded + (_ic) \
+      : (((_suby) * INTILE_XSIZE + (_subx)) * icSizePadded + (_ic)) * ntxtySizePadded + (_ntile), _value)
 
   if(ntxty < ntxtySizePadded && ic < icSizePadded) {
     //Copy private tile out to transformed output
@@ -168,4 +171,19 @@ void main()
       }
     }
   }
+}
+
+void transformNCHW() {
+  transformTile(false, GlobalId0(), GlobalId1());
+}
+
+void transformNHWC() {
+  transformTile(true, GlobalId1(), GlobalId0());
+}
+
+void main() {
+  if(USE_NHWC != 0)
+    transformNHWC();
+  else
+    transformNCHW();
 }

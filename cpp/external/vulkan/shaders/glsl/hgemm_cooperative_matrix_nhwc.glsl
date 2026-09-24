@@ -90,6 +90,9 @@ layout(push_constant) uniform HGemmCooperativeMatrixNHWCParams {
   int kSize;
   int aRowStride;
   int cRowStride;
+  int aBatchStride;
+  int bBatchStride;
+  int cBatchStride;
 };
 
 #if SA == 1
@@ -155,11 +158,9 @@ void main() {
   const int subgroupN = subgroupLinear / subgroupCountM;
   const int groupMBase = groupM * MWG;
   const int groupNBase = groupN * NWG;
-  const int baseA = batch * mSize * aRowStride;
-  // The NHWC Conv filter is one shared [K,N] matrix for every batch item.
-  // Only A and C carry the dispatch-z batch stride.
-  const int baseB = 0;
-  const int baseC = batch * mSize * cRowStride;
+  const int baseA = batch * aBatchStride;
+  const int baseB = batch * bBatchStride;
+  const int baseC = batch * cBatchStride;
 
   coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag[MWI];
   coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> bFrag;
@@ -206,7 +207,7 @@ void main() {
 #else
         coopMatLoad(
           bFrag, bData,
-          (kwg + kOffset) * nSize + groupNBase + bOffset,
+          baseB + (kwg + kOffset) * nSize + groupNBase + bOffset,
           nSize,
           gl_CooperativeMatrixLayoutRowMajor
         );

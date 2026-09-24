@@ -18,6 +18,7 @@ layout(constant_id=5) const int OUTTILE_YSIZE = 2;
 layout(constant_id=6) const int OUTTILE_XSIZE = 2;
 layout(constant_id=7) const int CONV_YSIZE = 3;
 layout(constant_id=8) const int CONV_XSIZE = 3;
+layout(constant_id=9) const int USE_NHWC = 0;
 
 layout(set=0, binding = 0) readonly buffer InputBuffer {
     realstore _input[];
@@ -40,17 +41,17 @@ layout(push_constant) uniform WinogradOutputRecover{
 };
 
 #define WTILE(_y, _x) wTile[(_y)*INTILE_XSIZE + (_x)]
-#define TRANS(_suby, _subx, _oc, _ntile) LOAD(_input, ((((_suby) * INTILE_XSIZE + (_subx)) * outChannelsPadded + (_oc)) * ntxtySizePadded + (_ntile)))
+#define TRANS(_suby, _subx, _oc, _ntile) LOAD(_input, useNHWC \
+    ? (((_suby) * INTILE_XSIZE + (_subx)) * ntxtySizePadded + (_ntile)) * outChannelsPadded + (_oc) \
+    : (((_suby) * INTILE_XSIZE + (_subx)) * outChannelsPadded + (_oc)) * ntxtySizePadded + (_ntile))
 // #define WRITEOUTPUT(_noc, _y, _x, _value) STORE(_output, (((_noc) * xyStride + (_y)) * xSize + (_x)), _value)
-#define WRITEOUTPUT(_noc,_y,_x,_value) STORE(_output,(_noc) * xyStride + (_y) * xSize + (_x),_value)
+#define WRITEOUTPUT(_batch,_oc,_noc,_y,_x,_value) STORE(_output, useNHWC \
+    ? ((_batch) * xyStride + (_y) * xSize + (_x)) * outChannelsPadded + (_oc) \
+    : (_noc) * xyStride + (_y) * xSize + (_x), _value)
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in; 
 
-void main() {
-    const int tileX = GlobalId0();
-    const int tileY = GlobalId1();
-    const int batchOutC = GlobalId2();
-    const int batch = batchOutC / outChannels;
-    const int outC = batchOutC % outChannels;
+void transformTile(bool useNHWC, int tileX, int tileY, int batch, int outC) {
+    const int batchOutC = batch * outChannels + outC;
     const int nTiles = (batch * numTilesY + tileY) * numTilesX + tileX;
 
     real wTile[INTILE_YSIZE * INTILE_XSIZE];
@@ -151,7 +152,7 @@ void main() {
                  && tileX < numTilesX 
                  && tileY < numTilesY ) {
                     real result = WTILE(subY, subX);
-                    WRITEOUTPUT( batchOutC, y, x, result );
+                    WRITEOUTPUT(batch, outC, batchOutC, y, x, result);
             }
         }
     }
@@ -193,4 +194,30 @@ void main() {
     //     if (INTILE_XSIZE * INTILE_YSIZE >= 16) STORE(_output, 24, real(WTILE(3,3)));
     // }
 
+}
+
+void transformNCHW() {
+    const int tileX = GlobalId0();
+    const int tileY = GlobalId1();
+    const int batchOutC = GlobalId2();
+    transformTile(false, tileX, tileY, batchOutC / outChannels, batchOutC % outChannels);
+}
+
+void transformNHWC() {
+    const int outC = GlobalId0();
+    if(outC >= outChannelsPadded)
+        return;
+    int ntile = GlobalId1();
+    const int tileX = ntile % numTilesX;
+    ntile /= numTilesX;
+    const int tileY = ntile % numTilesY;
+    const int batch = ntile / numTilesY;
+    transformTile(true, tileX, tileY, batch, outC);
+}
+
+void main() {
+    if(USE_NHWC != 0)
+        transformNHWC();
+    else
+        transformNCHW();
 }

@@ -15,7 +15,51 @@ struct ComputeHandleInternal;
 
 namespace vkcompute {
 
+  void dispatchPipeline(
+    ComputeHandleInternal* benchmarkHandle,
+    const VulkanDevice* device,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    const void* pushConstants,
+    uint32_t pushConstantSize,
+    uint32_t workgroupCountX,
+    uint32_t workgroupCountY,
+    uint32_t workgroupCountZ,
+    const char* benchmarkName
+  );
+
+  void doBatchNormMask(
+    ComputeHandleInternal* handle,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    VulkanBuffer* mergedScale,
+    VulkanBuffer* mergedBias,
+    VulkanBuffer* mask,
+    int batchSize,
+    int numChannels,
+    int spatialSize,
+    int maskSpatialStride,
+    int channelsPadded,
+    const char* benchmarkName
+  );
+
+  void doMatBiasNC(
+    ComputeHandleInternal* handle,
+    const Pipeline* pipeline,
+    VkCommandBuffer cb,
+    VkDescriptorSet descriptorSet,
+    VulkanBuffer* input,
+    VulkanBuffer* bias,
+    int batchSize,
+    int numChannels
+  );
+
   void convertNCHWToNHWC(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* pipeline,
     VkCommandBuffer cb,
@@ -31,6 +75,7 @@ namespace vkcompute {
   );
 
   void convertNHWCToNCHW(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* pipeline,
     VkCommandBuffer cb,
@@ -46,6 +91,7 @@ namespace vkcompute {
   );
 
   void transformerApplyRoPE(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* ropePipeline,
     VkCommandBuffer cb,
@@ -76,6 +122,7 @@ namespace vkcompute {
   );
 
   void transformerRMSNorm(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* rmsNormPipeline,
     VkCommandBuffer cb,
@@ -104,6 +151,7 @@ namespace vkcompute {
   );
 
   void transformerScaleDotProductCooperative(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* attentionPipeline,
     VkCommandBuffer cb,
@@ -142,6 +190,7 @@ namespace vkcompute {
   );
 
   void extractChannel0(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* extractPipeline,
     VkCommandBuffer& commandBuffer,
@@ -159,33 +208,8 @@ namespace vkcompute {
     bool begin = true
   );
 
-  void im2colNHWC(
-    const VulkanDevice* device,
-    const Pipeline* pipeline,
-    VkCommandBuffer cb,
-    VkDescriptorSet descriptorSet,
-    const VulkanBuffer* input,
-    VulkanBuffer* output,
-    const VulkanBuffer* scale,
-    const VulkanBuffer* bias,
-    const VulkanBuffer* mask,
-    int batchSize,
-    int xSize,
-    int ySize,
-    int logicalSpatialSize,
-    int spatialSize,
-    int maskSpatialStride,
-    int channels,
-    int channelsPadded,
-    int kSize,
-    int logicalKSize,
-    int convYSize,
-    int convXSize,
-    int activation,
-    VkResult* result
-  );
-
   void convertNHWCMatrixToNCHW(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* pipeline,
     VkCommandBuffer cb,
@@ -202,6 +226,7 @@ namespace vkcompute {
   );
 
   void doHgemmCooperativeMatrixNHWC(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -217,10 +242,14 @@ namespace vkcompute {
     int aRowStride,
     int cRowStride,
     const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
-    VkResult* result
+    VkResult* result,
+    int aBatchStride = 0,
+    int bBatchStride = 0,
+    int cBatchStride = 0
   );
 
   void doHgemmCooperativeMatrixNHWC(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -236,7 +265,10 @@ namespace vkcompute {
     int aRowStride,
     int cRowStride,
     const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
-    VkResult* result
+    VkResult* result,
+    int aBatchStride = 0,
+    int bBatchStride = 0,
+    int cBatchStride = 0
   );
 
   void winogradFilterTransform3x3_2x2(float& a0, float& a1, float& a2, float& a3);
@@ -257,18 +289,16 @@ namespace vkcompute {
     uint32_t inTileXSize
   );
 
-  std::vector<float> convWeightsToNHWCIm2Col(
+  std::vector<float> convWeightsToNHWC1x1Gemm(
     const std::vector<float>& weights,
     uint32_t inChannels,
     uint32_t outChannels,
-    uint32_t convY,
-    uint32_t convX,
-    uint32_t kChannelStride,
     uint32_t kSize,
     uint32_t nSize
   );
 
   void convInputsToWinogradDomain(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -282,10 +312,12 @@ namespace vkcompute {
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
     uint32_t convSize,
-    VkResult *result
+    VkResult *result,
+    bool useNHWC = false
   ); 
 
   void convInputToWinogradDomainBnActMask(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -302,10 +334,12 @@ namespace vkcompute {
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
     uint32_t convSize,
-    VkResult *result
+    VkResult *result,
+    bool useNHWC = false
   );
 
   void winogradOutputToSpatialDomain(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const Pipeline* pipeline,
     VkCommandBuffer cb,
@@ -315,10 +349,12 @@ namespace vkcompute {
     uint32_t nnYLen, uint32_t nnXLen, uint32_t xyStride,
     uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
     uint32_t outChannels, uint32_t outChannelsPadMultiple,
-    VkResult *result
+    VkResult *result,
+    bool useNHWC = false
   ); 
 
   void xgemmBatched(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -333,6 +369,7 @@ namespace vkcompute {
   );
 
   void xgemmStridedBatchedNN(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -346,6 +383,7 @@ namespace vkcompute {
   );
 
   void batchedXGemmDirect_MK_NK_MN(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -360,6 +398,7 @@ namespace vkcompute {
   );
 
   void doHgemmCooperativeMatrix(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -372,6 +411,7 @@ namespace vkcompute {
   );
 
   void doHgemmCooperativeMatrixNCHW(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -385,6 +425,7 @@ namespace vkcompute {
   );
 
   void doTransformerDualGemmSwiGLU(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const vk_shader::tune::VulkanTuneParams& tuneParams,
     const Pipeline* pipeline,
@@ -408,6 +449,73 @@ namespace vkcompute {
     VkResult* result
   );
 
+  void performAddChannelBiases(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& descriptorSet,
+    VkDescriptorSet& nchwToNhwcDescriptorSet,
+    VkDescriptorSet& nhwcToNchwDescriptorSet,
+    VulkanBuffer* input,
+    VulkanBuffer* bias,
+    int ncSize,
+    int cSize,
+    int nchwSpatialStride,
+    VulkanBuffer* nhwcScratch,
+    bool begin = true
+  );
+
+  void performAddPointWise(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& descriptorSet,
+    VulkanBuffer* acc,
+    VulkanBuffer* value,
+    int totalSize,
+    bool begin = true
+  );
+
+  void performGpoolMask(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& descriptorSet,
+    VkDescriptorSet& nchwToNhwcDescriptorSet,
+    VulkanBuffer* gpoolConvOut,
+    VulkanBuffer* gpoolConcat,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    int batchSize,
+    int gpoolChannels,
+    int nnXYLen,
+    VulkanBuffer* nhwcScratch,
+    VkResult* result,
+    bool begin = true
+  );
+
+  void performValueHeadPool(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& descriptorSet,
+    VkDescriptorSet& nchwToNhwcDescriptorSet,
+    VulkanBuffer* gpoolConvOut,
+    VulkanBuffer* gpoolConcat,
+    VulkanBuffer* maskSum,
+    VulkanBuffer* nhwcScratch,
+    int batchSize,
+    int gPoolChannels,
+    int nnXYLen,
+    bool begin = true
+  );
+
+  void computeMaskSums(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer& commandBuffer,
+    VkDescriptorSet& descriptorSet,
+    int batchSize,
+    VulkanBuffer* mask,
+    VulkanBuffer* maskSum,
+    bool begin = true
+  );
+
   struct SpatialRMSNormSizing {
     int numCHWWorkgroups;   // workgroups per batch element for pass 1
     int tilesPerGroupPass1; // tiles per group for pass 1
@@ -417,6 +525,7 @@ namespace vkcompute {
   SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize);
 
   void doSwiGLU(
+    ComputeHandleInternal* handle,
     const VulkanDevice* device,
     const VkCommandBuffer& cb,
     const VkDescriptorSet& descriptorSet,

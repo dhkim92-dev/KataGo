@@ -3105,7 +3105,8 @@ namespace {
         }
         else if(pipeline->name.find("hgemm_cooperative_matrix_nhwc_") == 0) {
           vk_shader::push::HGemmCooperativeMatrixNHWCParams params = {
-            runGemmM, runGemmN, runGemmK, runGemmK, runGemmN
+            runGemmM, runGemmN, runGemmK, runGemmK, runGemmN,
+            runGemmM * runGemmK, 0, runGemmM * runGemmN
           };
           push(params);
           dispatch(runGemmM / activeNhwcParams.MWG, runGemmN / activeNhwcParams.NWG, gemmBatch);
@@ -4351,7 +4352,7 @@ namespace {
       }
       const auto recordFused = [&]() {
         vkcompute::doTransformerDualGemmSwiGLU(
-          device, candidateConfig, fusedPipeline, commandBuffer, fusedDescriptorSet,
+          nullptr, device, candidateConfig, fusedPipeline, commandBuffer, fusedDescriptorSet,
           buffers[0], buffers[2], buffers[1], buffers[3], buffers[4],
           nchwToNhwcPipeline, nchwToNhwcDescriptorSet,
           nhwcToNchwPipeline, nhwcToNchwDescriptorSet,
@@ -4362,13 +4363,13 @@ namespace {
       const auto recordLegacy = [&]() {
         if(legacyNCHW) {
           vkcompute::doHgemmCooperativeMatrixNCHW(
-            device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
+            nullptr, device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
             buffers[5], buffers[6], buffers[7], batchSize, hwSize, packedOCSize, cSize, &result
           );
         }
         else {
           vkcompute::xgemmStridedBatchedNN(
-            device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
+            nullptr, device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
             hwSize, packedOCSize, cSize,
             cSize * hwSize, 0, packedOCSize * hwSize,
             buffers[5], buffers[6], buffers[7], batchSize, &result
@@ -4377,7 +4378,7 @@ namespace {
         if(result != VK_SUCCESS)
           return;
         vkcompute::doSwiGLU(
-          device, commandBuffer, swigluDescriptorSet, *swigluPipeline, legacyConfig,
+          nullptr, device, commandBuffer, swigluDescriptorSet, *swigluPipeline, legacyConfig,
           buffers[7], buffers[7], buffers[8], batchSize * ffnSize * hwSize,
           packedOCSize * hwSize, ffnSize * hwSize
         );
@@ -6322,8 +6323,8 @@ namespace {
         ? (ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5)
         : (ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5);
       VkResult result = InputTransform
-        ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan)
-        : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan);
+        ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC)
+        : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC);
       if(result == VK_SUCCESS) {
         pipeline.name += ConvSize == 3 ? "_3x3" : "_5x5";
         targets.push_back(&pipeline);
@@ -6729,12 +6730,9 @@ namespace {
     double xgemmDirectBaselineCallsPerSecond,
     double xgemmBaselineCallsPerSecond
   ) {
-    const bool isTransformerModel =
-      context.modelInfo.transformerHeadDim > 0 && context.modelInfo.transformerVHeadDim > 0;
     const bool canUseHgemmCooperativeMatrix =
       config.vulkan.canUseCooperativeMatrix &&
-      config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute &&
-      isTransformerModel;
+      config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute;
     const bool canUseNCHW =
       config.vulkan.canUseCooperativeMatrix &&
       config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute;
@@ -6750,13 +6748,11 @@ namespace {
     VulkanTuneParams cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = true;
+    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = canUseHgemmCooperativeMatrix;
     const double hgemmNHWCCallsPerSecond = canUseHgemmCooperativeMatrix
       ? runTuner<HgemmCooperativeMatrixNHWCTunerImpl>(context, cooperativeConfig)
       : 0.0;
-    const bool useHgemmNHWC = canUseHgemmCooperativeMatrix && VulkanTuner::isFastEnough(
-      hgemmNHWCCallsPerSecond, xgemmBaselineCallsPerSecond,
-      VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
-    );
+    const bool useHgemmNHWC = canUseHgemmCooperativeMatrix && cooperativeConfig.hgemmCooperativeMatrixNHWC.isValid();
     if(useHgemmNHWC) {
       config.hgemmCooperativeMatrixNHWC = cooperativeConfig.hgemmCooperativeMatrixNHWC;
       config.vulkan.shouldUseCooperativeMatrix = true;
@@ -6767,8 +6763,7 @@ namespace {
         "Vulkan hgemmCooperativeMatrixNHWC baseline comparison: xgemm=" +
         Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
         " calls/s, hgemmCooperativeMatrixNHWC=" + Global::strprintf("%.6g", hgemmNHWCCallsPerSecond) +
-        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO) +
-        ", selected=" + (useHgemmNHWC ? "true" : "false")
+        " calls/s, ConvLayer test path=" + (useHgemmNHWC ? "enabled" : "disabled")
       );
     }
 

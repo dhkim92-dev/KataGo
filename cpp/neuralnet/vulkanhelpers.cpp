@@ -74,7 +74,7 @@ VulkanContext::VulkanContext(
     }
   }
 
-  #ifdef VULKAN_DEBUG
+  #ifdef VULKAN_API_DEBUG
   // Setup debug messenger
   VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = {};
   debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -110,7 +110,7 @@ VulkanContext::~VulkanContext() {
   }
   this->devicesToUse.clear();
 
-  #ifdef VULKAN_DEBUG
+  #ifdef VULKAN_API_DEBUG
     if ( this->debugMessenger != VK_NULL_HANDLE ) {
       auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(this->instance, "vkDestroyDebugUtilsMessengerEXT");
       if (func != nullptr) {
@@ -233,13 +233,13 @@ std::string vk_helper::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
 VkInstance vk_helper::createVulkanInstance() {
   VkInstance instance = VK_NULL_HANDLE;
   std::vector<const char*> requiredLayers = {
-#ifdef VULKAN_DEBUG
+#ifdef VULKAN_API_DEBUG
     "VK_LAYER_KHRONOS_validation",
 #endif
   };
 
   std::vector<const char*> requiredExtensions = {
-#ifdef VULKAN_DEBUG
+#ifdef VULKAN_API_DEBUG
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 #endif
 #ifdef __APPLE__

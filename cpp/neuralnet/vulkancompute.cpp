@@ -15,6 +15,7 @@ namespace vkcompute {
 namespace {
 
 void convertNCHWNHWC(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -49,29 +50,158 @@ void convertNCHWNHWC(
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update descriptors for NCHW/NHWC conversion", *result);
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
-
-  const int channelsPadded = vk_helper::roundUpToMultipleInt(channels, 4);
+  const int channelsPadded = handle->getNHWCChannelsPadded(channels, true);
   const vk_shader::push::NCHWNHWCParams pushParams = {
     batchSize, channels, spatialSize, spatialStride, channelsPadded, logicalSpatialSize
   };
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
 
   const int dispatchSpatialSize = nhwcToNchw ? std::max(spatialSize, spatialStride) : spatialSize;
   const size_t vectorCount = static_cast<size_t>(batchSize) * static_cast<size_t>(dispatchSpatialSize) * static_cast<size_t>(channelsPadded / 4);
   const uint32_t workgroupCount = static_cast<uint32_t>(
     (vectorCount + pipeline->localSizeX - 1) / pipeline->localSizeX
   );
-  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
+    workgroupCount == 0 ? 1 : workgroupCount, 1, 1,
+    nhwcToNchw ? "NHWC_TO_NCHW" : "NCHW_TO_NHWC"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 }
 
+void dispatchPipeline(
+  ComputeHandleInternal* benchmarkHandle,
+  const VulkanDevice* device,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  const void* pushConstants,
+  uint32_t pushConstantSize,
+  uint32_t workgroupCountX,
+  uint32_t workgroupCountY,
+  uint32_t workgroupCountZ,
+  const char* benchmarkName
+) {
+  assert(device != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+#ifndef VK_BENCHMARK
+  (void)benchmarkHandle;
+  (void)benchmarkName;
+#endif
+  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+  vkCmdBindDescriptorSets(
+    cb,
+    VK_PIPELINE_BIND_POINT_COMPUTE,
+    pipeline->layout,
+    0,
+    1,
+    &descriptorSet,
+    0,
+    nullptr
+  );
+  if(pushConstants != nullptr && pushConstantSize > 0) {
+    vkCmdPushConstants(
+      cb,
+      pipeline->layout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      pushConstantSize,
+      pushConstants
+    );
+  }
+  VK_BENCHMARK_START(benchmarkHandle, benchmarkName, cb);
+  vkCmdDispatch(cb, workgroupCountX, workgroupCountY, workgroupCountZ);
+  VK_BENCHMARK_END(benchmarkHandle, benchmarkName, cb);
+}
+
+void doBatchNormMask(
+  ComputeHandleInternal* handle,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  VulkanBuffer* input,
+  VulkanBuffer* output,
+  VulkanBuffer* mergedScale,
+  VulkanBuffer* mergedBias,
+  VulkanBuffer* mask,
+  int batchSize,
+  int numChannels,
+  int spatialSize,
+  int maskSpatialStride,
+  int channelsPadded,
+  const char* benchmarkName
+) {
+  assert(handle != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mergedScale),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, mergedBias),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  const vk_shader::push::BatchNormMaskParams pushParams = {
+    static_cast<uint32_t>(batchSize),
+    static_cast<uint32_t>(numChannels),
+    static_cast<uint32_t>(spatialSize),
+    static_cast<uint32_t>(maskSpatialStride),
+    static_cast<uint32_t>(channelsPadded)
+  };
+  const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(spatialSize));
+  const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(numChannels));
+  dispatchPipeline(
+    handle, handle->vulkanDevice, pipeline, cb, descriptorSet,
+    &pushParams, sizeof(pushParams),
+    (globalSizeX + pipeline->localSizeX - 1u) / pipeline->localSizeX,
+    (globalSizeY + pipeline->localSizeY - 1u) / pipeline->localSizeY,
+    1u, benchmarkName
+  );
+  vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
+void doMatBiasNC(
+  ComputeHandleInternal* handle,
+  const Pipeline* pipeline,
+  VkCommandBuffer cb,
+  VkDescriptorSet descriptorSet,
+  VulkanBuffer* input,
+  VulkanBuffer* bias,
+  int batchSize,
+  int numChannels
+) {
+  assert(handle != nullptr);
+  assert(pipeline != nullptr);
+  assert(cb != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, bias)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  const vk_shader::push::AddChannelBiasNCParams pushConstants = {
+    static_cast<uint32_t>(batchSize), static_cast<uint32_t>(numChannels)
+  };
+  const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(numChannels));
+  const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
+  dispatchPipeline(
+    handle, handle->vulkanDevice, pipeline, cb, descriptorSet,
+    &pushConstants, sizeof(pushConstants),
+    (globalSizeX + pipeline->localSizeX - 1u) / pipeline->localSizeX,
+    (globalSizeY + pipeline->localSizeY - 1u) / pipeline->localSizeY,
+    1u, "ADD_CHANNEL_BIAS_NC"
+  );
+  vk_helper::barrierCommandBuffer(cb);
+  vk_helper::barrierCommandBufferForBuffer(cb, input);
+}
+
 void convertNCHWToNHWC(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -86,12 +216,13 @@ void convertNCHWToNHWC(
   VkResult* result
 ) {
   convertNCHWNHWC(
-    device, pipeline, cb, descriptorSet, input, output,
+    handle, device, pipeline, cb, descriptorSet, input, output,
     batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, false, result
   );
 }
 
 void convertNHWCToNCHW(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -106,12 +237,13 @@ void convertNHWCToNCHW(
   VkResult* result
 ) {
   convertNCHWNHWC(
-    device, pipeline, cb, descriptorSet, input, output,
+    handle, device, pipeline, cb, descriptorSet, input, output,
     batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, true, result
   );
 }
 
 void transformerApplyRoPE(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* ropePipeline,
   VkCommandBuffer cb,
@@ -184,26 +316,6 @@ void transformerApplyRoPE(
   params.batchStride = useNHWC ? seqLen * channelsPadded : batchStride;
   params.channelsPadded = channelsPadded;
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ropePipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb,
-    VK_PIPELINE_BIND_POINT_COMPUTE,
-    ropePipeline->layout,
-    0,
-    1,
-    &ropeDescriptorSet,
-    0,
-    nullptr
-  );
-  vkCmdPushConstants(
-    cb,
-    ropePipeline->layout,
-    VK_SHADER_STAGE_COMPUTE_BIT,
-    0,
-    sizeof(params),
-    &params
-  );
-
   const uint32_t globalSize[3] = {
     static_cast<uint32_t>(vk_helper::powerOf2ify(seqLen)),
     static_cast<uint32_t>(vk_helper::powerOf2ify(numPairs)),
@@ -214,14 +326,17 @@ void transformerApplyRoPE(
     (globalSize[1] + ropePipeline->localSizeY - 1u) / ropePipeline->localSizeY,
     (globalSize[2] + ropePipeline->localSizeZ - 1u) / ropePipeline->localSizeZ
   };
-  SHADER_PROFILE_START(useNHWC ? "TransformerApplyRoPE_NHWC" : "TransformerApplyRoPE", cb);
-  vkCmdDispatch(cb, workgroupCount[0], workgroupCount[1], workgroupCount[2]);
-  SHADER_PROFILE_END(useNHWC ? "TransformerApplyRoPE_NHWC" : "TransformerApplyRoPE", cb);
+  dispatchPipeline(
+    handle, device, ropePipeline, cb, ropeDescriptorSet, &params, sizeof(params),
+    workgroupCount[0], workgroupCount[1], workgroupCount[2],
+    useNHWC ? "TRANSFORMER_APPLY_ROPE_NHWC" : "TRANSFORMER_APPLY_ROPE"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, shaderInput);
 
 }
 
 void transformerRMSNorm(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* rmsNormPipeline,
   VkCommandBuffer cb,
@@ -280,16 +395,6 @@ void transformerRMSNorm(
   const vk_shader::push::TransformerRMSNormPushParams params = {
     batchSize, channels, spatialSize, epsilon, channelsPadded
   };
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, rmsNormPipeline->pipeline);
-  vkCmdPushConstants(
-    cb, rmsNormPipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT,
-    0, sizeof(params), &params
-  );
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, rmsNormPipeline->layout,
-    0, 1, &rmsNormDescriptorSet, 0, nullptr
-  );
-
   const uint32_t numXYGroups = static_cast<uint32_t>(
     (spatialSize + tuneParams.WG_XY_SIZE - 1) / tuneParams.WG_XY_SIZE
   );
@@ -303,14 +408,17 @@ void transformerRMSNorm(
     (globalSizes[1] + rmsNormPipeline->localSizeY - 1) / rmsNormPipeline->localSizeY,
     (globalSizes[2] + rmsNormPipeline->localSizeZ - 1) / rmsNormPipeline->localSizeZ
   };
-  SHADER_PROFILE_START(useNHWC ? "TransformerRMSNorm_NHWC" : "TransformerRMSNorm", cb);
-  vkCmdDispatch(cb, workgroupCounts[0], workgroupCounts[1], workgroupCounts[2]);
-  SHADER_PROFILE_END(useNHWC ? "TransformerRMSNorm_NHWC" : "TransformerRMSNorm", cb);
+  dispatchPipeline(
+    handle, device, rmsNormPipeline, cb, rmsNormDescriptorSet, &params, sizeof(params),
+    workgroupCounts[0], workgroupCounts[1], workgroupCounts[2],
+    useNHWC ? "TRANSFORMER_RMS_NORM_NHWC" : "TRANSFORMER_RMS_NORM"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, shaderOutput);
 
 }
 
 void transformerScaleDotProductCooperative(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* attentionPipeline,
   VkCommandBuffer cb,
@@ -408,26 +516,6 @@ void transformerScaleDotProductCooperative(
   params.ropeNumPairs = ropeNumPairs;
   params.ropeReserved = 0;
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, attentionPipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb,
-    VK_PIPELINE_BIND_POINT_COMPUTE,
-    attentionPipeline->layout,
-    0,
-    1,
-    &attentionDescriptorSet,
-    0,
-    nullptr
-  );
-  vkCmdPushConstants(
-    cb,
-    attentionPipeline->layout,
-    VK_SHADER_STAGE_COMPUTE_BIT,
-    0,
-    sizeof(params),
-    &params
-  );
-
   const uint32_t qGroups = static_cast<uint32_t>(
     (seqLen + tuneParams.ATTN_BLOCK_Q - 1) / tuneParams.ATTN_BLOCK_Q
   );
@@ -435,13 +523,15 @@ void transformerScaleDotProductCooperative(
     (batchSize * numHeads + attentionPipeline->localSizeY - 1) / attentionPipeline->localSizeY
   );
   const uint32_t zGroups = (1u + attentionPipeline->localSizeZ - 1u) / attentionPipeline->localSizeZ;
-  SHADER_PROFILE_START("scaleDotProductAttention_NHWC", cb);
-  vkCmdDispatch(cb, qGroups, bhGroups, zGroups);
-  SHADER_PROFILE_END("scaleDotProductAttention_NHWC", cb);
+  dispatchPipeline(
+    handle, device, attentionPipeline, cb, attentionDescriptorSet, &params, sizeof(params),
+    qGroups, bhGroups, zGroups, "SCALE_DOT_PRODUCT_ATTENTION_NHWC"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 void extractChannel0(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* extractPipeline,
   VkCommandBuffer& commandBuffer,
@@ -460,11 +550,10 @@ void extractChannel0(
 ) {
   assert(device != nullptr);
   assert(extractPipeline != nullptr);
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(extractDescriptorSet != VK_NULL_HANDLE);
   assert(input != nullptr && output != nullptr);
   (void)nhwcScratch;
-
-  if(commandBuffer == VK_NULL_HANDLE)
-    commandBuffer = vk_helper::allocateCommandBuffer(device);
 
   VkResult result = VK_ERROR_UNKNOWN;
   if(begin) {
@@ -474,12 +563,6 @@ void extractChannel0(
 
   const VulkanBuffer* extractInput = input;
 
-  if(extractDescriptorSet == VK_NULL_HANDLE) {
-    extractDescriptorSet = vk_helper::allocateDescriptorSet(
-      device, extractPipeline->descriptorSetLayout, &result
-    );
-    CHECK_VK_MSG("Allocate descriptor set for ExtractChannel0", result);
-  }
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(extractDescriptorSet, 0, extractInput),
     vk_helper::writeDescriptorSetBuffer(extractDescriptorSet, 1, output)
@@ -487,17 +570,6 @@ void extractChannel0(
   result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update descriptors for ExtractChannel0", result);
 
-  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, extractPipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    commandBuffer,
-    VK_PIPELINE_BIND_POINT_COMPUTE,
-    extractPipeline->layout,
-    0,
-    1,
-    &extractDescriptorSet,
-    0,
-    nullptr
-  );
   const vk_shader::push::ExtractChannel0Params pushParams = {
     batchSize,
     numInputChannels,
@@ -506,21 +578,14 @@ void extractChannel0(
     logicalSpatialSize,
     channelsPadded
   };
-  vkCmdPushConstants(
-    commandBuffer,
-    extractPipeline->layout,
-    VK_SHADER_STAGE_COMPUTE_BIT,
-    0,
-    sizeof(pushParams),
-    &pushParams
-  );
   const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(nchwSpatialStride));
   const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(batchSize));
   const uint32_t wgCountX = (globalSizeX + extractPipeline->localSizeX - 1u) / extractPipeline->localSizeX;
   const uint32_t wgCountY = (globalSizeY + extractPipeline->localSizeY - 1u) / extractPipeline->localSizeY;
-  SHADER_PROFILE_START("EXTRACT_CHANNEL0", commandBuffer);
-  vkCmdDispatch(commandBuffer, wgCountX, wgCountY, 1u);
-  SHADER_PROFILE_END("EXTRACT_CHANNEL0", commandBuffer);
+  dispatchPipeline(
+    handle, device, extractPipeline, commandBuffer, extractDescriptorSet,
+    &pushParams, sizeof(pushParams), wgCountX, wgCountY, 1u, "EXTRACT_CHANNEL0"
+  );
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, output);
 
   if(begin) {
@@ -529,73 +594,8 @@ void extractChannel0(
   }
 }
 
-void im2colNHWC(
-  const VulkanDevice* device,
-  const Pipeline* pipeline,
-  VkCommandBuffer cb,
-  VkDescriptorSet descriptorSet,
-  const VulkanBuffer* input,
-  VulkanBuffer* output,
-  const VulkanBuffer* scale,
-  const VulkanBuffer* bias,
-  const VulkanBuffer* mask,
-  int batchSize,
-  int xSize,
-  int ySize,
-  int logicalSpatialSize,
-  int spatialSize,
-  int maskSpatialStride,
-  int channels,
-  int channelsPadded,
-  int kSize,
-  int logicalKSize,
-  int convYSize,
-  int convXSize,
-  int activation,
-  VkResult* result
-) {
-  assert(device != nullptr);
-  assert(pipeline != nullptr);
-  assert(cb != VK_NULL_HANDLE);
-  assert(descriptorSet != VK_NULL_HANDLE);
-  assert(input != nullptr && output != nullptr && scale != nullptr && bias != nullptr && mask != nullptr);
-  assert(result != nullptr);
-  if(batchSize <= 0 || xSize <= 0 || ySize <= 0 || logicalSpatialSize <= 0 ||
-     logicalSpatialSize > spatialSize || maskSpatialStride < logicalSpatialSize ||
-     channels <= 0 || channelsPadded < channels ||
-     kSize <= 0 || logicalKSize <= 0 || logicalKSize > kSize ||
-     convYSize <= 0 || convXSize <= 0) {
-    *result = VK_ERROR_INITIALIZATION_FAILED;
-    return;
-  }
-
-  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, output),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, scale),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, bias),
-    vk_helper::writeDescriptorSetBuffer(descriptorSet, 4, mask)
-  };
-  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
-  CHECK_VK_MSG("Update Descriptor Sets for NHWC im2col", *result);
-
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
-  const vk_shader::push::Im2ColNHWCParams pushParams = {
-    batchSize, xSize, ySize, logicalSpatialSize, spatialSize, maskSpatialStride,
-    channels, channelsPadded, kSize, logicalKSize,
-    convYSize, convXSize, activation
-  };
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
-  const size_t total = static_cast<size_t>(batchSize) * static_cast<size_t>(spatialSize) * static_cast<size_t>(kSize);
-  const uint32_t workgroupCount = static_cast<uint32_t>((total + pipeline->localSizeX - 1) / pipeline->localSizeX);
-  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
-  vk_helper::barrierCommandBufferForBuffer(cb, output);
-}
-
 void convertNHWCMatrixToNCHW(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -627,17 +627,15 @@ void convertNHWCMatrixToNCHW(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for NHWC matrix to NCHW", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
   const vk_shader::push::NHWCMatrixToNCHWParams pushParams = {
     batchSize, channels, logicalSpatialSize, spatialSize, outputSpatialStride, matrixChannels
   };
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
   const size_t total = static_cast<size_t>(batchSize) * static_cast<size_t>(logicalSpatialSize) * static_cast<size_t>(channels);
   const uint32_t workgroupCount = static_cast<uint32_t>((total + pipeline->localSizeX - 1) / pipeline->localSizeX);
-  vkCmdDispatch(cb, workgroupCount == 0 ? 1 : workgroupCount, 1, 1);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
+    workgroupCount == 0 ? 1 : workgroupCount, 1, 1, "NHWC_TO_NCHW_MATRIX"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
@@ -645,6 +643,7 @@ namespace {
 
 template<typename TuneParams>
 void doHgemmCooperativeMatrixNHWCImpl(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -659,7 +658,10 @@ void doHgemmCooperativeMatrixNHWCImpl(
   int aRowStride,
   int cRowStride,
   const TuneParams& params,
-  VkResult* result
+  VkResult* result,
+  int aBatchStride,
+  int bBatchStride,
+  int cBatchStride
 ) {
   assert(device != nullptr && pipeline != nullptr && cb != VK_NULL_HANDLE);
   assert(descriptorSet != VK_NULL_HANDLE && A != nullptr && B != nullptr && C != nullptr && result != nullptr);
@@ -676,19 +678,21 @@ void doHgemmCooperativeMatrixNHWCImpl(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for NHWC cooperative matrix GEMM", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
+  if(aBatchStride == 0)
+    aBatchStride = M * aRowStride;
+  if(bBatchStride == 0)
+    bBatchStride = 0;
+  if(cBatchStride == 0)
+    cBatchStride = M * cRowStride;
   const vk_shader::push::HGemmCooperativeMatrixNHWCParams pushParams = {
-    M, N, K, aRowStride, cRowStride
+    M, N, K, aRowStride, cRowStride, aBatchStride, bBatchStride, cBatchStride
   };
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
-  vkCmdDispatch(
-    cb,
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     static_cast<uint32_t>(M / params.MWG),
     static_cast<uint32_t>(N / params.NWG),
-    static_cast<uint32_t>(batchSize)
+    static_cast<uint32_t>(batchSize),
+    "HGEMM_COOPERATIVE_NHWC"
   );
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
@@ -696,6 +700,7 @@ void doHgemmCooperativeMatrixNHWCImpl(
 }
 
 void doHgemmCooperativeMatrixNHWC(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -711,16 +716,20 @@ void doHgemmCooperativeMatrixNHWC(
   int aRowStride,
   int cRowStride,
   const vk_shader::tune::HGemmCooperativeMatrixNHWCTuneParams& params,
-  VkResult* result
+  VkResult* result,
+  int aBatchStride,
+  int bBatchStride,
+  int cBatchStride
 ) {
   (void)tuneParams;
   doHgemmCooperativeMatrixNHWCImpl(
-    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
-    aRowStride, cRowStride, params, result
+    handle, device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
+    aRowStride, cRowStride, params, result, aBatchStride, bBatchStride, cBatchStride
   );
 }
 
 void doHgemmCooperativeMatrixNHWC(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -736,12 +745,15 @@ void doHgemmCooperativeMatrixNHWC(
   int aRowStride,
   int cRowStride,
   const vk_shader::tune::HGemmCooperativeMatrixNCHWTuneParams& params,
-  VkResult* result
+  VkResult* result,
+  int aBatchStride,
+  int bBatchStride,
+  int cBatchStride
 ) {
   (void)tuneParams;
   doHgemmCooperativeMatrixNHWCImpl(
-    device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
-    aRowStride, cRowStride, params, result
+    handle, device, pipeline, cb, descriptorSet, A, B, C, batchSize, M, N, K,
+    aRowStride, cRowStride, params, result, aBatchStride, bBatchStride, cBatchStride
   );
 }
 
@@ -849,35 +861,26 @@ std::vector<float> convWeightsToWinogradDomain(
   return transWeights;
 }
 
-std::vector<float> convWeightsToNHWCIm2Col(
+std::vector<float> convWeightsToNHWC1x1Gemm(
   const std::vector<float>& weights,
   uint32_t inChannels,
   uint32_t outChannels,
-  uint32_t convY,
-  uint32_t convX,
-  uint32_t kChannelStride,
   uint32_t kSize,
   uint32_t nSize
 ) {
-  testAssert(kChannelStride >= inChannels);
-  testAssert(static_cast<uint64_t>(convY) * convX * kChannelStride <= kSize);
-  std::vector<float> im2colWeights(static_cast<size_t>(kSize) * nSize, 0.0f);
-  for(uint32_t y = 0; y < convY; ++y) {
-    for(uint32_t x = 0; x < convX; ++x) {
-      for(uint32_t ic = 0; ic < inChannels; ++ic) {
-        const uint32_t k = (y * convX + x) * kChannelStride + ic;
-        for(uint32_t oc = 0; oc < outChannels; ++oc) {
-          const uint32_t n = oc;
-          im2colWeights[static_cast<size_t>(k) * nSize + n] =
-            weights[(static_cast<size_t>(oc) * inChannels + ic) * convY * convX + y * convX + x];
-        }
-      }
+  testAssert(kSize >= inChannels);
+  std::vector<float> gemmWeights(static_cast<size_t>(kSize) * nSize, 0.0f);
+  for(uint32_t ic = 0; ic < inChannels; ++ic) {
+    for(uint32_t oc = 0; oc < outChannels; ++oc) {
+      gemmWeights[static_cast<size_t>(ic) * nSize + oc] =
+        weights[static_cast<size_t>(oc) * inChannels + ic];
     }
   }
-  return im2colWeights;
+  return gemmWeights;
 }
 
 void convInputsToWinogradDomain(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -891,7 +894,8 @@ void convInputsToWinogradDomain(
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
   uint32_t convSize,
-  VkResult *result
+  VkResult *result,
+  bool useNHWC
 ) {
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, inputBuffer),
@@ -899,9 +903,6 @@ void convInputsToWinogradDomain(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Input Transform", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-
   int outTileYSize = 2;
   int outTileXSize = 2;
 
@@ -914,7 +915,9 @@ void convInputsToWinogradDomain(
   }
 
   const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
-  const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
+  const int inChannelsPadded = useNHWC
+    ? handle->getNHWCChannelsPadded(inChannels, true)
+    : vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
   auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
@@ -931,11 +934,14 @@ void convInputsToWinogradDomain(
     // params.batchSize, params.nnYLen, params.nnXLen, params.numTilesY, params.numTilesX, params.inChannels, params.inChannelsPadded, params.ntxtySizePadded
   // );
 
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   const uint32_t localSizeX = pipeline->localSizeX;
   const uint32_t localSizeY = pipeline->localSizeY;
-  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, localSizeX)) / localSizeX;
-  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, localSizeY)) / localSizeY;
+  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(
+    useNHWC ? inChannelsPadded : batchNumTilesPadded, localSizeX
+  )) / localSizeX;
+  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(
+    useNHWC ? batchNumTilesPadded : inChannelsPadded, localSizeY
+  )) / localSizeY;
   uint32_t wgCountZ = 1u;
 
   wgCountX = (wgCountX == 0) ? 1 : wgCountX;
@@ -946,12 +952,16 @@ void convInputsToWinogradDomain(
   //   localSizeX, localSizeY,
   //   wgCountX, wgCountY
   // );
-  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "WINOGRAD_INPUT_TRANSFORM"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
 
 void convInputToWinogradDomainBnActMask(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -968,7 +978,8 @@ void convInputToWinogradDomainBnActMask(
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t inChannels, uint32_t inChannelsPaddedMultiple,
   uint32_t convSize,
-  VkResult *result
+  VkResult *result,
+  bool useNHWC
 ) {
   // throw StringError("winogradTransformBnAct is inactivated");
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
@@ -980,9 +991,6 @@ void convInputToWinogradDomainBnActMask(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Input Transform", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-
   // int outTileSize = convSize == 3 ? 2 : 4;
 
   int outTileYSize = 2;
@@ -997,7 +1005,9 @@ void convInputToWinogradDomainBnActMask(
   }
 
   const int batchNumTilesPadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
-  const int inChannelsPadded = vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
+  const int inChannelsPadded = useNHWC
+    ? handle->getNHWCChannelsPadded(inChannels, true)
+    : vk_helper::roundUpToMultipleInt(inChannels, inChannelsPaddedMultiple);
 
   auto params = vk_shader::push::WinogradInputTransformParams();
   params.batchSize = batchSize;
@@ -1010,21 +1020,28 @@ void convInputToWinogradDomainBnActMask(
   params.ntxtySizePadded = static_cast<uint32_t>(batchNumTilesPadded);
   params.xyStride = xyStride;
 
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   const uint32_t localSizeX = pipeline->localSizeX;
   const uint32_t localSizeY = pipeline->localSizeY;
-  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(batchNumTilesPadded, localSizeX)) / localSizeX;
-  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(inChannelsPadded, localSizeY)) / localSizeY;
+  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(
+    useNHWC ? inChannelsPadded : batchNumTilesPadded, localSizeX
+  )) / localSizeX;
+  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(
+    useNHWC ? batchNumTilesPadded : inChannelsPadded, localSizeY
+  )) / localSizeY;
   uint32_t wgCountZ = 1u;
 
   wgCountX = (wgCountX == 0) ? 1 : wgCountX;
   wgCountY = (wgCountY == 0) ? 1 : wgCountY;
 
-  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "WINOGRAD_INPUT_TRANSFORM_BN_ACT_MASK"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace);
 }
 
 void winogradOutputToSpatialDomain(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const Pipeline* pipeline,
   VkCommandBuffer cb,
@@ -1034,7 +1051,8 @@ void winogradOutputToSpatialDomain(
   uint32_t nnYLen, uint32_t nnXLen, uint32_t xyStride,
   uint32_t batchSize, uint32_t numTilesY, uint32_t numTilesX, uint32_t batchNumTilesPadMultiple,
   uint32_t outChannels, uint32_t outChannelsPadMultiple,
-  VkResult *result
+  VkResult *result,
+  bool useNHWC
 ) {
   std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, convWorkspace2),
@@ -1042,8 +1060,6 @@ void winogradOutputToSpatialDomain(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Winograd Output Transform", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
   auto params = vk_shader::push::WinogradOutputTransformParams();
   params.batchSize = static_cast<int>(batchSize);
   params.ySize = static_cast<int>(nnYLen);
@@ -1051,7 +1067,9 @@ void winogradOutputToSpatialDomain(
   params.numTilesY = static_cast<int>(numTilesY);
   params.numTilesX = static_cast<int>(numTilesX);
   params.outChannels = static_cast<int>(outChannels);
-  params.outChannelsPadded = vk_helper::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
+  params.outChannelsPadded = useNHWC
+    ? handle->getNHWCChannelsPadded(outChannels, true)
+    : vk_helper::roundUpToMultipleInt(outChannels, outChannelsPadMultiple);
   params.ntxtySizePadded = vk_helper::roundUpToMultipleInt(batchSize * numTilesY * numTilesX, batchNumTilesPadMultiple);
   params.xyStride = xyStride;
 
@@ -1060,13 +1078,21 @@ void winogradOutputToSpatialDomain(
   //   params.batchSize, params.ySize, params.xSize, params.numTilesY, params.numTilesX, params.outChannels, params.outChannelsPadded, params.ntxtySizePadded
   // );
 
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   const uint32_t localSizeX = pipeline->localSizeX;
   const uint32_t localSizeY = pipeline->localSizeY;
   const uint32_t localSizeZ = pipeline->localSizeZ;
-  uint32_t wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesX)), localSizeX)) / localSizeX;
-  uint32_t wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesY)), localSizeY)) / localSizeY;
-  uint32_t wgCountZ = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), localSizeZ)) / localSizeZ;
+  uint32_t wgCountX;
+  uint32_t wgCountY;
+  uint32_t wgCountZ;
+  if(useNHWC) {
+    wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(params.outChannelsPadded, localSizeX)) / localSizeX;
+    wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(params.ntxtySizePadded, localSizeY)) / localSizeY;
+    wgCountZ = 1u;
+  } else {
+    wgCountX = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesX)), localSizeX)) / localSizeX;
+    wgCountY = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(vk_helper::powerOf2ify(numTilesY)), localSizeY)) / localSizeY;
+    wgCountZ = static_cast<uint32_t>(vk_helper::roundUpToMultiple(static_cast<uint32_t>(batchSize * outChannels), localSizeZ)) / localSizeZ;
+  }
   wgCountX = (wgCountX == 0) ? 1 : wgCountX;
   wgCountY = (wgCountY == 0) ? 1 : wgCountY;
   wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
@@ -1075,11 +1101,15 @@ void winogradOutputToSpatialDomain(
   //   params.batchSize, params.ySize, params.xSize, params.numTilesY, params.numTilesX, params.outChannels, params.outChannelsPadded, params.ntxtySizePadded);
   // std::printf("[VK WINOGRAD OUT] local=%u,%u,%u global=%u,%u,%u groups=%u,%u,%u\\n",
   //   (unsigned)localSizeX, (unsigned)localSizeY, (unsigned)localSizeZ, (unsigned)wgCountX, (unsigned)wgCountY, (unsigned)wgCountZ);
-  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "WINOGRAD_OUTPUT_TRANSFORM"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
 void xgemmBatched(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1099,9 +1129,6 @@ void xgemmBatched(
   };
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Batched GEMM", *result);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-
   auto params = vk_shader::push::XGEMMBatchedParams();
   params.M = M;
   params.N = N;
@@ -1117,7 +1144,6 @@ void xgemmBatched(
   //   M, N, K, numBatchElts
   // );
 
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
   
   const vk_shader::tune::XgemmTuneParams& xgemmParams =
     tuneParams.vulkan.shouldUseFP16Compute ? tuneParams.xgemm16 : tuneParams.xgemm;
@@ -1137,12 +1163,16 @@ void xgemmBatched(
   //   "BatchedXGemm_KM_KN_NM: groupCounts = %u,%u,%u\n",
   //   (unsigned)wgCountX, (unsigned)wgCountY, (unsigned)wgCountZ
   // );
-  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "XGEMM_BATCHED"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 
 void xgemmStridedBatchedNN(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1167,8 +1197,6 @@ void xgemmStridedBatchedNN(
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for Strided Batched GEMM", *result);
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
   auto params = vk_shader::push::XgemmStridedBatchedFp32Params();
   params.kSizeM = kSizeM;
   params.kSizeN = kSizeN;
@@ -1180,7 +1208,6 @@ void xgemmStridedBatchedNN(
   params.cLead = kSizeM;
   params.cStride = cStride;
   params.cTranspose = 0;
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
   size_t mCeiled = vk_helper::roundUpToMultiple(kSizeM, tuneParams.xgemmDirect.WGD);
   size_t nCeiled = vk_helper::roundUpToMultiple(kSizeN, tuneParams.xgemmDirect.WGD);
@@ -1195,11 +1222,15 @@ void xgemmStridedBatchedNN(
   wgCountX = (wgCountX == 0) ? 1 : wgCountX;
   wgCountY = (wgCountY == 0) ? 1 : wgCountY;
   wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
-  vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "XGEMM_STRIDED_BATCHED_NN"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 void batchedXGemmDirect_MK_NK_MN(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1220,9 +1251,6 @@ void batchedXGemmDirect_MK_NK_MN(
     *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
     CHECK_VK_MSG("Update Descriptor Sets for BatchedXGemmDirect_MK_NK_MN", *result);
   
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr);
-    
     auto params = vk_shader::push::BatchedXgemmDirectFp32Params();
     params.kSizeM = static_cast<uint32_t>(M);
     params.kSizeN = static_cast<uint32_t>(N);
@@ -1231,7 +1259,6 @@ void batchedXGemmDirect_MK_NK_MN(
     params.bLead = static_cast<uint32_t>(K);
     params.cLead = static_cast<uint32_t>(N);
     params.cTranspose = 1;
-    vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
     const uint32_t WGD = tuneParams.xgemmDirect.WGD;
     size_t mCeiled = vk_helper::roundUpToMultiple(M, WGD);
@@ -1247,11 +1274,15 @@ void batchedXGemmDirect_MK_NK_MN(
     wgCountX = (wgCountX == 0) ? 1 : wgCountX;
     wgCountY = (wgCountY == 0) ? 1 : wgCountY;
     wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
-    vkCmdDispatch(cb, wgCountX, wgCountY, wgCountZ);
+    dispatchPipeline(
+      handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+      wgCountX, wgCountY, wgCountZ, "BATCHED_XGEMM_DIRECT_FP32"
+    );
     vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 void doHgemmCooperativeMatrix(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1284,23 +1315,19 @@ void doHgemmCooperativeMatrix(
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for hgemmCooperativeMatrix", *result);
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
-
   const vk_shader::push::HGemmCooperativeMatrixParams pushParams = {M, N, K};
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
-  vkCmdDispatch(
-    cb,
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     static_cast<uint32_t>(M / params.MWG),
     static_cast<uint32_t>(N / params.NWG),
-    static_cast<uint32_t>(batchSize)
+    static_cast<uint32_t>(batchSize),
+    "HGEMM_COOPERATIVE"
   );
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 void doHgemmCooperativeMatrixNCHW(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1333,13 +1360,7 @@ void doHgemmCooperativeMatrixNCHW(
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for hgemmCooperativeMatrixNCHW", *result);
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
-
   const vk_shader::push::HGemmCooperativeMatrixNCHWParams pushParams = {K, M, N};
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
 
   const uint32_t wgCountX = static_cast<uint32_t>(
     (M + hgemmParams.MWG - 1) / hgemmParams.MWG
@@ -1347,11 +1368,15 @@ void doHgemmCooperativeMatrixNCHW(
   const uint32_t wgCountY = static_cast<uint32_t>(
     (N + hgemmParams.NWG - 1) / hgemmParams.NWG
   );
-  vkCmdDispatch(cb, wgCountX, wgCountY, static_cast<uint32_t>(batchSize));
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
+    wgCountX, wgCountY, static_cast<uint32_t>(batchSize), "HGEMM_COOPERATIVE_NCHW"
+  );
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
 void doTransformerDualGemmSwiGLU(
+  ComputeHandleInternal* handle,
   const VulkanDevice* device,
   const vk_shader::tune::VulkanTuneParams& tuneParams,
   const Pipeline* pipeline,
@@ -1408,23 +1433,304 @@ void doTransformerDualGemmSwiGLU(
   *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
   CHECK_VK_MSG("Update Descriptor Sets for transformerDualGemmSwiGLU", *result);
 
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-  vkCmdBindDescriptorSets(
-    cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSet, 0, nullptr
-  );
   const vk_shader::push::TransformerDualGemmSwiGLUPushParams pushParams = {
     cSize, hwSize, packedOCSize, ffnSize, inputChannelStride, outputChannelStride
   };
-  vkCmdPushConstants(cb, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushParams), &pushParams);
-  SHADER_PROFILE_START("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
-  vkCmdDispatch(
-    cb,
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     static_cast<uint32_t>((hwSize + params.MWG - 1) / params.MWG),
     static_cast<uint32_t>(ffnSize / params.NWG),
-    static_cast<uint32_t>(batchSize)
+    static_cast<uint32_t>(batchSize),
+    "TRANSFORMER_DUAL_GEMM_SWIGLU"
   );
-  SHADER_PROFILE_END("TRANSFORMER_DUAL_GEMM_SWIGLU", cb);
   vk_helper::barrierCommandBufferForBuffer(cb, output);
+}
+
+void performAddChannelBiases(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& descriptorSet,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
+  VkDescriptorSet& nhwcToNchwDescriptorSet,
+  VulkanBuffer* input,
+  VulkanBuffer* bias,
+  int ncSize,
+  int cSize,
+  int nchwSpatialStride,
+  VulkanBuffer* nhwcScratch,
+  bool begin
+) {
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcToNchwDescriptorSet;
+  (void)nhwcScratch;
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
+  const bool useNHWC = pipelines->useNHWC;
+  const Pipeline targetPipeline = pipelines->addChannelBias;
+  const int batchSize = ncSize / cSize;
+  const int logicalSpatialSize = handle->nnXLen * handle->nnYLen;
+  const int xySize = useNHWC ? handle->paddedNNXYLen : nchwSpatialStride;
+
+  assert(cSize > 0 && ncSize % cSize == 0);
+  assert(nchwSpatialStride >= logicalSpatialSize);
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+
+  VkResult res = VK_ERROR_UNKNOWN;
+  if(begin) {
+    res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for AddChannelBiases", res);
+  }
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, input),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, bias)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+  const int xyEltsPerThread = handle->tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
+  const int ncEltsPerThread = handle->tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
+  const int xyThreads = (xySize + xyEltsPerThread - 1) / xyEltsPerThread;
+  const int ncThreads = (ncSize + ncEltsPerThread - 1) / ncEltsPerThread;
+  vk_shader::push::AddChannelBiasNCHWParams pushConstants = {};
+  pushConstants.ncSize = static_cast<uint32_t>(ncSize);
+  pushConstants.xySize = static_cast<uint32_t>(xySize);
+  pushConstants.cSize = static_cast<uint32_t>(cSize);
+  pushConstants.channelsPadded = static_cast<uint32_t>(
+    useNHWC ? handle->getNHWCChannelsPadded(cSize) : cSize
+  );
+
+  const uint32_t globalSizeX = vk_helper::roundUpToMultiple(xyThreads, 32);
+  const uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1) / targetPipeline.localSizeX;
+  const uint32_t wgCountY = static_cast<uint32_t>(ncThreads);
+  dispatchPipeline(
+    handle, handle->vulkanDevice, &targetPipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants), wgCountX, wgCountY, 1u, "ADD_CHANNEL_BIAS"
+  );
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, input);
+  if(begin)
+    vk_helper::endCommandBuffer(commandBuffer);
+}
+
+void performAddPointWise(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& descriptorSet,
+  VulkanBuffer* acc,
+  VulkanBuffer* value,
+  int totalSize,
+  bool begin
+) {
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if(begin) {
+    res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for AddPointWise", res);
+  }
+  const Pipeline& targetPipeline = handle->pipelines->addPointWise;
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, acc),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, value)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+  vk_shader::push::AddPointWiseParams pushConstants = {};
+  pushConstants.size = static_cast<uint32_t>(totalSize);
+  const uint32_t eltsPerThread = static_cast<uint32_t>(handle->tuneParams.pointwise.ELTS_PER_THREAD);
+  const uint32_t wgCountX =
+    (static_cast<uint32_t>(totalSize) + targetPipeline.localSizeX * eltsPerThread - 1u) /
+    (targetPipeline.localSizeX * eltsPerThread);
+  dispatchPipeline(
+    handle, handle->vulkanDevice, &targetPipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants), wgCountX, 1u, 1u, "ADD_POINTWISE_FP32"
+  );
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, acc);
+  if(begin)
+    vk_helper::endCommandBuffer(commandBuffer);
+}
+
+void performGpoolMask(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& descriptorSet,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
+  VulkanBuffer* gpoolConvOut,
+  VulkanBuffer* gpoolConcat,
+  VulkanBuffer* mask,
+  VulkanBuffer* maskSum,
+  int batchSize,
+  int gpoolChannels,
+  int nnXYLen,
+  VulkanBuffer* nhwcScratch,
+  VkResult* result,
+  bool begin
+) {
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcScratch;
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
+  const bool useNHWC = pipelines->useNHWC;
+  const Pipeline pipeline = pipelines->globalPoolingChannelsFp32;
+  const int spatialSize = useNHWC ? handle->paddedNNXYLen : nnXYLen;
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if(begin) {
+    res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for GlobalPoolingMask", res);
+  }
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, mask),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 3, maskSum)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+  vk_shader::push::GlobalPoolingChannelsParams pushConstants = {};
+  pushConstants.nSize = batchSize;
+  pushConstants.cSize = gpoolChannels;
+  pushConstants.xySize = spatialSize;
+  pushConstants.maskSpatialStride = useNHWC ? handle->paddedNNXYLen : nnXYLen;
+  pushConstants.channelsPadded = useNHWC
+    ? handle->getNHWCChannelsPadded(gpoolChannels) : gpoolChannels;
+  const uint32_t globalSizeY = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(gpoolChannels, pipeline.localSizeY)
+  );
+  const uint32_t globalSizeZ = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(batchSize, pipeline.localSizeZ)
+  );
+  dispatchPipeline(
+    handle, handle->vulkanDevice, &pipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants), 1u, globalSizeY / pipeline.localSizeY,
+    globalSizeZ / pipeline.localSizeZ, "GLOBAL_POOLING_CHANNELS_FP32"
+  );
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, mask);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  if(begin)
+    res = vk_helper::endCommandBuffer(commandBuffer);
+  *result = res;
+}
+
+void performValueHeadPool(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& descriptorSet,
+  VkDescriptorSet& nchwToNhwcDescriptorSet,
+  VulkanBuffer* gpoolConvOut,
+  VulkanBuffer* gpoolConcat,
+  VulkanBuffer* maskSum,
+  VulkanBuffer* nhwcScratch,
+  int batchSize,
+  int gPoolChannels,
+  int nnXYLen,
+  bool begin
+) {
+  (void)nchwToNhwcDescriptorSet;
+  (void)nhwcScratch;
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  VkResult res = VK_ERROR_UNKNOWN;
+  if(begin) {
+    res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
+  }
+  const auto pipelines = handle->pipelines;
+  const bool useNHWC = pipelines->useNHWC;
+  const int spatialSize = useNHWC ? handle->paddedNNXYLen : nnXYLen;
+  const vk_shader::LocalDim dim = {
+    handle->tuneParams.gPool.XYSTRIDE,
+    std::min(handle->tuneParams.gPool.CHANNELSTRIDE, static_cast<int>(vk_helper::powerOf2ify(gPoolChannels))),
+    std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
+  };
+  const Pipeline pipeline = pipelines->valueHeadPoolingChannels.at(dim);
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, gpoolConvOut),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, gpoolConcat),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, maskSum)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+
+  const uint32_t localSizeY = std::min(
+    handle->tuneParams.gPool.CHANNELSTRIDE,
+    static_cast<int>(vk_helper::powerOf2ify(gPoolChannels))
+  );
+  const uint32_t localSizeZ = std::min(
+    handle->tuneParams.gPool.BATCHSTRIDE,
+    static_cast<int>(vk_helper::powerOf2ify(batchSize))
+  );
+  vk_shader::push::ValueHeadPoolingChannelsParams pushConstants = {};
+  pushConstants.nSize = batchSize;
+  pushConstants.cSize = gPoolChannels;
+  pushConstants.xySize = spatialSize;
+  pushConstants.channelsPadded = useNHWC
+    ? handle->getNHWCChannelsPadded(gPoolChannels) : gPoolChannels;
+  const uint32_t globalSizeY = vk_helper::roundUpToMultiple(gPoolChannels, localSizeY);
+  const uint32_t globalSizeZ = vk_helper::roundUpToMultiple(batchSize, localSizeZ);
+  dispatchPipeline(
+    handle, handle->vulkanDevice, &pipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants),
+    (handle->tuneParams.gPool.XYSTRIDE + pipeline.localSizeX - 1) / pipeline.localSizeX,
+    (globalSizeY + pipeline.localSizeY - 1) / pipeline.localSizeY,
+    (globalSizeZ + pipeline.localSizeZ - 1) / pipeline.localSizeZ,
+    "VALUE_HEAD_POOLING_CHANNELS_FP32"
+  );
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConcat);
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, gpoolConvOut);
+  if(begin)
+    vk_helper::endCommandBuffer(commandBuffer);
+}
+
+void computeMaskSums(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer& commandBuffer,
+  VkDescriptorSet& descriptorSet,
+  int batchSize,
+  VulkanBuffer* mask,
+  VulkanBuffer* maskSum,
+  bool begin
+) {
+  const int numChannels = 1;
+  const int paddedNNXYLen = handle->paddedNNXYLen;
+  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
+  const vk_shader::LocalDim dim = {
+    handle->tuneParams.gPool.XYSTRIDE,
+    1,
+    std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
+  };
+  const Pipeline& targetPipeline = pipelines->sumChannels.at(dim);
+  const uint32_t globalSizeZ = static_cast<uint32_t>(
+    vk_helper::roundUpToMultiple(static_cast<size_t>(batchSize), targetPipeline.localSizeZ)
+  );
+  const uint32_t wgCountX = (handle->tuneParams.gPool.XYSTRIDE + targetPipeline.localSizeX - 1) / targetPipeline.localSizeX;
+  const uint32_t wgCountY = (1u + targetPipeline.localSizeY - 1) / targetPipeline.localSizeY;
+  const uint32_t wgCountZ = (globalSizeZ + targetPipeline.localSizeZ - 1) / targetPipeline.localSizeZ;
+
+  assert(commandBuffer != VK_NULL_HANDLE);
+  assert(descriptorSet != VK_NULL_HANDLE);
+  VkResult res = VK_SUCCESS;
+  const std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mask),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, maskSum)
+  };
+  vk_helper::updateDescriptorSets(handle->vulkanDevice, writeDescriptorSets);
+  if(begin) {
+    res = vk_helper::beginCommandBuffer(commandBuffer);
+    CHECK_VK_MSG("Begin compute mask sum command buffer", res);
+  }
+  vk_shader::push::SumChannelsParams pushConstants = {};
+  pushConstants.nSize = batchSize;
+  pushConstants.cSize = numChannels;
+  pushConstants.xySize = paddedNNXYLen;
+  dispatchPipeline(
+    handle, handle->vulkanDevice, &targetPipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants), wgCountX, wgCountY, wgCountZ,
+    "COMPUTE_MASK_SUMS"
+  );
+  vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
+  if(begin)
+    vk_helper::endCommandBuffer(commandBuffer);
 }
 
 SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
@@ -1442,8 +1748,9 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
   return sizing;
 }
 
-  void doSwiGLU(
-    const VulkanDevice* device,
+void doSwiGLU(
+  ComputeHandleInternal* handle,
+  const VulkanDevice* device,
     const VkCommandBuffer& cb,
     const VkDescriptorSet& descriptorSet,
     const Pipeline& pipeline,
@@ -1462,7 +1769,6 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
     };
 
     vk_helper::updateDescriptorSets(device, writeDescriptorSets);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     int eltsPerThread = tuneParams.pointwise.ELTS_PER_THREAD;
     const bool usePackedBatches = packedInputBatchStride > 0;
     const int dispatchSize = usePackedBatches ? outputBatchStride : totalSize;
@@ -1473,13 +1779,14 @@ SpatialRMSNormSizing computeSpatialRMSNormSizing(int tileSize, int chwSize) {
     params.size = dispatchSize;
     params.packedInputBatchStride = usePackedBatches ? packedInputBatchStride : 0;
     params.outputBatchStride = usePackedBatches ? outputBatchStride : 0;
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 
     size_t numThreads = ((size_t)dispatchSize + eltsPerThread - 1) / eltsPerThread;
     size_t globalSize = vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX);
     uint32_t wgCountX = (globalSize + pipeline.localSizeX - 1) / pipeline.localSizeX;
-    vkCmdDispatch(cb, wgCountX, batchCount, 1);
+    dispatchPipeline(
+      handle, device, &pipeline, cb, descriptorSet, &params, sizeof(params),
+      wgCountX, batchCount, 1, "TRANSFORMER_SWIGLU"
+    );
     vk_helper::barrierCommandBufferForBuffer(cb, output);
   }
 

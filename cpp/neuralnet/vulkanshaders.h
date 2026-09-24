@@ -40,10 +40,6 @@ extern "C" {
   extern const unsigned char* _binary_nhwc_to_nchw_p16s16_end;
   extern const size_t _binary_nhwc_to_nchw_p16s16_size;
 
-  extern const unsigned char _binary_im2col_nhwc_p16s16_start[];
-  extern const unsigned char* _binary_im2col_nhwc_p16s16_end;
-  extern const size_t _binary_im2col_nhwc_p16s16_size;
-
   extern const unsigned char _binary_nhwc_matrix_to_nchw_p16s16_start[];
   extern const unsigned char* _binary_nhwc_matrix_to_nchw_p16s16_end;
   extern const size_t _binary_nhwc_matrix_to_nchw_p16s16_size;
@@ -935,6 +931,7 @@ struct LocalDimHash {
       int convY = 3;
       int convX = 3;
       int activation = 0; // 0: Identity, 1: ReLU, 2: Mish, 12: Mish + Scale8
+      uint32_t useNHWC = 0;
     };
 
     struct WinogradInputTransformSpec {
@@ -949,6 +946,7 @@ struct LocalDimHash {
       int inTileXOffset = -1;
       int convY = 3;
       int convX = 3;
+      uint32_t useNHWC = 0;
     };
 
     struct WinogradOutputTransformSpec {
@@ -961,6 +959,7 @@ struct LocalDimHash {
       int outTileXSize = 2;
       int convY = 3;
       int convX = 3;
+      uint32_t useNHWC = 0;
     };
 
     struct XGEMMBatchedSpec {
@@ -1152,22 +1151,6 @@ struct LocalDimHash {
       int logicalSpatialSize;
     };
 
-    struct Im2ColNHWCParams {
-      int batchSize;
-      int xSize;
-      int ySize;
-      int logicalSpatialSize;
-      int spatialSize;
-      int maskSpatialStride;
-      int channels;
-      int channelsPadded;
-      int kSize;
-      int logicalKSize;
-      int convYSize;
-      int convXSize;
-      int activation;
-    };
-
     struct NHWCMatrixToNCHWParams {
       int batchSize;
       int channels;
@@ -1357,6 +1340,9 @@ struct LocalDimHash {
       int K;
       int aRowStride;
       int cRowStride;
+      int aBatchStride;
+      int bBatchStride;
+      int cBatchStride;
     };
 
     struct TransformerRMSNormPushParams {
@@ -1808,7 +1794,6 @@ struct LocalDimHash {
     VkShaderModule shaderModule_conv2d_p32s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_nchw_to_nhwc_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_nhwc_to_nchw_p16s16 = VK_NULL_HANDLE;
-    VkShaderModule shaderModule_im2col_nhwc_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_nhwc_matrix_to_nchw_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32 = VK_NULL_HANDLE;
@@ -1897,7 +1882,6 @@ struct LocalDimHash {
     Pipeline conv2dFp32; 
     Pipeline nchwToNhwc;
     Pipeline nhwcToNchw;
-    Pipeline im2colNHWC;
     Pipeline nhwcMatrixToNchw;
     Pipeline hgemmCooperativeMatrixNHWC;
     Pipeline winogradInputTransform3x3;
@@ -1984,15 +1968,14 @@ struct LocalDimHash {
     ~ComputePipelines();
 
     VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool useNHWC, bool print);
-    VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
+    VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createNchwToNhwc(Pipeline& pipeline);
     VkResult createNhwcToNchw(Pipeline& pipeline);
-    VkResult createIm2ColNHWC(Pipeline& pipeline);
     VkResult createNHWCMatrixToNCHW(Pipeline& pipeline);
     VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNHWCTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
-    VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams);
-    VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams);
+    VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createHgemmCooperativeMatrix(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
     VkResult createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);

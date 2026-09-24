@@ -82,8 +82,6 @@ namespace vk_shader {
   size_t spirv_nchw_to_nhwc_p16s16_size = _binary_nchw_to_nhwc_p16s16_size;
   const unsigned char* spirv_nhwc_to_nchw_p16s16 = _binary_nhwc_to_nchw_p16s16_start;
   size_t spirv_nhwc_to_nchw_p16s16_size = _binary_nhwc_to_nchw_p16s16_size;
-  const unsigned char* spirv_im2col_nhwc_p16s16 = _binary_im2col_nhwc_p16s16_start;
-  size_t spirv_im2col_nhwc_p16s16_size = _binary_im2col_nhwc_p16s16_size;
   const unsigned char* spirv_nhwc_matrix_to_nchw_p16s16 = _binary_nhwc_matrix_to_nchw_p16s16_start;
   size_t spirv_nhwc_matrix_to_nchw_p16s16_size = _binary_nhwc_matrix_to_nchw_p16s16_size;
   const unsigned char* spirv_hgemm_cooperative_matrix_nhwc_acc_fp16 = _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_start;
@@ -521,7 +519,6 @@ namespace vk_shader {
       {spirv_conv2d_p32s16, spirv_conv2d_p32s16_size, &shaderModule_conv2d_p32s16},
       {spirv_nchw_to_nhwc_p16s16, spirv_nchw_to_nhwc_p16s16_size, &shaderModule_nchw_to_nhwc_p16s16},
       {spirv_nhwc_to_nchw_p16s16, spirv_nhwc_to_nchw_p16s16_size, &shaderModule_nhwc_to_nchw_p16s16},
-      {spirv_im2col_nhwc_p16s16, spirv_im2col_nhwc_p16s16_size, &shaderModule_im2col_nhwc_p16s16},
       {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16},
       {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32},
@@ -664,6 +661,12 @@ namespace vk_shader {
     VkResult result;
     const bool useGenericNHWC =
       useNHWCMode && tuneParams.vulkan.shouldUseCooperativeMatrix;
+    const bool useConvNHWC =
+      tuneParams.vulkan.canUseCooperativeMatrix &&
+      tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
+      tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute &&
+      tuneParams.vulkan.shouldUseCooperativeMatrix &&
+      tuneParams.hgemmCooperativeMatrixNHWC.isValid();
     const bool useTransformerAttentionNHWC = useNHWCMode && tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
     const bool useTransformerDualGemmSwiGLUNHWC =
       useNHWCMode && tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
@@ -683,11 +686,10 @@ namespace vk_shader {
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
        tuneParams.vulkan.shouldUseFP16Compute &&
-       (useGenericNHWC || useTransformerAttentionNHWC || useTransformerDualGemmSwiGLUNHWC)) {
+       (useConvNHWC || useTransformerAttentionNHWC || useTransformerDualGemmSwiGLUNHWC)) {
       if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
-      if(useGenericNHWC) {
-        if((result = createIm2ColNHWC(im2colNHWC)) != VK_SUCCESS) return result;
+      if(useConvNHWC || useGenericNHWC) {
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
         if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
           if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrixNHWC)) != VK_SUCCESS) return result;
@@ -708,8 +710,9 @@ namespace vk_shader {
     }
     // Tile base conv no longer used.
     // createConv2dFp32();
-    if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    const bool useConvWinogradNHWC = useConvNHWC || useGenericNHWC;
+    if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
+    if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
     struct PipelineActivation { Pipeline* pipeline; int activation; };
     const PipelineActivation winogradBnActPipelines[] = {
       {&winogradInputTransform3x3_bnact_identity, ACTIVATION_IDENTITY},
@@ -726,10 +729,10 @@ namespace vk_shader {
     for(int i = 0; i < 10; i++) {
       const int convSize = i < 5 ? 3 : 5;
       const ConvTuneParams& convParams = convSize == 3 ? tuneParams.conv3x3 : tuneParams.conv5x5;
-      if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
     }
-    if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
+    if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
     if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -806,7 +809,6 @@ namespace vk_shader {
     destroyPipeline(hgemmCooperativeMatrix);
     destroyPipeline(hgemmCooperativeMatrixNCHW);
     destroyPipeline(hgemmCooperativeMatrixNHWC);
-    destroyPipeline(im2colNHWC);
     destroyPipeline(nhwcMatrixToNchw);
     destroyPipeline(nchwToNhwc);
     destroyPipeline(nhwcToNchw);
@@ -976,7 +978,7 @@ namespace vk_shader {
     // createPipeline("Conv2dFp32", shaderModule_conv2d_fp32, 3, sizeof(Conv2DPushConstantParams), conv2dFp32, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   // }
 
-  VkResult ComputePipelines::createWinogradInputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createWinogradInputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams, bool useNHWC) {
     WinogradInputTransformSpec spec;
     spec.localSizeX = tuneParams.inputTransformLocalXSize;
     spec.localSizeY = tuneParams.inputTransformLocalYSize;
@@ -989,6 +991,7 @@ namespace vk_shader {
     spec.inTileXOffset = -convSize / 2;
     spec.convY = convSize;
     spec.convX = convSize;
+    spec.useNHWC = useNHWC ? 1u : 0u;
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
@@ -1020,20 +1023,6 @@ namespace vk_shader {
       shaderModule_nhwc_to_nchw_p16s16,
       2,
       sizeof(NCHWNHWCParams),
-      pipeline,
-      nullptr,
-      128,
-      1,
-      1
-    );
-  }
-
-  VkResult ComputePipelines::createIm2ColNHWC(Pipeline& pipeline) {
-    return createPipeline(
-      "im2col_nhwc_p16s16",
-      shaderModule_im2col_nhwc_p16s16,
-      5,
-      sizeof(Im2ColNHWCParams),
       pipeline,
       nullptr,
       128,
@@ -1170,7 +1159,7 @@ namespace vk_shader {
     );
   }
 
-  VkResult ComputePipelines::createWinogradInputTransformBnAct(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, int activation, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createWinogradInputTransformBnAct(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, int activation, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = WinogradInputTransformBnActSpec();
     spec.localSizeX = tuneParams.inputTransformLocalXSize;
     spec.localSizeY = tuneParams.inputTransformLocalYSize;
@@ -1184,6 +1173,7 @@ namespace vk_shader {
     spec.convY = convSize;
     spec.convX = convSize;
     spec.activation = activation;
+    spec.useNHWC = useNHWC ? 1u : 0u;
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
@@ -1195,17 +1185,18 @@ namespace vk_shader {
     return createPipeline("winograd_input_transform_bnact_fp32", shaderModule_winograd_input_transform_bnact_fp32, 5, sizeof(WinogradInputTransformParams), pipeline, &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ);
   }
 
-  VkResult ComputePipelines::createWinogradOutputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams) {
+  VkResult ComputePipelines::createWinogradOutputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams, bool useNHWC) {
     WinogradOutputTransformSpec spec;
     spec.localSizeX = tuneParams.outputTransformLocalXSize;
     spec.localSizeY = tuneParams.outputTransformLocalYSize;
-    spec.localSizeZ = tuneParams.outputTransformLocalZSize;
+    spec.localSizeZ = useNHWC ? 1u : tuneParams.outputTransformLocalZSize;
     spec.outTileXSize = tuneParams.outTileXSize;
     spec.outTileYSize = tuneParams.outTileYSize;
     spec.inTileXSize = tuneParams.inTileXSize;
     spec.inTileYSize = tuneParams.inTileYSize;
     spec.convX = convSize;
     spec.convY = convSize;
+    spec.useNHWC = useNHWC ? 1u : 0u;
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
     std::vector<VkSpecializationMapEntry> specEntry = vk_helper::createSpecMapEntries(specData.size());
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, specEntry);
