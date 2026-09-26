@@ -74,17 +74,20 @@ void bnMaskNHWC(int xy, int c) {
   const int channelStride = int(channelsPadded);
   for(int n = 0; n < nSize; n++) {
     const int idx = (n * xySize + xy) * channelStride + c;
-    bnMaskElement(idx, n, c, xy);
+    if(c < cSize)
+      bnMaskElement(idx, n, c, xy);
+    else
+      STORE(d_output, idx, ZERO);
   }
 }
 
 void main() {
   const int xy = int(gl_GlobalInvocationID.x);
   const int c = int(gl_GlobalInvocationID.y);
-  if(c < cSize && xy < xySize) {
-    if(USE_NHWC == 1) {
+  if(xy < xySize) {
+    if(USE_NHWC == 1 && c < channelsPadded) {
       bnMaskNHWC(xy, c);
-    } else {
+    } else if(USE_NHWC == 0 && c < cSize) {
       bnMaskNCHW(xy, c);
     }
   }

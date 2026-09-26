@@ -612,10 +612,14 @@ bool ConvTuneParams::isValid(uint32_t convSize) const {
   if(!supportedTileSize)
     return false;
   if(inputTransformLocalXSize == 0 || inputTransformLocalYSize == 0 ||
-     outputTransformLocalXSize == 0 || outputTransformLocalYSize == 0 || outputTransformLocalZSize == 0)
+     outputTransformLocalXSize == 0 || outputTransformLocalYSize == 0 || outputTransformLocalZSize == 0 ||
+     inputTransformNHWCLocalXSize == 0 || inputTransformNHWCLocalYSize == 0 ||
+     outputTransformNHWCLocalXSize == 0 || outputTransformNHWCLocalYSize == 0)
     return false;
   return static_cast<uint64_t>(inputTransformLocalXSize) * inputTransformLocalYSize <= 1024 &&
-         static_cast<uint64_t>(outputTransformLocalXSize) * outputTransformLocalYSize * outputTransformLocalZSize <= 1024;
+         static_cast<uint64_t>(outputTransformLocalXSize) * outputTransformLocalYSize * outputTransformLocalZSize <= 1024 &&
+         static_cast<uint64_t>(inputTransformNHWCLocalXSize) * inputTransformNHWCLocalYSize <= 1024 &&
+         static_cast<uint64_t>(outputTransformNHWCLocalXSize) * outputTransformNHWCLocalYSize <= 1024;
 }
 
 bool XgemmTuneParams::isValid() const {
@@ -848,6 +852,10 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          conv3x3.outputTransformLocalXSize == other.conv3x3.outputTransformLocalXSize &&
          conv3x3.outputTransformLocalYSize == other.conv3x3.outputTransformLocalYSize &&
          conv3x3.outputTransformLocalZSize == other.conv3x3.outputTransformLocalZSize &&
+         conv3x3.inputTransformNHWCLocalXSize == other.conv3x3.inputTransformNHWCLocalXSize &&
+         conv3x3.inputTransformNHWCLocalYSize == other.conv3x3.inputTransformNHWCLocalYSize &&
+         conv3x3.outputTransformNHWCLocalXSize == other.conv3x3.outputTransformNHWCLocalXSize &&
+         conv3x3.outputTransformNHWCLocalYSize == other.conv3x3.outputTransformNHWCLocalYSize &&
          conv5x5.inTileYSize == other.conv5x5.inTileYSize && conv5x5.inTileXSize == other.conv5x5.inTileXSize &&
          conv5x5.outTileYSize == other.conv5x5.outTileYSize && conv5x5.outTileXSize == other.conv5x5.outTileXSize &&
          conv5x5.inputTransformLocalXSize == other.conv5x5.inputTransformLocalXSize &&
@@ -855,6 +863,10 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          conv5x5.outputTransformLocalXSize == other.conv5x5.outputTransformLocalXSize &&
          conv5x5.outputTransformLocalYSize == other.conv5x5.outputTransformLocalYSize &&
          conv5x5.outputTransformLocalZSize == other.conv5x5.outputTransformLocalZSize &&
+         conv5x5.inputTransformNHWCLocalXSize == other.conv5x5.inputTransformNHWCLocalXSize &&
+         conv5x5.inputTransformNHWCLocalYSize == other.conv5x5.inputTransformNHWCLocalYSize &&
+         conv5x5.outputTransformNHWCLocalXSize == other.conv5x5.outputTransformNHWCLocalXSize &&
+         conv5x5.outputTransformNHWCLocalYSize == other.conv5x5.outputTransformNHWCLocalYSize &&
          hgemmCooperativeMatrix.MWARP == other.hgemmCooperativeMatrix.MWARP &&
          hgemmCooperativeMatrix.NWARP == other.hgemmCooperativeMatrix.NWARP &&
          hgemmCooperativeMatrix.KDIM == other.hgemmCooperativeMatrix.KDIM &&
@@ -949,6 +961,10 @@ bool VulkanTuneParams::isValid() const {
     return false;
   if(vulkan.shouldUseCooperativeMatrix && !vulkan.canUseCooperativeMatrix)
     return false;
+  if(vulkan.shouldUseNHWC &&
+     (!vulkan.shouldUseCooperativeMatrix ||
+      !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute))
+    return false;
   if(vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
      (!vulkan.canUseCooperativeMatrix ||
       !vulkan.shouldUseFP16Storage || !vulkan.shouldUseFP16Compute))
@@ -969,6 +985,7 @@ bool VulkanTuneParams::operator==(const VulkanTuneParams& other) const {
          vulkan.shouldUseFP16Storage == other.vulkan.shouldUseFP16Storage &&
          vulkan.shouldUseFP16Compute == other.vulkan.shouldUseFP16Compute &&
          vulkan.shouldUseCooperativeMatrix == other.vulkan.shouldUseCooperativeMatrix &&
+         vulkan.shouldUseNHWC == other.vulkan.shouldUseNHWC &&
          vulkan.shouldUseHgemmCooperativeMatrixNCHW == other.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
          vulkan.shouldUseTransformerDualGemmSwiGLU == other.vulkan.shouldUseTransformerDualGemmSwiGLU &&
          vulkan.shouldUseSubgroup == other.vulkan.shouldUseSubgroup &&
@@ -1017,7 +1034,9 @@ namespace {
     WRITE(name ".inTileXSize", params.inTileXSize); WRITE(name ".inTileYSize", params.inTileYSize); \
     WRITE(name ".outTileXSize", params.outTileXSize); WRITE(name ".outTileYSize", params.outTileYSize); \
     WRITE(name ".inputTransformLocalXSize", params.inputTransformLocalXSize); WRITE(name ".inputTransformLocalYSize", params.inputTransformLocalYSize); \
-    WRITE(name ".outputTransformLocalXSize", params.outputTransformLocalXSize); WRITE(name ".outputTransformLocalYSize", params.outputTransformLocalYSize); WRITE(name ".outputTransformLocalZSize", params.outputTransformLocalZSize)
+    WRITE(name ".outputTransformLocalXSize", params.outputTransformLocalXSize); WRITE(name ".outputTransformLocalYSize", params.outputTransformLocalYSize); WRITE(name ".outputTransformLocalZSize", params.outputTransformLocalZSize); \
+    WRITE(name ".inputTransformNHWCLocalXSize", params.inputTransformNHWCLocalXSize); WRITE(name ".inputTransformNHWCLocalYSize", params.inputTransformNHWCLocalYSize); \
+    WRITE(name ".outputTransformNHWCLocalXSize", params.outputTransformNHWCLocalXSize); WRITE(name ".outputTransformNHWCLocalYSize", params.outputTransformNHWCLocalYSize)
     WRITE_CONV("conv3x3", profile.conv3x3); WRITE_CONV("conv5x5", profile.conv5x5);
 #undef WRITE_CONV
     WRITE("gPool.XYSTRIDE", profile.gPool.XYSTRIDE); WRITE("gPool.CHANNELSTRIDE", profile.gPool.CHANNELSTRIDE); WRITE("gPool.BATCHSTRIDE", profile.gPool.BATCHSTRIDE);
@@ -1056,6 +1075,7 @@ void VulkanTuneParams::save(const string& filename, const VulkanTuneParams& conf
   writeParam(out, "vulkan.shouldUseFP16Storage", config.vulkan.shouldUseFP16Storage);
   writeParam(out, "vulkan.shouldUseFP16Compute", config.vulkan.shouldUseFP16Compute);
   writeParam(out, "vulkan.shouldUseCooperativeMatrix", config.vulkan.shouldUseCooperativeMatrix);
+  writeParam(out, "vulkan.shouldUseNHWC", config.vulkan.shouldUseNHWC);
   writeParam(out, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
   writeParam(out, "vulkan.shouldUseSubgroup", config.vulkan.shouldUseSubgroup);
   writeParam(out, "vulkan.shouldUseTransformerDualGemmSwiGLU", config.vulkan.shouldUseTransformerDualGemmSwiGLU);
@@ -1087,7 +1107,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 137)
+  if(values.size() != 146)
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -1117,7 +1137,9 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
 #undef READ_HGEMM_NHWC
 #define READ_CONV(name, params) \
     params.inTileXSize = read(name ".inTileXSize"); params.inTileYSize = read(name ".inTileYSize"); params.outTileXSize = read(name ".outTileXSize"); params.outTileYSize = read(name ".outTileYSize"); \
-    params.inputTransformLocalXSize = read(name ".inputTransformLocalXSize"); params.inputTransformLocalYSize = read(name ".inputTransformLocalYSize"); params.outputTransformLocalXSize = read(name ".outputTransformLocalXSize"); params.outputTransformLocalYSize = read(name ".outputTransformLocalYSize"); params.outputTransformLocalZSize = read(name ".outputTransformLocalZSize")
+    params.inputTransformLocalXSize = read(name ".inputTransformLocalXSize"); params.inputTransformLocalYSize = read(name ".inputTransformLocalYSize"); params.outputTransformLocalXSize = read(name ".outputTransformLocalXSize"); params.outputTransformLocalYSize = read(name ".outputTransformLocalYSize"); params.outputTransformLocalZSize = read(name ".outputTransformLocalZSize"); \
+    params.inputTransformNHWCLocalXSize = read(name ".inputTransformNHWCLocalXSize"); params.inputTransformNHWCLocalYSize = read(name ".inputTransformNHWCLocalYSize"); \
+    params.outputTransformNHWCLocalXSize = read(name ".outputTransformNHWCLocalXSize"); params.outputTransformNHWCLocalYSize = read(name ".outputTransformNHWCLocalYSize")
     READ_CONV("conv3x3", profile.conv3x3); READ_CONV("conv5x5", profile.conv5x5);
 #undef READ_CONV
     profile.gPool.XYSTRIDE = read("gPool.XYSTRIDE"); profile.gPool.CHANNELSTRIDE = read("gPool.CHANNELSTRIDE"); profile.gPool.BATCHSTRIDE = read("gPool.BATCHSTRIDE");
@@ -1149,6 +1171,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   config.vulkan.shouldUseFP16Storage = getBoolParam(values, "vulkan.shouldUseFP16Storage", filename);
   config.vulkan.shouldUseFP16Compute = getBoolParam(values, "vulkan.shouldUseFP16Compute", filename);
   config.vulkan.shouldUseCooperativeMatrix = getBoolParam(values, "vulkan.shouldUseCooperativeMatrix", filename);
+  config.vulkan.shouldUseNHWC = getBoolParam(values, "vulkan.shouldUseNHWC", filename);
   config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = getBoolParam(values, "vulkan.shouldUseHgemmCooperativeMatrixNCHW", filename);
   config.vulkan.shouldUseSubgroup = getBoolParam(values, "vulkan.shouldUseSubgroup", filename);
   config.vulkan.shouldUseTransformerDualGemmSwiGLU = getBoolParam(values, "vulkan.shouldUseTransformerDualGemmSwiGLU", filename);
@@ -1459,7 +1482,8 @@ namespace {
   vector<GemmTuneCase> getGemmTuneCases(
     const TuningContext& context,
     bool includeTransformerCases,
-    bool use3x3
+    bool use3x3,
+    bool includeInputConvCase = true
   ) {
     int maxConvChannels = use3x3 ? context.modelInfo.maxConvChannels3x3 : context.modelInfo.maxConvChannels1x1;
     maxConvChannels = std::max(context.modelInfo.trunkNumChannels, maxConvChannels);
@@ -1480,7 +1504,7 @@ namespace {
       else
         existing->weight += weight;
     };
-    if(use3x3)
+    if(use3x3 && includeInputConvCase)
       addCase(context.modelInfo.numInputChannels, context.modelInfo.trunkNumChannels, 1.0);
     addCase(context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels, 1.0);
     addCase(context.modelInfo.midNumChannels, context.modelInfo.trunkNumChannels, 1.0);
@@ -1512,7 +1536,8 @@ namespace {
     const TuningContext& context
   ) {
     const bool direct = tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW";
-    return getGemmTuneCases(context, direct, !direct);
+    const bool includeInputConvCase = tunerName != "hgemmCooperativeMatrix";
+    return getGemmTuneCases(context, direct, !direct, includeInputConvCase);
   }
 
   size_t getWorkloadCaseCount(const string& tunerName, const TuningContext& context);
@@ -1871,13 +1896,25 @@ namespace {
       add("outTileYSize", conv.outTileYSize);
       add("outTileXSize", conv.outTileXSize);
       if(tunerName.find("Input") != string::npos) {
-        add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
-        add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
+        if(usesGenericNHWC(config)) {
+          add("inputTransformNHWCLocalXSize", conv.inputTransformNHWCLocalXSize);
+          add("inputTransformNHWCLocalYSize", conv.inputTransformNHWCLocalYSize);
+        }
+        else {
+          add("inputTransformLocalXSize", conv.inputTransformLocalXSize);
+          add("inputTransformLocalYSize", conv.inputTransformLocalYSize);
+        }
       }
       else {
-        add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
-        add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
-        add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
+        if(usesGenericNHWC(config)) {
+          add("outputTransformNHWCLocalXSize", conv.outputTransformNHWCLocalXSize);
+          add("outputTransformNHWCLocalYSize", conv.outputTransformNHWCLocalYSize);
+        }
+        else {
+          add("outputTransformLocalXSize", conv.outputTransformLocalXSize);
+          add("outputTransformLocalYSize", conv.outputTransformLocalYSize);
+          add("outputTransformLocalZSize", conv.outputTransformLocalZSize);
+        }
       }
     }
     else if(tunerName == "gPool") {
@@ -2069,6 +2106,9 @@ namespace {
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
       const bool useNHWC = usesGenericNHWC(config);
       const bool nhwcCooperative = plan.kernelName == "hgemmCooperativeMatrixNHWC";
+      const bool nhwcWinograd = useNHWC &&
+        (plan.kernelName == "conv3x3InputTransform" || plan.kernelName == "conv3x3OutputTransform" ||
+         plan.kernelName == "conv5x5InputTransform" || plan.kernelName == "conv5x5OutputTransform");
       const auto& activeNhwcParams = nhwcTuningParams(config);
       const auto channelAlignment = [](const HGemmCooperativeMatrixNHWCTuneParams& params) {
         if(params.NWG <= 0)
@@ -2151,7 +2191,7 @@ namespace {
         : addChannelBiasesChannels;
       const XgemmTuneParams& xgemmParams =
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
-      const bool cooperativeForPadding = nhwcCooperative
+      const bool cooperativeForPadding = (nhwcCooperative || nhwcWinograd)
         && activeNhwcParams.isValid();
       const int activeMPaddingMult = cooperativeForPadding
         ? activeNhwcParams.MWG : xgemmParams.MWG;
@@ -2185,6 +2225,7 @@ namespace {
         plan.kernelName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
       const int tilesX = (context.nnXLen + transformConvParams.outTileXSize - 1) / transformConvParams.outTileXSize;
       const int tilesY = (context.nnYLen + transformConvParams.outTileYSize - 1) / transformConvParams.outTileYSize;
+      const size_t transformTiles = batchSize * static_cast<size_t>(tilesX) * static_cast<size_t>(tilesY);
       const int logicalM = nhwcCooperative
         ? static_cast<int>(logicalXYSize)
         : directGemm ? static_cast<int>(logicalXYSize) : static_cast<int>(batchSize) * tilesX * tilesY;
@@ -2247,6 +2288,9 @@ namespace {
       const int gemmK = maxGemm.gemmK;
       const size_t maxTiles = batchSize * ((context.nnXLen + 1) / 2) * ((context.nnYLen + 1) / 2);
       const size_t paddedTiles = vk_helper::roundUpToMultiple(maxTiles, static_cast<size_t>(activeMPaddingMult));
+      const size_t paddedTransformTiles = vk_helper::roundUpToMultiple(
+        transformTiles, static_cast<size_t>(activeMPaddingMult)
+      );
       const size_t paddedChannels = vk_helper::roundUpToMultiple(
         maxChannels, static_cast<size_t>(std::max(activeKPaddingMult, activeNPaddingMult))
       );
@@ -2475,18 +2519,28 @@ namespace {
                 name.find("transformer_spatial_rms_norm_apply") == 0 && binding == 3;
               if(winogradInputTransform && binding == 0) {
                 const int inputChannels = static_cast<int>(maxConvChannels);
+                const size_t inputChannelsPadded = useNHWC
+                  ? vk_helper::roundUpToMultiple(static_cast<size_t>(inputChannels), static_cast<size_t>(activeKPaddingMult))
+                  : static_cast<size_t>(inputChannels);
                 for(size_t n = 0; n < batchSize; n++)
                   for(int c = 0; c < inputChannels; c++)
                     for(size_t xy = 0; xy < logicalXYSize; xy++)
-                      data[(n * inputChannels + c) * logicalXYSize + xy] =
+                      data[useNHWC
+                        ? (n * xySize + xy) * inputChannelsPadded + c
+                        : (n * inputChannels + c) * logicalXYSize + xy] =
                         static_cast<float>(rand.nextDouble());
               }
               else if(winogradOutputTransform && binding == 0) {
                 const size_t tileElements = static_cast<size_t>(transformConvParams.inTileXSize) * transformConvParams.inTileYSize;
+                const size_t outputChannelsPadded = vk_helper::roundUpToMultiple(
+                  maxConvChannels, static_cast<size_t>(activeNPaddingMult)
+                );
                 for(size_t tileElement = 0; tileElement < tileElements; tileElement++)
                   for(size_t channel = 0; channel < maxConvChannels; channel++)
-                    for(size_t tile = 0; tile < maxTiles; tile++)
-                      data[(tileElement * paddedChannels + channel) * paddedTiles + tile] =
+                    for(size_t tile = 0; tile < transformTiles; tile++)
+                      data[useNHWC
+                        ? (tileElement * paddedTransformTiles + tile) * outputChannelsPadded + channel
+                        : (tileElement * outputChannelsPadded + channel) * paddedTransformTiles + tile] =
                         static_cast<float>(rand.nextDouble());
               }
               else if(globalPoolingInput) {
@@ -3080,7 +3134,7 @@ namespace {
         const bool usesPaddedPipelineXY =
           plan.kernelName == "gPool" || plan.kernelName == "pointwise" ||
           plan.kernelName == "transformerAttention" || plan.kernelName == "transformerRMSNorm" ||
-          plan.kernelName == "spatialRMSNorm";
+          plan.kernelName == "spatialRMSNorm" || nhwcWinograd;
         const int pipelineXYSize = usesPaddedPipelineXY ? static_cast<int>(xySize) : logicalPipelineXYSize;
         const int channels = std::max(1, runChannels);
         const auto dispatch = [&](uint32_t x, uint32_t y = 1, uint32_t z = 1) {
@@ -3151,10 +3205,16 @@ namespace {
             batchSize,context.nnXLen,context.nnYLen,tilesX,tilesY,channels,paddedChannels,paddedTiles,pipelineXYSize
           };
           push(params);
-          dispatch(
-            static_cast<uint32_t>((params.ntxtySizePadded + pipeline->localSizeX - 1) / pipeline->localSizeX),
-            static_cast<uint32_t>((paddedChannels + pipeline->localSizeY - 1) / pipeline->localSizeY)
-          );
+          if(useNHWC)
+            dispatch(
+              static_cast<uint32_t>((paddedChannels + pipeline->localSizeX - 1) / pipeline->localSizeX),
+              static_cast<uint32_t>((params.ntxtySizePadded + pipeline->localSizeY - 1) / pipeline->localSizeY)
+            );
+          else
+            dispatch(
+              static_cast<uint32_t>((params.ntxtySizePadded + pipeline->localSizeX - 1) / pipeline->localSizeX),
+              static_cast<uint32_t>((paddedChannels + pipeline->localSizeY - 1) / pipeline->localSizeY)
+            );
         }
         else if(pipeline->name.find("winograd_output_transform") == 0) {
           const vk_shader::tune::ConvTuneParams& convParams =
@@ -3168,11 +3228,17 @@ namespace {
             batchSize,context.nnYLen,context.nnXLen,tilesY,tilesX,channels,paddedChannels,paddedTiles,pipelineXYSize
           };
           push(params);
-          dispatch(
-            static_cast<uint32_t>((vk_helper::powerOf2ify(tilesX) + pipeline->localSizeX - 1) / pipeline->localSizeX),
-            static_cast<uint32_t>((vk_helper::powerOf2ify(tilesY) + pipeline->localSizeY - 1) / pipeline->localSizeY),
-            static_cast<uint32_t>((batchSize * channels + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
-          );
+          if(useNHWC)
+            dispatch(
+              static_cast<uint32_t>((paddedChannels + pipeline->localSizeX - 1) / pipeline->localSizeX),
+              static_cast<uint32_t>((batchSize * tilesX * tilesY + pipeline->localSizeY - 1) / pipeline->localSizeY)
+            );
+          else
+            dispatch(
+              static_cast<uint32_t>((vk_helper::powerOf2ify(tilesX) + pipeline->localSizeX - 1) / pipeline->localSizeX),
+              static_cast<uint32_t>((vk_helper::powerOf2ify(tilesY) + pipeline->localSizeY - 1) / pipeline->localSizeY),
+              static_cast<uint32_t>((batchSize * channels + pipeline->localSizeZ - 1) / pipeline->localSizeZ)
+            );
         }
         else if(pipeline->name.find("global_pooling_channels") == 0) {
           const int gpoolChannels = std::max(1, context.modelInfo.gpoolNumChannels);
@@ -3962,7 +4028,10 @@ namespace {
       if(plan.kernelName.find("OutputTransform") != string::npos && !winogradOutputValidationBuffers.empty()) {
         const Pipeline* outputPipeline = pipelines[0];
         const uint32_t binding = outputBinding(outputPipeline);
-        const size_t count = batchSize * maxConvChannels * xySize;
+        const size_t outputChannels = useNHWC
+          ? vk_helper::roundUpToMultiple(maxConvChannels, static_cast<size_t>(activeNPaddingMult))
+          : maxConvChannels;
+        const size_t count = batchSize * outputChannels * xySize;
         for(VulkanBuffer* validationBuffer: winogradOutputValidationBuffers) {
           vector<float> output(count);
           if(halfBinding(outputPipeline, binding)) {
@@ -5352,8 +5421,10 @@ namespace {
         measurements.values.push_back({candidate, callsPerSecond, score});
         const bool isBest = score > bestScore;
         const bool logHgemmNhwcOnlyOnUpdate = Tuner::name() == "hgemmCooperativeMatrixNHWC";
+        const bool logGenericHgemmReference =
+          Tuner::name() == "hgemmCooperativeMatrix" && isReferenceCandidate;
         if(logHgemmNhwcOnlyOnUpdate ? isBest :
-           (logSuccessfulResults && (!context.printOnlyOnImprovement || isBest))) {
+           (logGenericHgemmReference || (logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)))) {
           logTuningResult(
             context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
             isBest
@@ -6278,7 +6349,7 @@ namespace {
     static bool value(const VulkanTuneParams&) { return true; }
   };
 
-  template<int ConvSize, bool InputTransform>
+  template<int ConvSize, bool InputTransform, bool UseNHWC>
   struct ConvTuner {
     static string name() {
       return string(ConvSize == 3 ? "conv3x3" : "conv5x5") +
@@ -6293,26 +6364,51 @@ namespace {
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
       if(InputTransform) {
-        params(result).inputTransformLocalXSize = params(defaults).inputTransformLocalXSize;
-        params(result).inputTransformLocalYSize = params(defaults).inputTransformLocalYSize;
+        if(UseNHWC) {
+          params(result).inputTransformNHWCLocalXSize = params(defaults).inputTransformNHWCLocalXSize;
+          params(result).inputTransformNHWCLocalYSize = params(defaults).inputTransformNHWCLocalYSize;
+        }
+        else {
+          params(result).inputTransformLocalXSize = params(defaults).inputTransformLocalXSize;
+          params(result).inputTransformLocalYSize = params(defaults).inputTransformLocalYSize;
+        }
       }
       else {
-        params(result).outputTransformLocalXSize = params(defaults).outputTransformLocalXSize;
-        params(result).outputTransformLocalYSize = params(defaults).outputTransformLocalYSize;
-        params(result).outputTransformLocalZSize = params(defaults).outputTransformLocalZSize;
+        if(UseNHWC) {
+          params(result).outputTransformNHWCLocalXSize = params(defaults).outputTransformNHWCLocalXSize;
+          params(result).outputTransformNHWCLocalYSize = params(defaults).outputTransformNHWCLocalYSize;
+        }
+        else {
+          params(result).outputTransformLocalXSize = params(defaults).outputTransformLocalXSize;
+          params(result).outputTransformLocalYSize = params(defaults).outputTransformLocalYSize;
+          params(result).outputTransformLocalZSize = params(defaults).outputTransformLocalZSize;
+        }
       }
       return result;
     }
     static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext&) {
       vector<VulkanTuneParams> configs = {current};
       if(InputTransform) {
-        addCandidates(configs, vector<int>{1,2,4,8,16,32,64,128}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalXSize = v; });
-        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,8,16,32}, [](VulkanTuneParams& p, int v) { params(p).inputTransformLocalYSize = v; });
+        addCandidates(configs, vector<int>{1,2,4,8,16,32,64,128}, [](VulkanTuneParams& p, int v) {
+          if(UseNHWC) params(p).inputTransformNHWCLocalXSize = v;
+          else params(p).inputTransformLocalXSize = v;
+        });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,8,16,32}, [](VulkanTuneParams& p, int v) {
+          if(UseNHWC) params(p).inputTransformNHWCLocalYSize = v;
+          else params(p).inputTransformLocalYSize = v;
+        });
       }
       else {
-        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,8,16,32}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalXSize = v; });
-        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,16,32}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalYSize = v; });
-        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalZSize = v; });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,8,16,32}, [](VulkanTuneParams& p, int v) {
+          if(UseNHWC) params(p).outputTransformNHWCLocalXSize = v;
+          else params(p).outputTransformLocalXSize = v;
+        });
+        addCandidates(configs, full ? vector<int>{1,2,4,8,16,32,64} : vector<int>{1,2,4,16,32}, [](VulkanTuneParams& p, int v) {
+          if(UseNHWC) params(p).outputTransformNHWCLocalYSize = v;
+          else params(p).outputTransformLocalYSize = v;
+        });
+        if(!UseNHWC)
+          addCandidates(configs, full ? vector<int>{1,2,4,8,16,32} : vector<int>{1,2,4,8,16}, [](VulkanTuneParams& p, int v) { params(p).outputTransformLocalZSize = v; });
       }
       configs.erase(remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& config) { return !isValid(config); }), configs.end());
       configs.insert(configs.begin(), current);
@@ -6320,12 +6416,17 @@ namespace {
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
       Pipeline& pipeline = InputTransform
-        ? (ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5)
-        : (ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5);
+        ? (pipelines.useNHWC
+            ? (ConvSize == 3 ? pipelines.winogradInputTransform3x3NHWC : pipelines.winogradInputTransform5x5NHWC)
+            : (ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5))
+        : (pipelines.useNHWC
+            ? (ConvSize == 3 ? pipelines.winogradOutputTransform3x3NHWC : pipelines.winogradOutputTransform5x5NHWC)
+            : (ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5));
       VkResult result = InputTransform
         ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC)
         : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC);
       if(result == VK_SUCCESS) {
+        pipeline.name += UseNHWC ? "_nhwc" : "_nchw";
         pipeline.name += ConvSize == 3 ? "_3x3" : "_5x5";
         targets.push_back(&pipeline);
       }
@@ -6333,10 +6434,10 @@ namespace {
     }
   };
 
-  struct Conv3x3InputTuner : ConvTuner<3,true> {};
-  struct Conv3x3OutputTuner : ConvTuner<3,false> {};
-  struct Conv5x5InputTuner : ConvTuner<5,true> {};
-  struct Conv5x5OutputTuner : ConvTuner<5,false> {};
+  struct Conv3x3InputTuner : ConvTuner<3,true,false> {};
+  struct Conv3x3OutputTuner : ConvTuner<3,false,false> {};
+  struct Conv3x3InputNHWCTuner : ConvTuner<3,true,true> {};
+  struct Conv3x3OutputNHWCTuner : ConvTuner<3,false,true> {};
 
   template<>
   struct KeepsCurrentConfigFirst<Conv3x3InputTuner> {
@@ -6345,6 +6446,16 @@ namespace {
 
   template<>
   struct KeepsCurrentConfigFirst<Conv3x3OutputTuner> {
+    static constexpr bool value = true;
+  };
+
+  template<>
+  struct KeepsCurrentConfigFirst<Conv3x3InputNHWCTuner> {
+    static constexpr bool value = true;
+  };
+
+  template<>
+  struct KeepsCurrentConfigFirst<Conv3x3OutputNHWCTuner> {
     static constexpr bool value = true;
   };
 
@@ -6601,22 +6712,46 @@ namespace {
   };
 
   void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
-    if(!config.vulkan.shouldUseCooperativeMatrix) {
-      runTuner<Conv3x3InputTuner>(context, config);
-      runTuner<Conv3x3OutputTuner>(context, config);
-      if(context.modelInfo.hasConv5x5) {
-        config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
-        config.conv5x5.inputTransformLocalYSize = config.conv3x3.inputTransformLocalYSize;
-        config.conv5x5.outputTransformLocalXSize = config.conv3x3.outputTransformLocalXSize;
-        config.conv5x5.outputTransformLocalYSize = config.conv3x3.outputTransformLocalYSize;
-        config.conv5x5.outputTransformLocalZSize = config.conv3x3.outputTransformLocalZSize;
-      }
-      else if(context.logger != nullptr) {
-        context.logger->write("Skipping Vulkan 5x5 Winograd tuning because the model has no 5x5 convolution");
-      }
+    VulkanTuneParams nchwConfig = config;
+    nchwConfig.vulkan.shouldUseCooperativeMatrix = false;
+    runTuner<Conv3x3InputTuner>(context, nchwConfig);
+    runTuner<Conv3x3OutputTuner>(context, nchwConfig);
+    config.conv3x3.inputTransformLocalXSize = nchwConfig.conv3x3.inputTransformLocalXSize;
+    config.conv3x3.inputTransformLocalYSize = nchwConfig.conv3x3.inputTransformLocalYSize;
+    config.conv3x3.outputTransformLocalXSize = nchwConfig.conv3x3.outputTransformLocalXSize;
+    config.conv3x3.outputTransformLocalYSize = nchwConfig.conv3x3.outputTransformLocalYSize;
+    config.conv3x3.outputTransformLocalZSize = nchwConfig.conv3x3.outputTransformLocalZSize;
+
+    if(config.vulkan.canUseCooperativeMatrix && config.vulkan.canUseFP16Storage &&
+       config.vulkan.canUseFP16Compute && config.hgemmCooperativeMatrixNHWC.isValid()) {
+      VulkanTuneParams nhwcConfig = config;
+      nhwcConfig.vulkan.shouldUseCooperativeMatrix = true;
+      nhwcConfig.vulkan.shouldUseFP16Storage = true;
+      nhwcConfig.vulkan.shouldUseFP16Compute = true;
+      runTuner<Conv3x3InputNHWCTuner>(context, nhwcConfig);
+      runTuner<Conv3x3OutputNHWCTuner>(context, nhwcConfig);
+      config.conv3x3.inputTransformNHWCLocalXSize = nhwcConfig.conv3x3.inputTransformNHWCLocalXSize;
+      config.conv3x3.inputTransformNHWCLocalYSize = nhwcConfig.conv3x3.inputTransformNHWCLocalYSize;
+      config.conv3x3.outputTransformNHWCLocalXSize = nhwcConfig.conv3x3.outputTransformNHWCLocalXSize;
+      config.conv3x3.outputTransformNHWCLocalYSize = nhwcConfig.conv3x3.outputTransformNHWCLocalYSize;
     }
     else if(context.logger != nullptr) {
-      context.logger->write("Skipping Vulkan Winograd tuning because cooperative-matrix NHWC is selected");
+      context.logger->write("Skipping Vulkan NHWC Winograd tuning because FP16 cooperative-matrix support is unavailable");
+    }
+
+    if(context.modelInfo.hasConv5x5) {
+      config.conv5x5.inputTransformLocalXSize = config.conv3x3.inputTransformLocalXSize;
+      config.conv5x5.inputTransformLocalYSize = config.conv3x3.inputTransformLocalYSize;
+      config.conv5x5.outputTransformLocalXSize = config.conv3x3.outputTransformLocalXSize;
+      config.conv5x5.outputTransformLocalYSize = config.conv3x3.outputTransformLocalYSize;
+      config.conv5x5.outputTransformLocalZSize = config.conv3x3.outputTransformLocalZSize;
+      config.conv5x5.inputTransformNHWCLocalXSize = config.conv3x3.inputTransformNHWCLocalXSize;
+      config.conv5x5.inputTransformNHWCLocalYSize = config.conv3x3.inputTransformNHWCLocalYSize;
+      config.conv5x5.outputTransformNHWCLocalXSize = config.conv3x3.outputTransformNHWCLocalXSize;
+      config.conv5x5.outputTransformNHWCLocalYSize = config.conv3x3.outputTransformNHWCLocalYSize;
+    }
+    else if(context.logger != nullptr) {
+      context.logger->write("Skipping Vulkan 5x5 Winograd tuning because the model has no 5x5 convolution");
     }
     runTuner<GPoolTuner>(context, config);
     const bool hasTransformerModel =
@@ -6728,15 +6863,12 @@ namespace {
     const TuningContext& context,
     VulkanTuneParams& config,
     double xgemmDirectBaselineCallsPerSecond,
-    double xgemmBaselineCallsPerSecond
+    double xgemmBaselineCallsPerSecond,
+    bool canUseHgemmCooperativeMatrix,
+    bool canUseNCHW
   ) {
-    const bool canUseHgemmCooperativeMatrix =
-      config.vulkan.canUseCooperativeMatrix &&
-      config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute;
-    const bool canUseNCHW =
-      config.vulkan.canUseCooperativeMatrix &&
-      config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute;
-    if(!canUseHgemmCooperativeMatrix && !canUseNCHW) {
+    if((!canUseHgemmCooperativeMatrix && !canUseNCHW) || !config.vulkan.canUseFP16Storage ||
+       !config.vulkan.canUseFP16Compute) {
       if(context.logger != nullptr)
         context.logger->write(
           "Skipping Vulkan cooperative matrix tuning: capability or FP16 prerequisite unavailable, "
@@ -6748,7 +6880,41 @@ namespace {
     VulkanTuneParams cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = true;
-    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = canUseHgemmCooperativeMatrix;
+    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = false;
+
+    const double hgemmCallsPerSecond = canUseHgemmCooperativeMatrix
+      ? runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig)
+      : 0.0;
+    const bool useHgemm = canUseHgemmCooperativeMatrix && VulkanTuner::isFastEnough(
+      hgemmCallsPerSecond, xgemmBaselineCallsPerSecond,
+      VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
+    );
+    if(isfinite(hgemmCallsPerSecond) && hgemmCallsPerSecond > 0.0 &&
+       cooperativeConfig.hgemmCooperativeMatrix.isValid()) {
+      config.hgemmCooperativeMatrix = cooperativeConfig.hgemmCooperativeMatrix;
+    }
+    if(useHgemm) {
+      config.vulkan.shouldUseCooperativeMatrix = true;
+      config.vulkan.shouldUseFP16Compute = true;
+    }
+    if(context.logger != nullptr) {
+      context.logger->write(
+        "Vulkan hgemmCooperativeMatrix baseline comparison: xgemm=" +
+        Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
+        " calls/s, hgemmCooperativeMatrix=" + Global::strprintf("%.6g", hgemmCallsPerSecond) +
+        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO) +
+        ", selected=" + (useHgemm ? "true" : "false")
+      );
+    }
+
+    cooperativeConfig = config;
+    cooperativeConfig.vulkan.shouldUseFP16Storage = true;
+    cooperativeConfig.vulkan.shouldUseFP16Compute = true;
+    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = true;
+    cooperativeConfig.vulkan.shouldUseNHWC =
+      context.modelInfo.transformerHeadDim > 0 &&
+      context.modelInfo.transformerVHeadDim > 0 &&
+      cooperativeConfig.vulkan.shouldUseCooperativeMatrix;
     const double hgemmNHWCCallsPerSecond = canUseHgemmCooperativeMatrix
       ? runTuner<HgemmCooperativeMatrixNHWCTunerImpl>(context, cooperativeConfig)
       : 0.0;
@@ -6770,6 +6936,7 @@ namespace {
     cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = true;
+    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = false;
     TuningContext nchwContext = context;
     nchwContext.nchwFallbackCallsPerSecond = xgemmDirectBaselineCallsPerSecond;
     const double hgemmNCHWCallsPerSecond = canUseNCHW
@@ -7124,11 +7291,22 @@ void VulkanTuner::tune(
       ", cooperativeMatrix=" + string(tunedConfig.vulkan.canUseCooperativeMatrix ? "true" : "false")
     );
   }
+  const bool canUseHgemmCooperativeMatrix =
+    tunedConfig.vulkan.canUseCooperativeMatrix &&
+    VulkanTuner::HgemmCooperativeMatrixTuner::selectCooperativeMatrixProperties(
+      device, tunedConfig.hgemmCooperativeMatrix
+    );
+  const bool canUseHgemmCooperativeMatrixNCHW =
+    tunedConfig.vulkan.canUseCooperativeMatrix &&
+    VulkanTuner::HgemmCooperativeMatrixNCHWTuner::selectCooperativeMatrixProperties(
+      device, tunedConfig.hgemmCooperativeMatrixNCHW
+    );
   tunedConfig.xgemmDirect.PADA = 1;
   tunedConfig.xgemmDirect.PADB = 1;
   tunedConfig.vulkan.shouldUseFP16Storage = false;
   tunedConfig.vulkan.shouldUseFP16Compute = false;
   tunedConfig.vulkan.shouldUseCooperativeMatrix = false;
+  tunedConfig.vulkan.shouldUseNHWC = false;
   tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
   tunedConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
@@ -7137,18 +7315,24 @@ void VulkanTuner::tune(
   tunedConfig.xgemm16 = tunedConfig.xgemm;
   tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
   tuneCooperativeMatrices(
-    context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond
+    context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond,
+    canUseHgemmCooperativeMatrix, canUseHgemmCooperativeMatrixNCHW
   );
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
   tuneTransformerDualGemmSwiGLU(context, tunedConfig);
+  tunedConfig.vulkan.shouldUseNHWC =
+    modelInfo.transformerHeadDim > 0 &&
+    modelInfo.transformerVHeadDim > 0 &&
+    tunedConfig.vulkan.shouldUseCooperativeMatrix;
   if(logger != nullptr) {
     logger->write(
       "Vulkan tuning final selection: "
       "shouldUseFP16Storage=" + string(tunedConfig.vulkan.shouldUseFP16Storage ? "1" : "0") +
       ", shouldUseFP16Compute=" + string(tunedConfig.vulkan.shouldUseFP16Compute ? "1" : "0") +
       ", shouldUseCooperativeMatrix=" + string(tunedConfig.vulkan.shouldUseCooperativeMatrix ? "1" : "0") +
+      ", shouldUseNHWC=" + string(tunedConfig.vulkan.shouldUseNHWC ? "1" : "0") +
       ", shouldUseHgemmCooperativeMatrixNCHW=" +
         string(tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW ? "1" : "0") +
       ", shouldUseTransformerDualGemmSwiGLU=" +
@@ -7198,6 +7382,10 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
       throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
     if(logger != nullptr)
       logger->write("Loaded Vulkan tuning parameters from: " + filename);
+    loaded.vulkan.shouldUseNHWC =
+      modelInfo.transformerHeadDim > 0 &&
+      modelInfo.transformerVHeadDim > 0 &&
+      loaded.vulkan.shouldUseCooperativeMatrix;
     return loaded;
   } catch(const StringError&) {
   }
@@ -7252,8 +7440,16 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
     }
     if(logger != nullptr)
       logger->write("Loaded Vulkan tuning parameters from: " + filename);
+    loaded.vulkan.shouldUseNHWC =
+      modelInfo.transformerHeadDim > 0 &&
+      modelInfo.transformerVHeadDim > 0 &&
+      loaded.vulkan.shouldUseCooperativeMatrix;
     return loaded;
-  } catch(const StringError&) {
+  } catch(const StringError& e) {
+    if(logger != nullptr)
+      logger->write(
+        "Ignoring Vulkan tuning cache " + filename + ": " + e.what()
+      );
   }
 
   if(device == nullptr)

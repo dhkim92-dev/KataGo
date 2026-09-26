@@ -660,16 +660,28 @@ namespace vk_shader {
     printPipelineCreation = print;
     VkResult result;
     const bool useGenericNHWC =
-      useNHWCMode && tuneParams.vulkan.shouldUseCooperativeMatrix;
+      tuneParams.vulkan.canUseCooperativeMatrix && tuneParams.vulkan.shouldUseCooperativeMatrix &&
+      tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
+      tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute;
+    // HGemmCooperativeMatrixNHWCTuneParams transformerNHWCConvParams = tuneParams.hgemmCooperativeMatrixNHWC;
+    // transformerNHWCConvParams.SA = 1;
+    // transformerNHWCConvParams.SB = 1;
     const bool useConvNHWC =
       tuneParams.vulkan.canUseCooperativeMatrix &&
+      tuneParams.vulkan.shouldUseCooperativeMatrix &&
       tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
       tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute &&
-      tuneParams.vulkan.shouldUseCooperativeMatrix &&
       tuneParams.hgemmCooperativeMatrixNHWC.isValid();
-    const bool useTransformerAttentionNHWC = useNHWCMode && tuneParams.transformer.USE_COOPERATIVE_ATTN != 0;
+    const bool useTransformerAttentionNHWC =
+      qHeadDim > 0 && vHeadDim > 0 &&
+      tuneParams.vulkan.canUseCooperativeMatrix && tuneParams.vulkan.shouldUseCooperativeMatrix &&
+      tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
+      tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute;
     const bool useTransformerDualGemmSwiGLUNHWC =
-      useNHWCMode && tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU;
+      tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
+      tuneParams.vulkan.canUseCooperativeMatrix && tuneParams.vulkan.canUseFP16Storage &&
+      tuneParams.vulkan.canUseFP16Compute && tuneParams.vulkan.shouldUseFP16Storage &&
+      tuneParams.vulkan.shouldUseFP16Compute;
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
@@ -681,17 +693,18 @@ namespace vk_shader {
          )) != VK_SUCCESS)
         return result;
     }
+    const bool canBuildOtherNHWCPipelines =
+      tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute &&
+      (useTransformerAttentionNHWC || useTransformerDualGemmSwiGLUNHWC);
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
-       tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseFP16Compute &&
-       (useConvNHWC || useTransformerAttentionNHWC || useTransformerDualGemmSwiGLUNHWC)) {
+       (useConvNHWC || canBuildOtherNHWCPipelines)) {
       if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
       if(useConvNHWC || useGenericNHWC) {
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
-        if(tuneParams.vulkan.shouldUseCooperativeMatrix) {
+        if(useConvNHWC || tuneParams.vulkan.shouldUseCooperativeMatrix) {
           if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrixNHWC)) != VK_SUCCESS) return result;
         }
       }
@@ -711,8 +724,12 @@ namespace vk_shader {
     // Tile base conv no longer used.
     // createConv2dFp32();
     const bool useConvWinogradNHWC = useConvNHWC || useGenericNHWC;
-    if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
-    if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
+    if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    if(useConvWinogradNHWC) {
+      if((result = createWinogradInputTransform(winogradInputTransform3x3NHWC, tuneParams.conv3x3, 3, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+      if((result = createWinogradInputTransform(winogradInputTransform5x5NHWC, tuneParams.conv5x5, 5, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+    }
     struct PipelineActivation { Pipeline* pipeline; int activation; };
     const PipelineActivation winogradBnActPipelines[] = {
       {&winogradInputTransform3x3_bnact_identity, ACTIVATION_IDENTITY},
@@ -726,15 +743,43 @@ namespace vk_shader {
       {&winogradInputTransform5x5_bnact_mish_scale8, ACTIVATION_MISH_SCALE8},
       {&winogradInputTransform5x5_bnact_silu, ACTIVATION_SILU},
     };
+    const PipelineActivation winogradBnActPipelinesNHWC[] = {
+      {&winogradInputTransform3x3_bnact_identityNHWC, ACTIVATION_IDENTITY},
+      {&winogradInputTransform3x3_bnact_reluNHWC, ACTIVATION_RELU},
+      {&winogradInputTransform3x3_bnact_mishNHWC, ACTIVATION_MISH},
+      {&winogradInputTransform3x3_bnact_mish_scale8NHWC, ACTIVATION_MISH_SCALE8},
+      {&winogradInputTransform3x3_bnact_siluNHWC, ACTIVATION_SILU},
+      {&winogradInputTransform5x5_bnact_identityNHWC, ACTIVATION_IDENTITY},
+      {&winogradInputTransform5x5_bnact_reluNHWC, ACTIVATION_RELU},
+      {&winogradInputTransform5x5_bnact_mishNHWC, ACTIVATION_MISH},
+      {&winogradInputTransform5x5_bnact_mish_scale8NHWC, ACTIVATION_MISH_SCALE8},
+      {&winogradInputTransform5x5_bnact_siluNHWC, ACTIVATION_SILU},
+    };
     for(int i = 0; i < 10; i++) {
       const int convSize = i < 5 ? 3 : 5;
       const ConvTuneParams& convParams = convSize == 3 ? tuneParams.conv3x3 : tuneParams.conv5x5;
-      if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
+      if((result = createWinogradInputTransformBnAct(*winogradBnActPipelines[i].pipeline, convParams, convSize, winogradBnActPipelines[i].activation, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+      if(useConvWinogradNHWC && (result = createWinogradInputTransformBnAct(*winogradBnActPipelinesNHWC[i].pipeline, convParams, convSize, winogradBnActPipelinesNHWC[i].activation, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
     }
-    if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
-    if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, useConvWinogradNHWC)) != VK_SUCCESS) return result;
+    if((result = createWinogradOutputTransform(winogradOutputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    if((result = createWinogradOutputTransform(winogradOutputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
+    if(useConvWinogradNHWC) {
+      if((result = createWinogradOutputTransform(winogradOutputTransform3x3NHWC, tuneParams.conv3x3, 3, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+      if((result = createWinogradOutputTransform(winogradOutputTransform5x5NHWC, tuneParams.conv5x5, 5, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+    }
     if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if(tuneParams.vulkan.canUseCooperativeMatrix &&
+       tuneParams.vulkan.shouldUseCooperativeMatrix &&
+       tuneParams.vulkan.canUseFP16Storage &&
+       tuneParams.vulkan.canUseFP16Compute &&
+       tuneParams.vulkan.shouldUseFP16Storage &&
+       tuneParams.vulkan.shouldUseFP16Compute) {
+      if((result = createHgemmCooperativeMatrix(
+           hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix
+         )) != VK_SUCCESS)
+        return result;
+    }
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     this->useNHWC =
@@ -782,11 +827,11 @@ namespace vk_shader {
       useNHWC
     )) != VK_SUCCESS) return result;
     if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    if(useNHWC) {
+    if(useTransformerAttentionNHWC) {
       if((result = createTransformerRMSNorm(transformerRmsNormNHWC, tuneParams.rmsNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
     }
     if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
-    if(useNHWC) {
+    if(useTransformerAttentionNHWC) {
       if((result = createTransformerApplyRoPE(transformerApplyRoPENHWC, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
     }
     if((result = createTransformerSwiGLU(transformerSwiGLU, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -796,7 +841,7 @@ namespace vk_shader {
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
-      if(tuneParams.transformer.USE_COOPERATIVE_ATTN) {
+      if(useTransformerAttentionNHWC) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperativeNHWC, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
       }
       if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
@@ -815,6 +860,8 @@ namespace vk_shader {
     destroyPipeline(addPointWise);
     destroyPipeline(winogradInputTransform3x3);
     destroyPipeline(winogradInputTransform5x5);
+    destroyPipeline(winogradInputTransform3x3NHWC);
+    destroyPipeline(winogradInputTransform5x5NHWC);
     destroyPipeline(winogradInputTransform3x3_bnact_identity);
     destroyPipeline(winogradInputTransform3x3_bnact_relu);
     destroyPipeline(winogradInputTransform3x3_bnact_mish);
@@ -825,8 +872,20 @@ namespace vk_shader {
     destroyPipeline(winogradInputTransform5x5_bnact_mish);
     destroyPipeline(winogradInputTransform5x5_bnact_mish_scale8);
     destroyPipeline(winogradInputTransform5x5_bnact_silu);
+    destroyPipeline(winogradInputTransform3x3_bnact_identityNHWC);
+    destroyPipeline(winogradInputTransform3x3_bnact_reluNHWC);
+    destroyPipeline(winogradInputTransform3x3_bnact_mishNHWC);
+    destroyPipeline(winogradInputTransform3x3_bnact_mish_scale8NHWC);
+    destroyPipeline(winogradInputTransform3x3_bnact_siluNHWC);
+    destroyPipeline(winogradInputTransform5x5_bnact_identityNHWC);
+    destroyPipeline(winogradInputTransform5x5_bnact_reluNHWC);
+    destroyPipeline(winogradInputTransform5x5_bnact_mishNHWC);
+    destroyPipeline(winogradInputTransform5x5_bnact_mish_scale8NHWC);
+    destroyPipeline(winogradInputTransform5x5_bnact_siluNHWC);
     destroyPipeline(winogradOutputTransform3x3);
     destroyPipeline(winogradOutputTransform5x5);
+    destroyPipeline(winogradOutputTransform3x3NHWC);
+    destroyPipeline(winogradOutputTransform5x5NHWC);
     destroyPipeline(xgemmDirectBatchedTT);
     destroyPipeline(xgemmStridedBatchedFp32);
     destroyPipeline(xgemmBatchedFp32);
@@ -980,8 +1039,8 @@ namespace vk_shader {
 
   VkResult ComputePipelines::createWinogradInputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams, bool useNHWC) {
     WinogradInputTransformSpec spec;
-    spec.localSizeX = tuneParams.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.inputTransformLocalYSize;
+    spec.localSizeX = useNHWC ? tuneParams.inputTransformNHWCLocalXSize : tuneParams.inputTransformLocalXSize;
+    spec.localSizeY = useNHWC ? tuneParams.inputTransformNHWCLocalYSize : tuneParams.inputTransformLocalYSize;
     spec.localSizeZ = 1;
     spec.inTileYSize = static_cast<int>(tuneParams.inTileYSize);
     spec.inTileXSize = static_cast<int>(tuneParams.inTileXSize);
@@ -1161,8 +1220,8 @@ namespace vk_shader {
 
   VkResult ComputePipelines::createWinogradInputTransformBnAct(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, int activation, const VulkanParams& vulkanParams, bool useNHWC) {
     auto spec = WinogradInputTransformBnActSpec();
-    spec.localSizeX = tuneParams.inputTransformLocalXSize;
-    spec.localSizeY = tuneParams.inputTransformLocalYSize;
+    spec.localSizeX = useNHWC ? tuneParams.inputTransformNHWCLocalXSize : tuneParams.inputTransformLocalXSize;
+    spec.localSizeY = useNHWC ? tuneParams.inputTransformNHWCLocalYSize : tuneParams.inputTransformLocalYSize;
     spec.localSizeZ = 1;
     spec.inTileYSize = static_cast<int>(tuneParams.inTileYSize);
     spec.inTileXSize = static_cast<int>(tuneParams.inTileXSize);
@@ -1187,8 +1246,8 @@ namespace vk_shader {
 
   VkResult ComputePipelines::createWinogradOutputTransform(Pipeline& pipeline, const ConvTuneParams& tuneParams, int convSize, const VulkanParams& vulkanParams, bool useNHWC) {
     WinogradOutputTransformSpec spec;
-    spec.localSizeX = tuneParams.outputTransformLocalXSize;
-    spec.localSizeY = tuneParams.outputTransformLocalYSize;
+    spec.localSizeX = useNHWC ? tuneParams.outputTransformNHWCLocalXSize : tuneParams.outputTransformLocalXSize;
+    spec.localSizeY = useNHWC ? tuneParams.outputTransformNHWCLocalYSize : tuneParams.outputTransformLocalYSize;
     spec.localSizeZ = useNHWC ? 1u : tuneParams.outputTransformLocalZSize;
     spec.outTileXSize = tuneParams.outTileXSize;
     spec.outTileYSize = tuneParams.outTileYSize;

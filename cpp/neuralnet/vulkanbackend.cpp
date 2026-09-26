@@ -110,6 +110,147 @@ static void printHostBuffer(
 #endif
 }
 
+[[maybe_unused]] static void recordLayerBufferDump(
+  ComputeHandleInternal* handle,
+  VkCommandBuffer commandBuffer,
+  const std::string& name,
+  VulkanBuffer* source,
+  bool fp16
+) {
+#ifdef VK_DUMP_BUFFER
+  if(handle == nullptr || commandBuffer == VK_NULL_HANDLE || source == nullptr || source->requestedSize == 0)
+    return;
+  const size_t elementSize = fp16 ? sizeof(half_t) : sizeof(float);
+  size_t numElts = std::min<size_t>(10, static_cast<size_t>(source->requestedSize) / elementSize);
+  if(fp16)
+    numElts -= numElts % 2;
+  if(numElts == 0)
+    return;
+  const size_t copySize = numElts * elementSize;
+  VkResult res = VK_SUCCESS;
+  VulkanBuffer* snapshot = vk_helper::createDeviceBuffer(
+    handle->vulkanDevice, copySize, false, &res
+  );
+  CHECK_VK_MSG("Allocate layer dump snapshot", res);
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer,
+    source,
+    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    VK_ACCESS_MEMORY_WRITE_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT
+  );
+  vk_helper::recordBufferCopy(commandBuffer, source, snapshot, 0, 0, copySize);
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer,
+    source,
+    VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT,
+    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
+  );
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer,
+    snapshot,
+    VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT
+  );
+  handle->layerBufferDumpInfos.push_back({name, snapshot, numElts, fp16});
+#else
+  (void)handle;
+  (void)commandBuffer;
+  (void)name;
+  (void)source;
+  (void)fp16;
+#endif
+}
+
+static void dumpLayerBufferSnapshots(ComputeHandleInternal* handle) {
+#ifdef VK_DUMP_BUFFER
+  if(handle == nullptr)
+    return;
+  for(const VulkanLayerBufferDumpInfo& info : handle->layerBufferDumpInfos) {
+    std::vector<float> values(info.numElts);
+    VkResult res = VK_SUCCESS;
+    if(info.fp16) {
+      std::vector<half_t> halfValues(info.numElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice,
+        info.buffer,
+        info.numElts * sizeof(half_t),
+        halfValues.data(),
+        true,
+        &res
+      );
+      CHECK_VK_MSG("Read layer dump snapshot", res);
+      for(size_t i = 0; i < halfValues.size(); ++i)
+        values[i] = static_cast<float>(halfValues[i]);
+    } else {
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice,
+        info.buffer,
+        info.numElts * sizeof(float),
+        values.data(),
+        true,
+        &res
+      );
+      CHECK_VK_MSG("Read layer dump snapshot", res);
+    }
+    printHostBuffer(info.name, values.data(), values.size(), false);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, info.buffer);
+  }
+  handle->layerBufferDumpInfos.clear();
+#else
+  (void)handle;
+#endif
+}
+
+#ifdef VK_DUMP_BUFFER
+class LayerBufferDumpScope {
+public:
+  LayerBufferDumpScope(
+    ComputeHandleInternal* handle,
+    VkCommandBuffer commandBuffer,
+    const std::string& layerName,
+    VulkanBuffer* input,
+    VulkanBuffer* output,
+    bool inputFP16,
+    bool outputFP16
+  ):
+    handle(handle),
+    commandBuffer(commandBuffer),
+    layerName(layerName),
+    output(output),
+    outputFP16(outputFP16)
+  {
+    recordLayerBufferDump(handle, commandBuffer, layerName + " input", input, inputFP16);
+  }
+
+  ~LayerBufferDumpScope() {
+    recordLayerBufferDump(handle, commandBuffer, layerName + " output", output, outputFP16);
+  }
+
+private:
+  ComputeHandleInternal* handle;
+  VkCommandBuffer commandBuffer;
+  std::string layerName;
+  VulkanBuffer* output;
+  bool outputFP16;
+};
+#define VK_DUMP_LAYER_SCOPE(scopeName, handle, commandBuffer, layerName, input, output) \
+  LayerBufferDumpScope scopeName( \
+    handle, commandBuffer, layerName, input, output, \
+    handle->usingFP16Storage, handle->usingFP16Storage \
+  )
+#define VK_DUMP_LAYER_SCOPE_TYPED(scopeName, handle, commandBuffer, layerName, input, output, inputFP16, outputFP16) \
+  LayerBufferDumpScope scopeName(handle, commandBuffer, layerName, input, output, inputFP16, outputFP16)
+#else
+#define VK_DUMP_LAYER_SCOPE(scopeName, handle, commandBuffer, layerName, input, output)
+#define VK_DUMP_LAYER_SCOPE_TYPED(scopeName, handle, commandBuffer, layerName, input, output, inputFP16, outputFP16)
+#endif
+
 static void printDeviceBuffer(
   std::string prefix,
   const VulkanDevice* device,
@@ -240,7 +381,8 @@ struct ComputeContext {
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
     const VulkanTuner::ModelInfoForTuning* modelInfo,
-    const ModelDesc* modelDesc)
+    const ModelDesc* modelDesc,
+    bool enableDualGemmForTesting = false)
   : nnXLen(nnXLen),
     nnYLen(nnYLen),
     usingFP16Mode(useFP16Mode_),
@@ -319,6 +461,17 @@ struct ComputeContext {
               nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr
             );
           }
+          if(modelInfo == nullptr && useNHWCMode_ == enabled_t::True) {
+            tuneParams.vulkan.canUseFP16Storage = supportsFP16Storage;
+            tuneParams.vulkan.canUseFP16Compute = supportsFP16Compute;
+            tuneParams.vulkan.canUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
+            tuneParams.vulkan.shouldUseFP16Storage = supportsFP16Storage && supportsFP16Compute;
+            tuneParams.vulkan.shouldUseFP16Compute = supportsFP16Compute;
+            tuneParams.vulkan.shouldUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
+          }
+          if(enableDualGemmForTesting) {
+            tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = hardwareParams.canUseCooperativeMatrix;
+          }
 
           // Pipeline creation must use the same effective precision as the
           // buffers created by ComputeHandleInternal.  The tuning file stores
@@ -344,10 +497,7 @@ struct ComputeContext {
           if(!useFP16Storage || !useFP16Compute)
             tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
 
-          // Keep model tensors in NCHW for this ConvLayer-only NHWC experiment.
-          const bool isTransformerModel = transformerHeadDims.first > 0 && transformerHeadDims.second > 0;
-          const bool useNHWC = usingNHWCMode == enabled_t::True ||
-            (usingNHWCMode == enabled_t::Auto && isTransformerModel);
+          const bool useNHWC = usingNHWCMode == enabled_t::True;
           const bool useCooperativeMatrixMode =
             tuneParams.vulkan.shouldUseCooperativeMatrix &&
             tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -551,6 +701,7 @@ struct MatmulLayer {
     VulkanBuffer* output
   ) {
     assert(cb != VK_NULL_HANDLE);
+    VK_DUMP_LAYER_SCOPE_TYPED(layerDump, handle, cb, "MatmulLayer " + name, input, output, false, false);
     doBatchedXGEMMDirectFP32_MK_NK_MN(cb, batchSize, input, output);
     vk_helper::barrierCommandBufferForBuffer(cb, output);
     // vk_helper::barrierCommandBuffer(cb);
@@ -705,6 +856,11 @@ struct BatchNormLayer {
     int logicalSpatialSize = 0
   ) {
     assert(cb != VK_NULL_HANDLE);
+    VK_DUMP_LAYER_SCOPE(
+      layerDump, handle, cb, "BatchNormLayer " + name,
+      useNHWC && nhwcInput != nullptr ? nhwcInput : input,
+      useNHWC && nhwcOutput != nullptr ? nhwcOutput : output
+    );
     if(useNHWC) {
       forwardNHWC(
         cb, batchSize, input, mask, output, nhwcInput, nhwcOutput,
@@ -815,6 +971,7 @@ struct ConvLayer {
 
   bool usingHgemmCooperativeMatrix;
   bool usingHgemmCooperativeMatrixNCHW;
+  bool usingHgemmCooperativeMatrixNCHWWinograd;
   bool usingNHWC;
   NhwcConvPath nhwcConvPath;
   int nhwcSpatialSize;
@@ -873,6 +1030,7 @@ struct ConvLayer {
 
     usingHgemmCooperativeMatrix = false;
     usingHgemmCooperativeMatrixNCHW = false;
+    usingHgemmCooperativeMatrixNCHWWinograd = false;
     usingNHWC = false;
     nhwcConvPath = NhwcConvPath::None;
     nhwcSpatialSize = 0;
@@ -886,8 +1044,23 @@ struct ConvLayer {
 
     if ((convXSize == 1 && convYSize == 1) ||
         (convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-      const auto& hgemmParams = getNhwcConvTuneParams();
+      // Original selection inherited shouldUseNHWC; restore after ConvLayer
+      // layout testing is complete.
+      // const auto& hgemmParams = getNhwcConvTuneParams();
+      // usingHgemmCooperativeMatrix =
+      //   handle_->pipelines->useNHWC &&
+      //   handle_->usingFP16Storage &&
+      //   handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
+      //   handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
+      //   handle_->tuneParams.vulkan.canUseFP16Storage &&
+      //   handle_->tuneParams.vulkan.canUseFP16Compute &&
+      //   handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+      //   handle_->tuneParams.vulkan.shouldUseFP16Compute &&
+      //   hgemmParams.isValid();
+      // usingNHWC = usingHgemmCooperativeMatrix;
+      usingNHWC = true;
       usingHgemmCooperativeMatrix =
+        usingNHWC &&
         handle_->usingFP16Storage &&
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
@@ -895,18 +1068,43 @@ struct ConvLayer {
         handle_->tuneParams.vulkan.canUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
-        hgemmParams.isValid();
-      usingNHWC = usingHgemmCooperativeMatrix;
+        getNhwcConvTuneParams().isValid() &&
+        handle_->pipelines->hgemmCooperativeMatrixNHWC.pipeline != VK_NULL_HANDLE;
+    }
+
+    if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
+      usingHgemmCooperativeMatrixNCHWWinograd =
+        handle_->usingFP16Storage &&
+        handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
+        handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
+        handle_->tuneParams.vulkan.canUseFP16Storage &&
+        handle_->tuneParams.vulkan.canUseFP16Compute &&
+        handle_->tuneParams.vulkan.shouldUseFP16Storage &&
+        handle_->tuneParams.vulkan.shouldUseFP16Compute &&
+        handle_->tuneParams.hgemmCooperativeMatrix.isValid() &&
+        handle_->pipelines->hgemmCooperativeMatrix.pipeline != VK_NULL_HANDLE;
+    }
+
+    if(usingNHWC && !handle_->pipelines->useNHWC) {
+      VkResult descriptorResult = VK_ERROR_UNKNOWN;
+      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
+        handle_->vulkanDevice, handle_->pipelines->nchwToNhwc.descriptorSetLayout, &descriptorResult
+      );
+      CHECK_VK_MSG("Allocate ConvLayer NCHW-to-NHWC descriptor set: " + name, descriptorResult);
+      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
+        handle_->vulkanDevice, handle_->pipelines->nhwcToNchw.descriptorSetLayout, &descriptorResult
+      );
+      CHECK_VK_MSG("Allocate ConvLayer NHWC-to-NCHW descriptor set: " + name, descriptorResult);
     }
 
     if(convXSize == 1 && convYSize == 1) {
-      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrixNCHW;
+      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrix;
       usingHgemmCooperativeMatrixNCHW =
         handle_->usingFP16Storage &&
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
-        handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+        handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
         hgemmParams.isValid() &&
         inChannels % hgemmParams.KWG == 0 &&
         outChannels % hgemmParams.NWG == 0;
@@ -1063,6 +1261,10 @@ struct ConvLayer {
     return usingNHWC && !handle->pipelines->useNHWC;
   }
 
+  bool canUseHgemmCooperativeMatrixFor(int batchSize) const {
+    return usingHgemmCooperativeMatrixNCHWWinograd && batchSize > 0;
+  }
+
   void convertNCHWInputToNHWC(
     VkCommandBuffer& cb,
     int batchSize,
@@ -1070,12 +1272,6 @@ struct ConvLayer {
     VulkanBuffer* nhwcInput
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
-    if(nchwToNhwcDS == VK_NULL_HANDLE) {
-      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
-      );
-      CHECK_VK_MSG("Allocate ConvLayer NCHW-to-NHWC descriptor set: " + name, res);
-    }
     vkcompute::convertNCHWToNHWC(
       handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc,
       cb, nchwToNhwcDS, input, nhwcInput, batchSize, inChannels,
@@ -1091,12 +1287,6 @@ struct ConvLayer {
     VulkanBuffer* output
   ) {
     VkResult res = VK_ERROR_UNKNOWN;
-    if(nhwcToNchwDS == VK_NULL_HANDLE) {
-      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
-      );
-      CHECK_VK_MSG("Allocate ConvLayer NHWC-to-NCHW descriptor set: " + name, res);
-    }
     vkcompute::convertNHWCToNCHW(
       handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw,
       cb, nhwcToNchwDS, nhwcOutput, output, batchSize, outChannels,
@@ -1158,7 +1348,7 @@ struct ConvLayer {
     VulkanBuffer* destination,
     int batchSize
   ) {
-    const int outputChannelsPadded = handle->getNHWCChannelsPadded(outChannels);
+    const int outputChannelsPadded = handle->getNHWCChannelsPadded(outChannels, usingNHWC);
     const VkDeviceSize copySize = static_cast<VkDeviceSize>(batchSize) *
       static_cast<VkDeviceSize>(nhwcSpatialSize) *
       static_cast<VkDeviceSize>(outputChannelsPadded) * sizeof(half_t);
@@ -1291,39 +1481,39 @@ struct ConvLayer {
 
     const auto* pipelines = handle->pipelines;
     const Pipeline& outputPipeline = convXSize == 3
-      ? pipelines->winogradOutputTransform3x3
-      : pipelines->winogradOutputTransform5x5;
+      ? pipelines->winogradOutputTransform3x3NHWC
+      : pipelines->winogradOutputTransform5x5NHWC;
     Pipeline inputPipeline;
     if(!useBnAct) {
       inputPipeline = convXSize == 3
-        ? pipelines->winogradInputTransform3x3
-        : pipelines->winogradInputTransform5x5;
+        ? pipelines->winogradInputTransform3x3NHWC
+        : pipelines->winogradInputTransform5x5NHWC;
     } else {
       switch(activation) {
         case ACTIVATION_IDENTITY:
           inputPipeline = convXSize == 3
-            ? pipelines->winogradInputTransform3x3_bnact_identity
-            : pipelines->winogradInputTransform5x5_bnact_identity;
+            ? pipelines->winogradInputTransform3x3_bnact_identityNHWC
+            : pipelines->winogradInputTransform5x5_bnact_identityNHWC;
           break;
         case ACTIVATION_RELU:
           inputPipeline = convXSize == 3
-            ? pipelines->winogradInputTransform3x3_bnact_relu
-            : pipelines->winogradInputTransform5x5_bnact_relu;
+            ? pipelines->winogradInputTransform3x3_bnact_reluNHWC
+            : pipelines->winogradInputTransform5x5_bnact_reluNHWC;
           break;
         case ACTIVATION_MISH:
           inputPipeline = convXSize == 3
-            ? pipelines->winogradInputTransform3x3_bnact_mish
-            : pipelines->winogradInputTransform5x5_bnact_mish;
+            ? pipelines->winogradInputTransform3x3_bnact_mishNHWC
+            : pipelines->winogradInputTransform5x5_bnact_mishNHWC;
           break;
         case ACTIVATION_MISH_SCALE8:
           inputPipeline = convXSize == 3
-            ? pipelines->winogradInputTransform3x3_bnact_mish_scale8
-            : pipelines->winogradInputTransform5x5_bnact_mish_scale8;
+            ? pipelines->winogradInputTransform3x3_bnact_mish_scale8NHWC
+            : pipelines->winogradInputTransform5x5_bnact_mish_scale8NHWC;
           break;
         case ACTIVATION_SILU:
           inputPipeline = convXSize == 3
-            ? pipelines->winogradInputTransform3x3_bnact_silu
-            : pipelines->winogradInputTransform5x5_bnact_silu;
+            ? pipelines->winogradInputTransform3x3_bnact_siluNHWC
+            : pipelines->winogradInputTransform5x5_bnact_siluNHWC;
           break;
         default:
           throw StringError("Unsupported activation for fused NHWC Winograd convolution in layer " + name);
@@ -1394,6 +1584,7 @@ struct ConvLayer {
     );
     CHECK_VK_MSG("Execute NHWC Winograd GEMM for ConvLayer: " + name, res);
 
+    vkcompute::clearBufferForCompute(cb, spatialOutput);
     vkcompute::winogradOutputToSpatialDomain(
       handle, handle->vulkanDevice, &outputPipeline, cb, winogradOutputTransformDS,
       transformedOutput, spatialOutput, nnYLen, nnXLen, paddedNNXYLen,
@@ -1429,8 +1620,13 @@ struct ConvLayer {
     VkResult res = VK_ERROR_UNKNOWN;
     const auto *pipelines = this->handle->pipelines;
     Pipeline winogradInputTransformBnActMaskPipeline;
-    Pipeline xgemmBatchedPipeline = pipelines->xgemmBatchedFp32;
-    VkDescriptorSet& gemmDescriptorSet = xgemmBatchedDS;
+    const bool useHgemmCooperativeMatrix = canUseHgemmCooperativeMatrixFor(batchSize);
+    Pipeline xgemmBatchedPipeline = useHgemmCooperativeMatrix
+      ? pipelines->hgemmCooperativeMatrix
+      : pipelines->xgemmBatchedFp32;
+    VkDescriptorSet& gemmDescriptorSet = useHgemmCooperativeMatrix
+      ? hgemmCooperativeMatrixDS
+      : xgemmBatchedDS;
     Pipeline winogradOutputTransformPipeline = (convXSize == 3 && convYSize == 3) ? pipelines->winogradOutputTransform3x3 
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradOutputTransform5x5
                                          : throw StringError("Winograd convolution only supported for 3x3 and 5x5 kernels in layer " + name);
@@ -1528,10 +1724,17 @@ struct ConvLayer {
       const int M = vk_helper::roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
       const int N = vk_helper::roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
       const int K = vk_helper::roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
-      vkcompute::xgemmBatched(
-        handle, handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
-        M, N, K, convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
-      );
+      if(useHgemmCooperativeMatrix) {
+        vkcompute::doHgemmCooperativeMatrix(
+          handle, handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
+          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, M, N, K, &res
+        );
+      } else {
+        vkcompute::xgemmBatched(
+          handle, handle->vulkanDevice, handle->tuneParams, &xgemmBatchedPipeline, cb, gemmDescriptorSet,
+          M, N, K, convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
+        );
+      }
     }
 
     // Barrier before output transform
@@ -1584,8 +1787,13 @@ struct ConvLayer {
                                          : (convXSize == 5 && convYSize == 5) ? pipelines->winogradOutputTransform5x5
                                          : throw StringError("Winograd convolution only supported for 3x3 and 5x5 kernels in layer " + name);
 
-    Pipeline xgemmPipeline = pipelines->xgemmBatchedFp32;
-    VkDescriptorSet& gemmDescriptorSet = xgemmBatchedDS;
+    const bool useHgemmCooperativeMatrix = canUseHgemmCooperativeMatrixFor(batchSize);
+    Pipeline xgemmPipeline = useHgemmCooperativeMatrix
+      ? pipelines->hgemmCooperativeMatrix
+      : pipelines->xgemmBatchedFp32;
+    VkDescriptorSet& gemmDescriptorSet = useHgemmCooperativeMatrix
+      ? hgemmCooperativeMatrixDS
+      : xgemmBatchedDS;
 
     if (  winogradInputTransformDS == VK_NULL_HANDLE ) {
       winogradInputTransformDS = vk_helper::allocateDescriptorSet(
@@ -1641,11 +1849,19 @@ struct ConvLayer {
     {
       // // std::printf("[xGEMM] Before dispatch numTilesTotal=%u outChPadded=%u inChPadded=%u inTilesXYSize=%d descriptorSet=%p\n",
       //   numTilesTotal, outChannelsPadded, inChannelsPadded, this->inTilesXYSize, (void*)xgemmBatchedDS);
-      vkcompute::xgemmBatched(
-        handle, device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
-        numTilesTotal, outChannelsPadded, inChannelsPadded,
-        convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
-      );
+      if(useHgemmCooperativeMatrix) {
+        vkcompute::doHgemmCooperativeMatrix(
+          handle, device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
+          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize,
+          numTilesTotal, outChannelsPadded, inChannelsPadded, &res
+        );
+      } else {
+        vkcompute::xgemmBatched(
+          handle, device, handle->tuneParams, &xgemmPipeline, cb, gemmDescriptorSet,
+          numTilesTotal, outChannelsPadded, inChannelsPadded,
+          convWorkspace1, filterBuf, convWorkspace2, inTileXYSize, &res
+        );
+      }
     }
     vk_helper::barrierCommandBufferForBuffer(cb, convWorkspace2);
     // vk_helper::barrierCommandBuffer(cb);
@@ -1676,6 +1892,7 @@ struct ConvLayer {
     VulkanBuffer* convWorkspace1,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "ConvLayer " + name, input, output);
     assert(cb != VK_NULL_HANDLE);
     if(handle->pipelines->useNHWC && !usingNHWC)
       throw StringError("Vulkan ConvLayer " + name + " cannot fall back from the NHWC path to NCHW");
@@ -1821,6 +2038,7 @@ struct MatBiasLayer {
   }
 
   void forward(VkCommandBuffer& cb, int batchSize, VulkanBuffer* input) {
+    VK_DUMP_LAYER_SCOPE_TYPED(layerDump, handle, cb, "MatBiasLayer " + name, input, input, false, false);
     assert(cb != VK_NULL_HANDLE);
     VkResult res = VK_ERROR_UNKNOWN;
     const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
@@ -1928,6 +2146,7 @@ struct NormActConv {
     VulkanBuffer* convWorkspace = nullptr,
     VulkanBuffer* convWorkspace2 = nullptr
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "NormActConv " + conv.name, input, output);
     if (conv.isBNActFusedPossible()) {
       conv.forwardBnActConv(cb, &bn, batchSize, input, output, convWorkspace, convWorkspace2, mask);
     } else {
@@ -1963,6 +2182,7 @@ struct TransformerMatMulLayer {
   const std::string name;
   const int inChannels;
   const int outChannels;
+  const int outputRowStride;
   const int paddedNNXYLen;
   bool usingHgemmCooperativeMatrixNHWC;
   VkDescriptorSet descriptorSet;
@@ -1972,12 +2192,14 @@ struct TransformerMatMulLayer {
 
   TransformerMatMulLayer(
     ComputeHandleInternal *handle,
-    const MatMulLayerDesc* desc
+    const MatMulLayerDesc* desc,
+    int outputRowStride = 0
   ):
     handle(handle),
     name(desc->name),
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
+    outputRowStride(outputRowStride),
     paddedNNXYLen(handle->paddedNNXYLen),
     usingHgemmCooperativeMatrixNHWC(false),
     descriptorSet(VK_NULL_HANDLE),
@@ -2039,6 +2261,10 @@ struct TransformerMatMulLayer {
     VulkanBuffer* mask,
     VulkanBuffer* convWorkspace
   ) {
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      layerDump, handle, cb, "TransformerMatMulLayer " + name, input, output,
+      usingHgemmCooperativeMatrixNHWC, usingHgemmCooperativeMatrixNHWC
+    );
     VkResult res;
     if (!usingHgemmCooperativeMatrixNHWC) {
       int filterStride = 0;
@@ -2060,6 +2286,12 @@ struct TransformerMatMulLayer {
       );
     } else {
       Pipeline pipeline = handle->pipelines->hgemmCooperativeMatrixNHWC;
+      vkcompute::clearBufferForCompute(cb, output);
+      const int cRowStride = outputRowStride > 0
+        ? outputRowStride
+        : handle->getNHWCChannelsPadded(outChannels);
+      if(cRowStride < outChannels)
+        throw StringError("Vulkan TransformerMatMulLayer " + name + " output row stride is too small");
     vkcompute::doHgemmCooperativeMatrixNHWC(
       handle,
       handle->vulkanDevice,
@@ -2075,7 +2307,7 @@ struct TransformerMatMulLayer {
         outChannels,
         inChannels,
         handle->getNHWCChannelsPadded(inChannels),
-        handle->getNHWCChannelsPadded(outChannels),
+        cRowStride,
         handle->tuneParams.hgemmCooperativeMatrixNHWC,
         &res
       );
@@ -2159,6 +2391,7 @@ struct TransformerApplyRoPELayer {
     const int batchStride,
     VulkanBuffer* nhwcScratch = nullptr
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "TransformerApplyRoPELayer", input, input);
     assert(cb != VK_NULL_HANDLE);
     VkResult res = VK_ERROR_UNKNOWN;
     vkcompute::transformerApplyRoPE(
@@ -2277,15 +2510,24 @@ struct TransformerAttentionLayer {
     const int qOffset,
     const int kOffset,
     const int vOffset,
+    const int logicalQKVChannels,
     const int batchStride,
     const bool useRope,
     const bool learnableRope,
     const int ropeNumPairs
   ) {
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      layerDump, handle, cb, "TransformerAttentionLayer", packedQKV, output,
+      useCooperative, useCooperative
+    );
     if(useCooperative) {
       VkResult res = VK_SUCCESS;
       const int seqLen = handle->paddedNNXYLen;
-      const int qkvChannels = batchStride / seqLen;
+      if(batchStride % seqLen != 0)
+        throw StringError("Vulkan TransformerAttentionLayer packed QKV batch stride is not divisible by sequence length");
+      const int qkvChannelsPadded = batchStride / seqLen;
+      if(qkvChannelsPadded != handle->getNHWCChannelsPadded(logicalQKVChannels))
+        throw StringError("Vulkan TransformerAttentionLayer packed QKV row stride does not match its logical width");
       vkcompute::transformerScaleDotProductCooperative(
         handle,
         handle->vulkanDevice,
@@ -2311,9 +2553,9 @@ struct TransformerAttentionLayer {
         seqLen,
         handle->nnXLen * handle->nnYLen,
         seqLen,
-        qkvChannels,
+        logicalQKVChannels,
         numHeads * vHeadDim,
-        handle->getNHWCChannelsPadded(qkvChannels),
+        qkvChannelsPadded,
         handle->getNHWCChannelsPadded(numHeads * vHeadDim),
         numHeads * qHeadDim,
         numKVHeads * qHeadDim,
@@ -2462,6 +2704,11 @@ struct TransformerRMSNormLayer {
     VulkanBuffer* nhwcInput = nullptr,
     VulkanBuffer* nhwcOutput = nullptr
   ) {
+    VK_DUMP_LAYER_SCOPE(
+      layerDump, handle, cb, "TransformerRMSNormLayer",
+      useNHWC && nhwcInput != nullptr ? nhwcInput : input,
+      useNHWC && nhwcOutput != nullptr ? nhwcOutput : output
+    );
     VkResult res = VK_SUCCESS;
     vkcompute::transformerRMSNorm(
       handle,
@@ -2603,6 +2850,7 @@ struct RMSNormLayer {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "RMSNormLayer", input, output);
     if(!spatial) {
       Pipeline pipeline = handle->pipelines->useNHWC
         ? handle->pipelines->transformerRmsNormNHWC
@@ -2791,6 +3039,16 @@ static int getPackedQKVOutChannels(
   );
 }
 
+static int getNHWCPackedQKVGemmOutChannels(
+  const ComputeHandleInternal* handle,
+  const int logicalOutChannels
+) {
+  const auto& params = handle->tuneParams.hgemmCooperativeMatrixNHWC;
+  if(!params.isValid())
+    throw StringError("NHWC packed QKV projection requires valid cooperative HGEMM parameters");
+  return vk_helper::roundUpToMultipleInt(logicalOutChannels, params.NWG);
+}
+
 static MatMulLayerDesc makePackedQKVDesc(
   const TransformerAttentionDesc* desc,
   const int physicalOutChannels
@@ -2871,6 +3129,14 @@ static int getPackedFFNOutChannels(
   const ComputeHandleInternal* handle,
   const TransformerFFNDesc* desc
 ) {
+  if(handle->pipelines->useNHWC) {
+    const auto& params = handle->tuneParams.hgemmCooperativeMatrixNHWC;
+    if(!params.isValid())
+      throw StringError("NHWC packed FFN projection requires valid cooperative HGEMM parameters");
+    return vk_helper::roundUpToMultipleInt(
+      desc->linear1.outChannels + desc->linearGate.outChannels, params.NWG
+    );
+  }
   return getPackedQKVOutChannels(
     handle,
     desc->linear1.inChannels,
@@ -2891,7 +3157,9 @@ struct TransformerAttentionBlock {
   const int nnYLen;
   const int paddedNNXYLen;
   const int inChannels;  // = numHeads * qHeadDim (or whatever c_main is)
-  const int qkvPhysicalOutChannels;
+  const int qkvLogicalOutChannels;
+  const int qkvGemmOutChannels;
+  const int qkvRowStride;
 
   MatMulLayerDesc qkvProjDesc;
   TransformerRMSNormLayer* preLN;
@@ -2925,19 +3193,19 @@ struct TransformerAttentionBlock {
     nnYLen(nnY),
     paddedNNXYLen(handle->paddedNNXYLen),
     inChannels(desc->qProj.inChannels),
-    qkvPhysicalOutChannels(
-      getPackedQKVOutChannels(
-        handle,
-        desc->qProj.inChannels,
-        numHeads * qHeadDim + numKVHeads * qHeadDim + numKVHeads * vHeadDim
-      )
-    ),
-    qkvProjDesc(makePackedQKVDesc(desc, qkvPhysicalOutChannels)),
+    qkvLogicalOutChannels(numHeads * qHeadDim + numKVHeads * qHeadDim + numKVHeads * vHeadDim),
+    qkvGemmOutChannels(handle->pipelines->useNHWC
+      ? getNHWCPackedQKVGemmOutChannels(handle, qkvLogicalOutChannels)
+      : getPackedQKVOutChannels(handle, desc->qProj.inChannels, qkvLogicalOutChannels)),
+    qkvRowStride(handle->pipelines->useNHWC
+      ? handle->getNHWCChannelsPadded(qkvLogicalOutChannels)
+      : qkvGemmOutChannels),
+    qkvProjDesc(makePackedQKVDesc(desc, qkvGemmOutChannels)),
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
-    qkvProj(new TransformerMatMulLayer(handle, &qkvProjDesc)),
+    qkvProj(new TransformerMatMulLayer(handle, &qkvProjDesc, qkvRowStride)),
     outProj(new TransformerMatMulLayer(handle, &desc->outProj)),
-    qRoPE(new TransformerApplyRoPELayer(handle, qkvPhysicalOutChannels)),
-    kRoPE(new TransformerApplyRoPELayer(handle, qkvPhysicalOutChannels)),
+    qRoPE(new TransformerApplyRoPELayer(handle, qkvLogicalOutChannels)),
+    kRoPE(new TransformerApplyRoPELayer(handle, qkvLogicalOutChannels)),
     ropeCosTable(nullptr),
     ropeSinTable(nullptr),
     ropeNumPairs(0),
@@ -2993,13 +3261,17 @@ struct TransformerAttentionBlock {
     VulkanBuffer* maskSum,
     VulkanBuffer* convWorkspace
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "TransformerAttentionBlock " + name, trunk, trunk);
     const int seqLen = paddedNNXYLen;
     const int qTotalDim = numHeads * qHeadDim;
     const int kTotalDim = numKVHeads * qHeadDim;
     const int qOffset = 0;
     const int kOffset = qTotalDim * seqLen;
     const int vOffset = (qTotalDim + kTotalDim) * seqLen;
-    const int packedBatchStride = qkvPhysicalOutChannels * seqLen;
+    const bool useNHWC = handle->pipelines->useNHWC;
+    const int packedBatchStride = useNHWC
+      ? qkvRowStride * seqLen
+      : qkvGemmOutChannels * seqLen;
 
     // Step 1: RMSNorm
     // preLN: trunk -> trunkScratch (normalized)
@@ -3008,14 +3280,12 @@ struct TransformerAttentionBlock {
     // Step 2: Combined Q/K/V projection into [Q | K | V | padding]
     SizedBuf<VulkanBuffer*> packedQKV(
       scratch->allocator,
-      scratch->getBufSizeXY(qkvPhysicalOutChannels)
+      scratch->getBufSizeXY(qkvLogicalOutChannels)
     );
     qkvProj->forward(cb, scratch, batchSize, trunkScratch, packedQKV.buf, mask, convWorkspace);
 
     if(useRope) {
-      const bool useNHWC = handle->pipelines->useNHWC;
-      const int channelsPadded = handle->getNHWCChannelsPadded(qkvPhysicalOutChannels);
-      const int ropeBatchStride = useNHWC ? seqLen * channelsPadded : packedBatchStride;
+      const int ropeBatchStride = packedBatchStride;
       const int qRegionOffset = useNHWC ? 0 : qOffset;
       const int kRegionOffset = useNHWC ? qTotalDim : kOffset;
       qRoPE->forward(
@@ -3046,6 +3316,7 @@ struct TransformerAttentionBlock {
       qOffset,
       kOffset,
       vOffset,
+      qkvLogicalOutChannels,
       packedBatchStride,
       false,
       false,
@@ -3055,7 +3326,13 @@ struct TransformerAttentionBlock {
     // Step 4: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)
     outProj->forward(cb, scratch, batchSize, attnOut.buf, trunkScratch, mask, convWorkspace);
     // Step 5: Add residual: trunk += trunkScratch
-    vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTensorElts(handle, batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"), false);
+    const int residualSize = useNHWC
+      ? checkedTotalElts(
+          batchSize, handle->getNHWCChannelsPadded(inChannels), paddedNNXYLen,
+          "Vulkan NHWC attention residual"
+        )
+      : checkedTensorElts(handle, batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise");
+    vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, residualSize, false);
   }
 
 
@@ -3078,6 +3355,7 @@ struct TransformerFFNBlock {
   const int ffnChannels;
   const int paddedNNXYLen;
   const int packedOutChannels;
+  const int packedOutRowStride;
 
   MatMulLayerDesc packedLinearDesc;
   TransformerRMSNormLayer* preLN;
@@ -3093,7 +3371,8 @@ struct TransformerFFNBlock {
 
   TransformerFFNBlock(
     ComputeHandleInternal *handle,
-    const TransformerFFNDesc* desc
+    const TransformerFFNDesc* desc,
+    bool forceFallbackSwiGLU = false
   ) :
     handle(handle),
     name(desc->name),
@@ -3101,9 +3380,12 @@ struct TransformerFFNBlock {
     ffnChannels(desc->ffnChannels),
     paddedNNXYLen(handle->paddedNNXYLen),
     packedOutChannels(getPackedFFNOutChannels(handle, desc)),
+    packedOutRowStride(handle->pipelines->useNHWC
+      ? handle->getNHWCChannelsPadded(desc->linear1.outChannels + desc->linearGate.outChannels)
+      : packedOutChannels),
     packedLinearDesc(makePackedFFNDesc(desc, packedOutChannels)),
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
-    linear1AndGate(new TransformerMatMulLayer(handle, &packedLinearDesc)),
+    linear1AndGate(new TransformerMatMulLayer(handle, &packedLinearDesc, packedOutRowStride)),
     linear2(new TransformerMatMulLayer(handle, &desc->linear2)),
     pointwiseDS(VK_NULL_HANDLE),
     swigluDS(VK_NULL_HANDLE),
@@ -3121,6 +3403,7 @@ struct TransformerFFNBlock {
 
     const auto& dualParams = handle->tuneParams.transformerDualGemmSwiGLU;
     usingTransformerDualGemmSwiGLU =
+      !forceFallbackSwiGLU &&
       handle->usingFP16Storage &&
       handle->pipelines->useNHWC &&
       handle->tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -3166,6 +3449,7 @@ struct TransformerFFNBlock {
     VulkanBuffer* maskSum,
     VulkanBuffer* convWorkspace
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "TransformerFFNBlock " + name, trunk, trunk);
      // Step 1: RMSNorm
     preLN->forward(cb, batchSize, trunk, trunkScratch, mask);
 
@@ -3189,19 +3473,33 @@ struct TransformerFFNBlock {
       SizedBuf<VulkanBuffer*> ffnBuf(scratch->allocator, scratch->getBufSizeXY(packedOutChannels));
       linear1AndGate->forward(cb, scratch, batchSize, trunkScratch, ffnBuf.buf, mask, convWorkspace);
       const int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-      const int packedInputBatchStride = checkedTotalElts(1, packedOutChannels, paddedNNXYLen, "Vulkan packed FFN");
+      const int packedInputBatchStride = checkedTotalElts(1, packedOutRowStride, paddedNNXYLen, "Vulkan packed FFN");
       const int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
+      const bool useNHWC = handle->pipelines->useNHWC;
       vkcompute::doSwiGLU(
         handle, handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU,
         handle->tuneParams, ffnBuf.buf, ffnBuf.buf, ffnOutBuf.buf, totalSize,
-        packedInputBatchStride, outputBatchStride
+        packedInputBatchStride, outputBatchStride,
+        useNHWC ? checkedTotalElts(
+          1, handle->getNHWCChannelsPadded(ffnChannels), paddedNNXYLen,
+          "Vulkan SwiGLU physical batch"
+        ) : outputBatchStride,
+        useNHWC, ffnChannels,
+        packedOutRowStride,
+        useNHWC ? handle->getNHWCChannelsPadded(ffnChannels) : ffnChannels
       );
     }
     // Step 3: linear2 projection: ffnOutBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
     linear2->forward(cb, scratch, batchSize, ffnOutBuf.buf, trunkScratch, mask, convWorkspace);
 
     // Step 4: Add residual
-    vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, checkedTensorElts(handle, batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
+    const int residualSize = handle->pipelines->useNHWC
+      ? checkedTotalElts(
+          batchSize, handle->getNHWCChannelsPadded(numChannels), paddedNNXYLen,
+          "Vulkan NHWC FFN residual"
+        )
+      : checkedTensorElts(handle, batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise");
+    vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, residualSize, false);
   }
 
 
@@ -3295,6 +3593,7 @@ struct ResidualBlock {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "ResidualBlock", trunk, trunk);
 
     SizedBuf<VulkanBuffer*> mid(
       scratch->allocator,
@@ -3410,6 +3709,7 @@ struct GlobalPoolingResidualBlock {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "GlobalPoolingResidualBlock", trunk, trunk);
     SizedBuf<VulkanBuffer*> regularOut(scratch->allocator, scratch->getBufSizeXY(regularChannels));
     SizedBuf<VulkanBuffer*> gpoolOut(scratch->allocator, scratch->getBufSizeXY(gpoolChannels));
     SizedBuf<VulkanBuffer*> gpoolConcat(scratch->allocator, scratch->getBufSizeFloat(gpoolChannels * 3));
@@ -3506,6 +3806,7 @@ struct NestedResidualBlock {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "NestedResidualBlock", trunk, trunk);
     SizedBuf<VulkanBuffer*> mid(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
     SizedBuf<VulkanBuffer*> midScratch(scratch->allocator, scratch->getBufSizeXY(normActConv->outChannels));
     normActConv->forward(cb, batchSize, trunk, trunkScratch, mid.buf , mask, convWorkspace, convWorkspace2);
@@ -3721,6 +4022,7 @@ struct SGFMetadataEncoder {
     VulkanBuffer* input,
     VulkanBuffer* output
   ) {
+    VK_DUMP_LAYER_SCOPE_TYPED(layerDump, handle, cb, "SGFMetadataEncoder " + name, input, output, false, false);
     assert(cb != VK_NULL_HANDLE);
     SizedBuf<VulkanBuffer*> internalBuf1(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
     SizedBuf<VulkanBuffer*> internalBuf2(scratch->allocator, scratch->getBufSizeFloat(std::max(matmul1->outChannels, matmul2->outChannels)));
@@ -3853,8 +4155,9 @@ struct Trunk {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "Trunk", input, trunk);
     assert(cb != VK_NULL_HANDLE);
-    SizedBuf<VulkanBuffer*> trunkScratch( scratch->allocator, scratch->getBufSizeXY(trunkNumChannels) );
+    SizedBuf<VulkanBuffer*> trunkScratch(scratch->allocator, scratch->getBufSizeXY(trunkNumChannels));
 
     initialConv->forward(cb, batchSize, input, trunk, convWorkspace, convWorkspace2);
     initialMatmul->forward(cb, batchSize, inputGlobal, trunkScratch.buf);
@@ -3987,6 +4290,10 @@ struct PolicyHead {
     VulkanBuffer *convWorkspace,
     VulkanBuffer *convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "PolicyHead", trunk, policy);
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      policyPassDump, handle, cb, "PolicyHead policyPass", nullptr, policyPass, false, false
+    );
     assert(cb != VK_NULL_HANDLE);
     SizedBuf<VulkanBuffer*> p1Out(scratch->allocator, scratch->getBufSizeXY(p1Channels));
     SizedBuf<VulkanBuffer*> gpoolOut(scratch->allocator, scratch->getBufSizeXY(g1Channels));
@@ -4123,6 +4430,17 @@ struct ValueHead {
     VulkanBuffer* convWorkspace,
     VulkanBuffer* convWorkspace2
   ) {
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      layerDump, handle, cb, "ValueHead", trunk, value,
+      handle->usingFP16Storage, false
+    );
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      scoreValueDump, handle, cb, "ValueHead scoreValue", nullptr, scoreValue, false, false
+    );
+    VK_DUMP_LAYER_SCOPE_TYPED(
+      ownershipDump, handle, cb, "ValueHead ownership", nullptr, ownership,
+      false, handle->usingFP16Storage
+    );
     assert(cb != VK_NULL_HANDLE);
     SizedBuf<VulkanBuffer*> v1Out(scratch->allocator, scratch->getBufSizeXY(v1Channels));
     SizedBuf<VulkanBuffer*> v1Mean(scratch->allocator, scratch->getBufSizeFloat(v1Channels*3));
@@ -4406,7 +4724,8 @@ static ComputeContext* createComputeContextForTesting(
   int nnXLen,
   int nnYLen,
   bool useFP16,
-  bool useNHWC
+  bool useNHWC,
+  bool enableDualGemm = false
 ) {
   // std::cout << "[createComputeContextForTesting] create Compute Context with GPUs: ";
   return new ComputeContext(
@@ -4419,7 +4738,8 @@ static ComputeContext* createComputeContextForTesting(
     "",
     "",
     nullptr,
-    nullptr
+    nullptr,
+    enableDualGemm
   );
 }
 
@@ -4429,6 +4749,7 @@ static ComputeContext* createComputeContextForTesting(
  */
 struct Buffers {
   VulkanBuffer* input;
+  VulkanBuffer* inputNCHW;
   VulkanBuffer* inputGlobal;
   VulkanBuffer* inputMeta;
   size_t inputElts;
@@ -4472,7 +4793,8 @@ struct Buffers {
    */
   Buffers(
     ComputeHandleInternal* handle,
-    const Model& m
+    const Model& m,
+    bool inputsUseNHWC
   ) {
     size_t batchXYElts = (size_t)m.maxBatchSize * m.paddedNNXYLen;
     size_t batchElts = (size_t)m.maxBatchSize;
@@ -4482,6 +4804,8 @@ struct Buffers {
     const int inputChannels = handle->pipelines->useNHWC
       ? handle->getNHWCChannelsPadded(m.numInputChannels)
       : m.numInputChannels;
+    const bool convertInputNCHWToNHWC = handle->pipelines->useNHWC && !inputsUseNHWC;
+    const int inputUploadChannels = inputsUseNHWC ? inputChannels : m.numInputChannels;
     const int policyChannels = handle->pipelines->useNHWC
       ? handle->getNHWCChannelsPadded(m.policyHead->p2Channels)
       : m.policyHead->p2Channels;
@@ -4490,6 +4814,7 @@ struct Buffers {
       : m.valueHead->ownershipChannels;
 
     inputElts = inputChannels * batchXYElts;
+    const size_t inputUploadElts = inputUploadChannels * batchXYElts;
     inputGlobalElts = m.numInputGlobalChannels * batchElts;
     inputMetaElts = m.numInputMetaChannels * batchElts;
 
@@ -4503,7 +4828,7 @@ struct Buffers {
       return offset;
     };
     VkDeviceSize uploadBytes = 0;
-    inputUploadOffset = reserveTransferRange(uploadBytes, spatialDtypeSize * inputElts);
+    inputUploadOffset = reserveTransferRange(uploadBytes, spatialDtypeSize * inputUploadElts);
     inputGlobalUploadOffset = reserveTransferRange(uploadBytes, sizeof(float) * inputGlobalElts);
     inputMetaUploadOffset = reserveTransferRange(uploadBytes, sizeof(float) * inputMetaElts);
     uploadBuffer = vk_helper::createStagingBuffer(handle->vulkanDevice, static_cast<size_t>(uploadBytes), &res);
@@ -4511,6 +4836,17 @@ struct Buffers {
 
     input = vk_helper::createDeviceBuffer(handle->vulkanDevice, spatialDtypeSize * inputElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input buffer", res);
+    inputNCHW = nullptr;
+    if(convertInputNCHWToNHWC) {
+      inputNCHW = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, spatialDtypeSize * inputUploadElts, false, &res
+      );
+      CHECK_VK_MSG("[Buffers::Buffers] Create NCHW input buffer", res);
+      nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[Buffers::Buffers] Allocate NCHW-to-NHWC input descriptor set", res);
+    }
     inputGlobal = vk_helper::createDeviceBuffer(handle->vulkanDevice, sizeof(float) * inputGlobalElts, false, &res);
     CHECK_VK_MSG("[Buffers::Buffers] Create input global buffer", res);
     if(m.numInputMetaChannels > 0) {
@@ -4581,6 +4917,8 @@ struct Buffers {
   ~Buffers() {
     vk_helper::releaseVulkanBuffer(uploadBuffer->device, uploadBuffer);
     vk_helper::releaseVulkanBuffer(input->device, input);
+    if(inputNCHW != nullptr)
+      vk_helper::releaseVulkanBuffer(inputNCHW->device, inputNCHW);
     vk_helper::releaseVulkanBuffer(inputGlobal->device, inputGlobal);
     if(inputMeta != nullptr)
     vk_helper::releaseVulkanBuffer(inputMeta->device, inputMeta);
@@ -4596,7 +4934,15 @@ struct Buffers {
     if(convWorkspace != nullptr)
       vk_helper::releaseVulkanBuffer(convWorkspace->device, convWorkspace);
     if(convWorkspace2 != nullptr)
-      vk_helper::releaseVulkanBuffer(convWorkspace2->device, convWorkspace2);
+    vk_helper::releaseVulkanBuffer(convWorkspace2->device, convWorkspace2);
+  }
+
+private:
+  VkDescriptorSet nchwToNhwcDescriptorSet = VK_NULL_HANDLE;
+
+public:
+  VkDescriptorSet getNchwToNhwcDescriptorSet() const {
+    return nchwToNhwcDescriptorSet;
   }
 };
 
@@ -4646,7 +4992,8 @@ struct ComputeHandle {
     )),
     buffers( std::make_unique<Buffers>(
       handle.get(),
-      *model
+      *model,
+      inputsUseNHWC_
     ))
   {
     if(inputsUseNHWC_ && !inputUsingNHWC)
@@ -5060,53 +5407,6 @@ void NeuralNet::freeInputBuffers(InputBuffers* inputBuffers) {
   delete inputBuffers;
 }
 
-static void copyNCHWInputToNHWCWithSymmetry(
-  const float* src,
-  float* dst,
-  int hSize,
-  int wSize,
-  int cSize,
-  int symmetry
-) {
-  const int spatialSize = hSize * wSize;
-  bool transpose = (symmetry & 0x4) != 0 && hSize == wSize;
-  bool flipX = (symmetry & 0x2) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
-  if(transpose)
-    std::swap(flipX, flipY);
-
-  const int hStride = wSize;
-  const int wStride = 1;
-  int hBaseNew = 0;
-  int hStrideNew = hStride;
-  int wBaseNew = 0;
-  int wStrideNew = wStride;
-
-  if(flipY) {
-    hBaseNew = (hSize - 1) * hStrideNew;
-    hStrideNew = -hStrideNew;
-  }
-  if(flipX) {
-    wBaseNew = (wSize - 1) * wStrideNew;
-    wStrideNew = -wStrideNew;
-  }
-  if(transpose)
-    std::swap(hStrideNew, wStrideNew);
-
-  for(int c = 0; c < cSize; c++) {
-    const int sourceChannelBase = c * spatialSize;
-    for(int h = 0; h < hSize; h++) {
-      const int sourceRowBase = sourceChannelBase + h * hStride;
-      const int destinationRowBase = hBaseNew + h * hStrideNew;
-      for(int w = 0; w < wSize; w++) {
-        const int sourceIndex = sourceRowBase + w * wStride;
-        const int destinationXY = destinationRowBase + wBaseNew + w * wStrideNew;
-        dst[destinationXY * cSize + c] = src[sourceIndex];
-      }
-    }
-  }
-}
-
 void NeuralNet::getOutput(
   ComputeHandle *computeHandle,
   InputBuffers* inputBuffers,
@@ -5133,7 +5433,7 @@ void NeuralNet::getOutput(
   const int numPolicyChannels = computeHandle->model->numPolicyChannels;
   ComputeHandleInternal* handle = computeHandle->handle.get();
 
-  const int inputChannelStride = computeHandle->inputUsingNHWC
+  const int inputChannelStride = computeHandle->inputsUseNHWC
     ? handle->getNHWCChannelsPadded(numSpatialFeatures)
     : numSpatialFeatures;
   const int policyChannelStride = computeHandle->inputUsingNHWC
@@ -5142,7 +5442,7 @@ void NeuralNet::getOutput(
   const int ownershipChannelStride = computeHandle->inputUsingNHWC
     ? handle->getNHWCChannelsPadded(computeHandle->model->numOwnershipChannels)
     : computeHandle->model->numOwnershipChannels;
-  const int inputSpatialStride = computeHandle->inputUsingNHWC
+  const int inputSpatialStride = computeHandle->inputsUseNHWC
     ? paddedNNXYLen
     : nnXYLen;
   inputBuffers->ensureStorageCapacity(
@@ -5152,7 +5452,7 @@ void NeuralNet::getOutput(
   const size_t inputRowElts = static_cast<size_t>(inputChannelStride) * inputSpatialStride;
   const size_t tightInputRowElts = static_cast<size_t>(numSpatialFeatures) * nnXLen * nnYLen;
   std::vector<float> tightSpatialInput;
-  if(computeHandle->inputUsingNHWC)
+  if(computeHandle->inputsUseNHWC)
     tightSpatialInput.resize(tightInputRowElts);
 
   for (int nIdx = 0 ; nIdx < batchSize ; ++nIdx) {
@@ -5173,20 +5473,13 @@ void NeuralNet::getOutput(
     } else {
       testAssert(!hasRowMeta);
     }
-    if(computeHandle->inputUsingNHWC)
+    if(computeHandle->inputsUseNHWC)
       std::fill(rowSpatialInput, rowSpatialInput + inputRowElts, 0.0f);
-    if(computeHandle->inputUsingNHWC) {
-      if(computeHandle->inputsUseNHWC) {
-        SymmetryHelpers::copyInputsWithSymmetry(
-          rowSpatial, tightSpatialInput.data(), 1, nnYLen, nnXLen, numSpatialFeatures,
-          true, inputBufs[nIdx]->symmetry
-        );
-      } else {
-        copyNCHWInputToNHWCWithSymmetry(
-          rowSpatial, tightSpatialInput.data(), nnYLen, nnXLen, numSpatialFeatures,
-          inputBufs[nIdx]->symmetry
-        );
-      }
+    if(computeHandle->inputsUseNHWC) {
+      SymmetryHelpers::copyInputsWithSymmetry(
+        rowSpatial, tightSpatialInput.data(), 1, nnYLen, nnXLen, numSpatialFeatures,
+        true, inputBufs[nIdx]->symmetry
+      );
       for(int xy = 0; xy < nnXYLen; xy++) {
         std::copy(
           tightSpatialInput.data() + static_cast<size_t>(xy) * numSpatialFeatures,
@@ -5231,7 +5524,7 @@ void NeuralNet::getOutput(
     size_t paddedInputElts = static_cast<size_t>(inputChannelStride) * paddedNNXYLen * batchSize;
     size_t totalChannels = static_cast<size_t>(numSpatialFeatures * batchSize);
     // Convert float to half with spatial and channel padding.
-    if(computeHandle->inputUsingNHWC) {
+    if(computeHandle->inputsUseNHWC) {
       for(int n = 0; n < batchSize; n++) {
         for(int xy = 0; xy < paddedNNXYLen; xy++) {
           for(int c = 0; c < inputChannelStride; c++) {
@@ -5260,7 +5553,7 @@ void NeuralNet::getOutput(
 
     spatialInputData = inputBuffers->userInputBufferHalf;
     spatialInputBytes = static_cast<VkDeviceSize>(paddedInputElts * sizeof(half_t));
-  } else if(computeHandle->inputUsingNHWC) {
+  } else if(handle->pipelines->useNHWC) {
     throw StringError("Vulkan NHWC input requires FP16 storage");
   } else {
     if ( paddedNNXYLen != nnXYLen ) {
@@ -5349,8 +5642,9 @@ void NeuralNet::getOutput(
     if(handle->benchmarkEnabled)
       vkCmdResetQueryPool(evaluationCB, handle->queryPool, 0, 4096);
   #endif
+    VulkanBuffer* uploadedInput = buffers->inputNCHW != nullptr ? buffers->inputNCHW : buffers->input;
     vk_helper::recordBufferCopy(
-      evaluationCB, buffers->uploadBuffer, buffers->input,
+      evaluationCB, buffers->uploadBuffer, uploadedInput,
       buffers->inputUploadOffset, 0, spatialInputBytes
     );
     vk_helper::recordBufferCopy(
@@ -5363,7 +5657,7 @@ void NeuralNet::getOutput(
         buffers->inputMetaUploadOffset, 0, inputMetaBytes
       );
     }
-    for(VulkanBuffer* inputBuffer: {buffers->input, buffers->inputGlobal, buffers->inputMeta}) {
+    for(VulkanBuffer* inputBuffer: {uploadedInput, buffers->inputGlobal, buffers->inputMeta}) {
       if(inputBuffer != nullptr) {
         vk_helper::barrierCommandBufferForBuffer(
           evaluationCB, inputBuffer,
@@ -5371,6 +5665,15 @@ void NeuralNet::getOutput(
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
         );
       }
+    }
+
+    if(buffers->inputNCHW != nullptr) {
+      vkcompute::convertNCHWToNHWC(
+        handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, evaluationCB,
+        buffers->getNchwToNhwcDescriptorSet(), buffers->inputNCHW, buffers->input,
+        batchSize, numSpatialFeatures, paddedNNXYLen, paddedNNXYLen, nnXYLen, &res
+      );
+      CHECK_VK_MSG("Convert model input from NCHW to NHWC", res);
     }
 
     computeHandle->model->forward(
@@ -5652,6 +5955,7 @@ void NeuralNet::getOutput(
       #endif
     }
 
+    dumpLayerBufferSnapshots(handle);
     vkResetCommandPool(handle->device, handle->vulkanDevice->commandPool, 0);
 
   #ifdef VK_BENCHMARK
@@ -5823,7 +6127,8 @@ bool NeuralNet::testEvaluateConv(
             << std::endl;
   // print default input state;
   std::cout << "[testEvaluateConv] inputBuffer size: " << inputBuffer.size() << std::endl;
-  printFloatBuffer("testEvaluateConv Input", inputBuffer.data(), inputBuffer.size(), batchSize, desc->inChannels, nnYLen, nnXLen);
+  if(!useNHWC)
+    printFloatBuffer("testEvaluateConv Input", inputBuffer.data(), inputBuffer.size(), batchSize, desc->inChannels, nnYLen, nnXLen);
   std::cout << "[testEvaluateConv] filter size: " << desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize << std::endl;
   printFloatBuffer("testEvaluateConv Filter", desc->weights.data(), desc->inChannels * desc->outChannels * desc->convYSize * desc->convXSize, batchSize, desc->outChannels, desc->convYSize, desc->convXSize);
 
@@ -5852,22 +6157,25 @@ bool NeuralNet::testEvaluateConv(
   outputBuffer.resize(numOutputFloats);
   // std::cout << "  expected output size " <<  numOutputFloats << std::endl;
   const size_t paddedSpatialSize = static_cast<size_t>(handle->paddedNNXYLen);
+  const int inputChannelsPadded = handle->getNHWCChannelsPadded(desc->inChannels, useNHWC);
+  const int outputChannelsPadded = handle->getNHWCChannelsPadded(desc->outChannels, useNHWC);
   std::vector<half_t> inputHalf;
   const void* inputData = inputBuffer.data();
   size_t inputBytes = byteSizeofVectorContents(inputBuffer);
   if(useNHWC) {
     inputHalf.assign(
-      static_cast<size_t>(batchSize) * desc->inChannels * paddedSpatialSize,
+      static_cast<size_t>(batchSize) * paddedSpatialSize * inputChannelsPadded,
       half_float::half_cast<half_t>(0.0f)
     );
     for(int n = 0; n < batchSize; ++n) {
-      for(int c = 0; c < desc->inChannels; ++c) {
-        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-          inputHalf[(static_cast<size_t>(n) * desc->inChannels + c) * paddedSpatialSize + xy] =
+      for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+        for(int c = 0; c < desc->inChannels; ++c) {
+          inputHalf[(static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelsPadded + c] =
             half_float::half_cast<half_t>(inputBuffer[(static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->inChannels + c]);
         }
       }
     }
+
     inputData = inputHalf.data();
     inputBytes = byteSizeofVectorContents(inputHalf);
   }
@@ -5900,7 +6208,7 @@ bool NeuralNet::testEvaluateConv(
   );
 
   const size_t outputStorageElts = useNHWC
-    ? static_cast<size_t>(batchSize) * desc->outChannels * paddedSpatialSize
+    ? static_cast<size_t>(batchSize) * paddedSpatialSize * outputChannelsPadded
     : numOutputFloats;
   VulkanBuffer* dOutput = vk_helper::createDeviceBuffer(
     device,
@@ -5924,10 +6232,10 @@ bool NeuralNet::testEvaluateConv(
     );
     CHECK_VK_MSG("[TestConv] Failed to copy device output buffer to host", res);
     for(int n = 0; n < batchSize; ++n) {
-      for(int c = 0; c < desc->outChannels; ++c) {
-        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+      for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+        for(int c = 0; c < desc->outChannels; ++c) {
           outputBuffer[(static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->outChannels + c] =
-            static_cast<float>(outputHalf[(static_cast<size_t>(n) * desc->outChannels + c) * paddedSpatialSize + xy]);
+            static_cast<float>(outputHalf[(static_cast<size_t>(n) * paddedSpatialSize + xy) * outputChannelsPadded + c]);
         }
       }
     }
@@ -5953,6 +6261,231 @@ bool NeuralNet::testEvaluateConv(
   return true;
 }
 
+bool NeuralNet::testEvaluateTransformerFFN(
+  const TransformerFFNDesc* desc,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  bool useFP16,
+  bool useNHWC,
+  const std::vector<float>& inputNCHW,
+  std::vector<float>& outputNCHW,
+  bool forceFallbackSwiGLU,
+  bool* usedDualGemm
+) {
+  if(usedDualGemm != nullptr)
+    *usedDualGemm = false;
+  if(desc == nullptr || !desc->useSwiGLU || batchSize <= 0 || nnXLen <= 0 || nnYLen <= 0 || (useNHWC && !useFP16))
+    return false;
+
+  const size_t logicalSpatialSize = static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
+  const size_t expectedInputSize = static_cast<size_t>(batchSize) *
+    static_cast<size_t>(desc->numChannels) * logicalSpatialSize;
+  if(inputNCHW.size() != expectedInputSize)
+    throw StringError("[testEvaluateTransformerFFN] unexpected NCHW input size");
+
+  ComputeContext* ctx = createComputeContextForTesting(
+    {0}, nullptr, nnXLen, nnYLen, useFP16, useNHWC,
+    useNHWC && !forceFallbackSwiGLU && usedDualGemm != nullptr
+  );
+  ComputeHandleInternal* handle = new ComputeHandleInternal(ctx, 0, useNHWC, useNHWC);
+  if(useNHWC && !handle->pipelines->useNHWC) {
+    delete handle;
+    freeComputeContext(ctx);
+    return false;
+  }
+  if(useNHWC && !handle->usingFP16Storage) {
+    delete handle;
+    freeComputeContext(ctx);
+    return false;
+  }
+
+  if(useNHWC) {
+    const auto& params = handle->tuneParams.hgemmCooperativeMatrixNHWC;
+    if(!params.isValid()) {
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
+    const int packedOperationChannels = vk_helper::roundUpToMultipleInt(
+      2 * desc->ffnChannels, params.NWG
+    );
+    const int packedRowStride = handle->getNHWCChannelsPadded(2 * desc->ffnChannels);
+    const bool supportsProjection = handle->paddedNNXYLen % params.MWG == 0 &&
+      desc->numChannels % params.KWG == 0 &&
+      desc->ffnChannels % params.KWG == 0 &&
+      desc->numChannels % 4 == 0 && desc->ffnChannels % 4 == 0 &&
+      desc->numChannels % params.NWG == 0 &&
+      packedOperationChannels % params.NWG == 0 &&
+      packedRowStride >= packedOperationChannels;
+    if(!supportsProjection) {
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
+  }
+  TransformerFFNBlock* layer = nullptr;
+  try {
+    layer = new TransformerFFNBlock(handle, desc, forceFallbackSwiGLU);
+  }
+  catch(...) {
+    delete handle;
+    freeComputeContext(ctx);
+    throw;
+  }
+  if(usedDualGemm != nullptr)
+    *usedDualGemm = layer->usingTransformerDualGemmSwiGLU;
+
+  const VulkanDevice* device = handle->vulkanDevice;
+  const int paddedSpatialSize = handle->paddedNNXYLen;
+  const int inputChannelsPadded = handle->getNHWCChannelsPadded(desc->numChannels);
+  const size_t nchwStorageElts = static_cast<size_t>(batchSize) * desc->numChannels * paddedSpatialSize;
+  const size_t nhwcStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize * inputChannelsPadded;
+  std::vector<float> paddedInputFP32;
+  std::vector<half_t> paddedInputFP16;
+  std::vector<float> maskFP32;
+  std::vector<half_t> maskFP16;
+  const bool storageFP16 = handle->usingFP16Storage;
+  if(storageFP16) {
+    paddedInputFP16.assign(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+    maskFP16.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
+  }
+  else {
+    paddedInputFP32.assign(nchwStorageElts, 0.0f);
+    maskFP32.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, 0.0f);
+  }
+  for(int n = 0; n < batchSize; ++n) {
+    for(int c = 0; c < desc->numChannels; ++c) {
+      for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+        const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+        const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+        if(storageFP16)
+          paddedInputFP16[dst] = half_float::half_cast<half_t>(inputNCHW[src]);
+        else
+          paddedInputFP32[dst] = inputNCHW[src];
+      }
+    }
+    for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+      const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
+      if(storageFP16)
+        maskFP16[idx] = half_float::half_cast<half_t>(1.0f);
+      else
+        maskFP32[idx] = 1.0f;
+    }
+  }
+
+  VkResult res = VK_ERROR_UNKNOWN;
+  VulkanBuffer* dInput = vk_helper::createDeviceBufferWithData(
+    device,
+    storageFP16 ? byteSizeofVectorContents(paddedInputFP16) : byteSizeofVectorContents(paddedInputFP32),
+    storageFP16 ? static_cast<const void*>(paddedInputFP16.data()) : static_cast<const void*>(paddedInputFP32.data()),
+    true, &res
+  );
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded NCHW input", res);
+  VulkanBuffer* dTrunk = dInput;
+  if(useNHWC) {
+    dTrunk = vk_helper::createDeviceBuffer(device, nhwcStorageElts * sizeof(half_t), false, &res);
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] create NHWC trunk", res);
+  }
+  VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
+    device,
+    storageFP16 ? byteSizeofVectorContents(maskFP16) : byteSizeofVectorContents(maskFP32),
+    storageFP16 ? static_cast<const void*>(maskFP16.data()) : static_cast<const void*>(maskFP32.data()),
+    true, &res
+  );
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded mask", res);
+  ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
+  VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
+    device, scratch->getBufSizeXY(desc->numChannels), false, &res
+  );
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] create trunk scratch", res);
+
+  VkDescriptorSet nchwToNhwcDS = VK_NULL_HANDLE;
+  VkDescriptorSet nhwcToNchwDS = VK_NULL_HANDLE;
+  if(useNHWC) {
+    nchwToNhwcDS = vk_helper::allocateDescriptorSet(device, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] allocate NCHW-to-NHWC set", res);
+    nhwcToNchwDS = vk_helper::allocateDescriptorSet(device, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res);
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] allocate NHWC-to-NCHW set", res);
+  }
+  VulkanBuffer* dOutputNCHW = nullptr;
+  if(useNHWC) {
+    dOutputNCHW = vk_helper::createDeviceBuffer(device, nchwStorageElts * sizeof(half_t), false, &res);
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] create NCHW output", res);
+  }
+
+  VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(device);
+  res = vk_helper::beginCommandBuffer(commandBuffer);
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] begin command buffer", res);
+  if(useNHWC) {
+    vkcompute::convertNCHWToNHWC(
+      handle, device, &handle->pipelines->nchwToNhwc, commandBuffer, nchwToNhwcDS,
+      dInput, dTrunk, batchSize, desc->numChannels, paddedSpatialSize,
+      paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+    );
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] convert NCHW input to NHWC", res);
+  }
+  layer->forward(commandBuffer, scratch, batchSize, dTrunk, dTrunkScratch, dMask, nullptr, nullptr);
+  if(useNHWC) {
+    vkcompute::convertNHWCToNCHW(
+      handle, device, &handle->pipelines->nhwcToNchw, commandBuffer, nhwcToNchwDS,
+      dTrunk, dOutputNCHW, batchSize, desc->numChannels, paddedSpatialSize,
+      paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+    );
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] convert NHWC output to NCHW", res);
+  }
+  res = vk_helper::endCommandBuffer(commandBuffer);
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] end command buffer", res);
+  vk_helper::submitCommandBuffers(device, {commandBuffer}, nullptr);
+  vkQueueWaitIdle(device->queue);
+  vkDeviceWaitIdle(device->device);
+
+  outputNCHW.resize(expectedInputSize);
+  if(storageFP16) {
+    std::vector<half_t> outputPadded(nchwStorageElts);
+    vk_helper::copyDeviceBufferToHost(
+      device, useNHWC ? dOutputNCHW : dTrunk,
+      static_cast<VkDeviceSize>(nchwStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
+    );
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
+    for(int n = 0; n < batchSize; ++n)
+      for(int c = 0; c < desc->numChannels; ++c)
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+          const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+          outputNCHW[dst] = static_cast<float>(outputPadded[src]);
+        }
+  }
+  else {
+    std::vector<float> outputPadded(nchwStorageElts);
+    vk_helper::copyDeviceBufferToHost(
+      device, useNHWC ? dOutputNCHW : dTrunk,
+      static_cast<VkDeviceSize>(nchwStorageElts * sizeof(float)), outputPadded.data(), true, &res
+    );
+    CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
+    for(int n = 0; n < batchSize; ++n)
+      for(int c = 0; c < desc->numChannels; ++c)
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+          const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+          outputNCHW[dst] = outputPadded[src];
+        }
+  }
+
+  vk_helper::releaseVulkanBuffer(device, dInput);
+  if(useNHWC) {
+    vk_helper::releaseVulkanBuffer(device, dTrunk);
+    vk_helper::releaseVulkanBuffer(device, dOutputNCHW);
+  }
+  vk_helper::releaseVulkanBuffer(device, dMask);
+  vk_helper::releaseVulkanBuffer(device, dTrunkScratch);
+  delete scratch;
+  delete layer;
+  delete handle;
+  freeComputeContext(ctx);
+  return true;
+}
+
 bool NeuralNet::testEvaluateBatchNorm(
     const BatchNormLayerDesc* desc,
     int batchSize,
@@ -5964,73 +6497,184 @@ bool NeuralNet::testEvaluateBatchNorm(
     const std::vector<float>& maskBuffer,
     std::vector<float>& outputBuffer
   ) {
-    if ( useNHWC ) {
-      // TODO: NHWC not supported yet
+    if(useNHWC != useFP16)
       return false;
-    }
-
-    if( useFP16 ) {
-      // TODO: FP16 not supported yet
-      return false;
-    }
 
     Logger* logger = nullptr;
     auto ctx = createComputeContextForTesting({0}, nullptr, nnXLen, nnYLen, useFP16, useNHWC);
-    useNHWC = false; // TODO: enable NHWC testing later.
     auto handle = new ComputeHandleInternal(ctx,0, useNHWC, useNHWC);
-    // BatchNormLayer *layer = new BatchNormLayer(handle, desc, nnXLen
     ActivationLayerDesc actDesc;
     actDesc.activation = ACTIVATION_IDENTITY;
-    BatchNormLayer *layer = new BatchNormLayer(handle, desc, &actDesc, false);
-    size_t numInputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->numChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
-    size_t numOutputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->numChannels) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
-    size_t numMaskFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
+    BatchNormLayer *layer = new BatchNormLayer(handle, desc, &actDesc, useFP16);
+    const size_t logicalSpatialSize = static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
+    const size_t numInputFloats = static_cast<size_t>(batchSize) * static_cast<size_t>(desc->numChannels) * logicalSpatialSize;
+    const size_t numMaskFloats = static_cast<size_t>(batchSize) * logicalSpatialSize;
     VkResult res = VK_ERROR_UNKNOWN;
-    if ( numInputFloats != inputBuffer.size() ) {
+    if(numInputFloats != inputBuffer.size()) {
+      delete layer;
+      delete handle;
+      freeComputeContext(ctx);
       throw StringError("[testEvaluateBatchNorm] unexpected input size");
+    }
+    if(numMaskFloats != maskBuffer.size()) {
+      delete layer;
+      delete handle;
+      freeComputeContext(ctx);
+      throw StringError("[testEvaluateBatchNorm] unexpected mask size");
+    }
+    if(useNHWC && (!handle->pipelines->useNHWC || !handle->usingFP16Storage)) {
       delete layer;
       delete handle;
       freeComputeContext(ctx);
       return false;
     }
-    outputBuffer.resize(numOutputFloats);
-    std::vector<float> inputTmp = inputBuffer;
-    std::vector<float> maskTmp = maskBuffer;
-    VulkanBuffer* dInput = vk_helper::createDeviceBufferWithData(
-      handle->vulkanDevice,
-      byteSizeofVectorContents(inputTmp),
-      inputTmp.data(),
-      true,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device input buffer with data", res);
-    VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
-      handle->vulkanDevice,
-      byteSizeofVectorContents(maskTmp),
-      maskTmp.data(),
-      true,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device mask buffer", res);
-    VulkanBuffer* dOutput = vk_helper::createDeviceBuffer(
-      handle->vulkanDevice,
-      byteSizeofVectorContents(outputBuffer),
-      false,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device output buffer", res);
+
+    const int paddedSpatialSize = handle->paddedNNXYLen;
+    const int channelsPadded = handle->getNHWCChannelsPadded(desc->numChannels);
+    const size_t nchwStorageElts = static_cast<size_t>(batchSize) * desc->numChannels * paddedSpatialSize;
+    const size_t nhwcStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize * channelsPadded;
+    VulkanBuffer* dInput = nullptr;
+    VulkanBuffer* dNHWCInput = nullptr;
+    VulkanBuffer* dMask = nullptr;
+    VulkanBuffer* dNHWCOutput = nullptr;
+    VulkanBuffer* dOutput = nullptr;
+    VkDescriptorSet nchwToNhwcDS = VK_NULL_HANDLE;
+    VkDescriptorSet nhwcToNchwDS = VK_NULL_HANDLE;
+
+    if(useNHWC) {
+      std::vector<half_t> inputPadded(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+      std::vector<half_t> maskPadded(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < desc->numChannels; ++c) {
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            inputPadded[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
+          }
+        }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
+          maskPadded[idx] = half_float::half_cast<half_t>(maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy]);
+        }
+      }
+      dInput = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NCHW input buffer", res);
+      dNHWCInput = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create NHWC input buffer", res);
+      dMask = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded mask buffer", res);
+      dNHWCOutput = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create NHWC output buffer", res);
+      dOutput = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nchwStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NCHW output buffer", res);
+      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to allocate NCHW-to-NHWC descriptor set", res);
+      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to allocate NHWC-to-NCHW descriptor set", res);
+    }
+    else {
+      std::vector<float> inputPadded(nchwStorageElts, 0.0f);
+      std::vector<float> maskPadded(static_cast<size_t>(batchSize) * paddedSpatialSize, 0.0f);
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < desc->numChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            inputPadded[dst] = inputBuffer[src];
+          }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy)
+          maskPadded[static_cast<size_t>(n) * paddedSpatialSize + xy] = maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy];
+      }
+      dInput = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device input buffer with data", res);
+      dMask = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device mask buffer", res);
+      dOutput = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nchwStorageElts * sizeof(float), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device output buffer", res);
+    }
 
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to begin command buffer", res);
-    layer->forward(commandBuffer, batchSize, dInput, dMask, dOutput);
+    if(useNHWC) {
+      vkcompute::convertNCHWToNHWC(
+        handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, commandBuffer, nchwToNhwcDS,
+        dInput, dNHWCInput, batchSize, desc->numChannels, paddedSpatialSize,
+        paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to convert NCHW input to NHWC", res);
+      layer->forward(
+        commandBuffer, batchSize, dNHWCInput, dMask, dNHWCOutput,
+        dNHWCInput, dNHWCOutput, paddedSpatialSize, static_cast<int>(logicalSpatialSize)
+      );
+      vkcompute::convertNHWCToNCHW(
+        handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, commandBuffer, nhwcToNchwDS,
+        dNHWCOutput, dOutput, batchSize, desc->numChannels, paddedSpatialSize,
+        paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to convert NHWC output to NCHW", res);
+    }
+    else
+      layer->forward(commandBuffer, batchSize, dInput, dMask, dOutput);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to end command buffer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, nullptr);
-    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * outputBuffer.size()), outputBuffer.data(), true, &res);
-    CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy device output buffer to host", res);
+
+    outputBuffer.resize(numInputFloats);
+    if(useNHWC) {
+      std::vector<half_t> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nchwStorageElts), outputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NCHW output", res);
+      for(int n = 0; n < batchSize; ++n)
+        for(int c = 0; c < desc->numChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = static_cast<float>(outputPadded[src]);
+          }
+    }
+    else {
+      std::vector<float> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NCHW output", res);
+      for(int n = 0; n < batchSize; ++n)
+        for(int c = 0; c < desc->numChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = outputPadded[src];
+          }
+    }
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dInput);
+    if(dNHWCInput != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNHWCInput);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
+    if(dNHWCOutput != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNHWCOutput);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dOutput);
     dInput = nullptr;
     dMask = nullptr;
@@ -6058,23 +6702,37 @@ bool NeuralNet::testEvaluateBatchNorm(
     // std::cout << "[testEvaluateResidualBlock] Starting testEvaluateResidualBlock test case... " << std::endl;
     // return false;
 
-    if ( useNHWC ) {
-      // TODO: NHWC not supported yet
+    if(useNHWC != useFP16)
+      return false;
+
+    ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, useFP16, useNHWC);
+    if(useNHWC && !ctx->pipelinesPerDev.at(static_cast<uint32_t>(gpuId))->useNHWC) {
+      freeComputeContext(ctx);
       return false;
     }
-
-    if ( useFP16 ) {
-      // TODO: FP16 not supported yet
-      return false;
-    }
-
-    useNHWC = false; // TODO: enable NHWC testing later.
-    ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, false, false);
     ComputeHandleInternal* handle = new ComputeHandleInternal(ctx,static_cast<int>(gpuId), useNHWC, useNHWC);
-    ResidualBlock *layer = new ResidualBlock(handle, desc, nnXLen, nnYLen, false);
+    if(useNHWC && !handle->usingFP16Storage) {
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
+    if(useNHWC && !handle->tuneParams.hgemmCooperativeMatrixNHWC.isValid()) {
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
+    ResidualBlock *layer = new ResidualBlock(handle, desc, nnXLen, nnYLen, useFP16);
+    if(useNHWC && (!layer->normActConv->conv.usingNHWC || !layer->normActConv2->conv.usingNHWC)) {
+      delete layer;
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
 
-    size_t numTrunkFloats =  static_cast<size_t>(batchSize * nnXLen * nnYLen * desc->preBN.numChannels);
-    size_t numMaskFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen);
+    const size_t logicalSpatialSize = static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
+    const size_t paddedSpatialSize = static_cast<size_t>(handle->paddedNNXYLen);
+    const size_t numTrunkFloats = static_cast<size_t>(batchSize) * logicalSpatialSize * desc->preBN.numChannels;
+    const size_t numMaskFloats = static_cast<size_t>(batchSize) * logicalSpatialSize;
     if ( numTrunkFloats != inputBuffer.size() ) {
       delete layer;
       delete handle;
@@ -6091,42 +6749,103 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     outputBuffer.resize(numTrunkFloats);
     ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
-    std::vector<float> inputTmp = inputBuffer;
-    std::vector<float> maskTmp = maskBuffer;
-    VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(
-      handle->vulkanDevice,
-      byteSizeofVectorContents(inputTmp),
-      inputTmp.data(),
-      false,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk buffer with data", res);
-    VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
-      handle->vulkanDevice,
-      byteSizeofVectorContents(maskTmp),
-      maskTmp.data(),
-      true,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device mask buffer with data", res);
-    VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
-      handle->vulkanDevice,
-      numTrunkFloats * sizeof(float),
-      false,
-      &res
-    );
-    CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk scratch buffer", res);
+    const size_t nchwStorageElts = static_cast<size_t>(batchSize) * desc->preBN.numChannels * paddedSpatialSize;
+    const size_t spatialStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize;
+    VulkanBuffer* dNCHWInput = nullptr;
+    VulkanBuffer* dNHWCTrunk = nullptr;
+    VulkanBuffer* dTrunk = nullptr;
+    VulkanBuffer* dMask = nullptr;
+    VulkanBuffer* dTrunkScratch = nullptr;
+    VulkanBuffer* dNCHWOutput = nullptr;
+    VkDescriptorSet nchwToNhwcDS = VK_NULL_HANDLE;
+    VkDescriptorSet nhwcToNchwDS = VK_NULL_HANDLE;
+    if(useNHWC) {
+      const size_t nhwcStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize *
+        handle->getNHWCChannelsPadded(desc->preBN.numChannels);
+      std::vector<half_t> inputPadded(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+      std::vector<half_t> maskPadded(spatialStorageElts, half_float::half_cast<half_t>(0.0f));
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < desc->preBN.numChannels; ++c) {
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
+            inputPadded[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
+          }
+        }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
+          maskPadded[idx] = half_float::half_cast<half_t>(maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy]);
+        }
+      }
+      dNCHWInput = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded NCHW input buffer", res);
+      dNHWCTrunk = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create NHWC trunk buffer", res);
+      dMask = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded mask buffer", res);
+      dTrunkScratch = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk scratch buffer", res);
+      dNCHWOutput = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nchwStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded NCHW output buffer", res);
 
+      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to allocate NCHW-to-NHWC descriptor set", res);
+      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to allocate NHWC-to-NCHW descriptor set", res);
+    }
+    else {
+      std::vector<float> inputPadded(nchwStorageElts, 0.0f);
+      std::vector<float> maskPadded(spatialStorageElts, 0.0f);
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < desc->preBN.numChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
+            inputPadded[dst] = inputBuffer[src];
+          }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy)
+          maskPadded[static_cast<size_t>(n) * paddedSpatialSize + xy] =
+            maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy];
+      }
+      dTrunk = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk buffer with data", res);
+      dMask = vk_helper::createDeviceBufferWithData(
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device mask buffer with data", res);
+      dTrunkScratch = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nchwStorageElts * sizeof(float), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk scratch buffer", res);
+    }
+
+    const size_t workspaceEltBytes = handle->usingFP16Storage ? sizeof(half_t) : sizeof(float);
     VulkanBuffer *convWorkspace = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
-      layer->requiredConvWorkspaceElts(handle, batchSize).size1 * sizeof(float),
+      layer->requiredConvWorkspaceElts(handle, batchSize).size1 * workspaceEltBytes,
       false,
       &res
     );
 
     VulkanBuffer *convWorkspace2 = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
-      layer->requiredConvWorkspaceElts(handle, batchSize).size2 * sizeof(float),
+      layer->requiredConvWorkspaceElts(handle, batchSize).size2 * workspaceEltBytes,
       false,
       &res
     );
@@ -6134,22 +6853,77 @@ bool NeuralNet::testEvaluateBatchNorm(
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to begin command buffer", res);
-    layer->forward(commandBuffer, batchSize, scratch, dTrunk, dTrunkScratch, dMask, convWorkspace, convWorkspace2);
+    if(useNHWC) {
+      vkcompute::convertNCHWToNHWC(
+        handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, commandBuffer, nchwToNhwcDS,
+        dNCHWInput, dNHWCTrunk, batchSize, desc->preBN.numChannels,
+        static_cast<int>(paddedSpatialSize), static_cast<int>(paddedSpatialSize),
+        static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to convert NCHW input to NHWC", res);
+      layer->forward(commandBuffer, batchSize, scratch, dNHWCTrunk, dTrunkScratch, dMask, convWorkspace, convWorkspace2);
+      vkcompute::convertNHWCToNCHW(
+        handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, commandBuffer, nhwcToNchwDS,
+        dNHWCTrunk, dNCHWOutput, batchSize, desc->preBN.numChannels,
+        static_cast<int>(paddedSpatialSize), static_cast<int>(paddedSpatialSize),
+        static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to convert NHWC output to NCHW", res);
+    }
+    else
+      layer->forward(commandBuffer, batchSize, scratch, dTrunk, dTrunkScratch, dMask, convWorkspace, convWorkspace2);
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to end command buffer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, nullptr);
-    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
+    if(useNHWC) {
+      std::vector<half_t> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dNCHWOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nchwStorageElts), outputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to copy padded NCHW output", res);
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < desc->preBN.numChannels; ++c) {
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = static_cast<float>(outputPadded[src]);
+          }
+        }
+      }
+    }
+    else {
+      std::vector<float> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+      );
+      for(int n = 0; n < batchSize; ++n)
+        for(int c = 0; c < desc->preBN.numChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = outputPadded[src];
+          }
+    }
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to copy device trunk buffer to host", res);
     vkQueueWaitIdle(handle->vulkanDevice->queue);
     vkDeviceWaitIdle(handle->vulkanDevice->device);
-    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
+    if(dNCHWInput != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNCHWInput);
+    if(dNHWCTrunk != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNHWCTrunk);
+    if(dTrunk != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
+    if(dNCHWOutput != nullptr)
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNCHWOutput);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace2);
-    dTrunk = nullptr;
+    dNCHWInput = nullptr;
+    dNHWCTrunk = nullptr;
     dMask = nullptr;
     dTrunkScratch = nullptr;
+    dNCHWOutput = nullptr;
     delete scratch;
     delete layer;
     delete handle;
@@ -6173,14 +6947,8 @@ bool NeuralNet::testEvaluateBatchNorm(
     VkResult res = VK_ERROR_UNKNOWN;
     int gpuId = 0;
 
-    if ( useNHWC ) {
-      // TODO: NHWC not supported yet
+    if (useFP16 != useNHWC)
       return false;
-    }
-    if ( useFP16 ) {
-      // TODO: FP16 not supported yet
-      return false;
-    }
 
     // std::cout << "[testEvaluateGlobalPoolingResidualBlock] batchSize: " << batchSize
     //           << " nnXLen: " << nnXLen
@@ -6192,10 +6960,22 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     ComputeContext* ctx = createComputeContextForTesting({gpuId}, logger, nnXLen, nnYLen, useFP16, useNHWC);
     ComputeHandleInternal* handle = new ComputeHandleInternal(ctx,static_cast<int>(gpuId), useNHWC, useNHWC);
-    GlobalPoolingResidualBlock *layer = new GlobalPoolingResidualBlock(handle, desc, nnXLen, nnYLen, false);
+    if(useNHWC && (!handle->pipelines->useNHWC || !handle->usingFP16Storage ||
+       !handle->tuneParams.hgemmCooperativeMatrixNHWC.isValid())) {
+      delete handle;
+      freeComputeContext(ctx);
+      return false;
+    }
+    GlobalPoolingResidualBlock *layer = new GlobalPoolingResidualBlock(handle, desc, nnXLen, nnYLen, useFP16);
 
-    size_t numTrunkFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen * desc->preBN.numChannels);
-    size_t numMaskFloats = static_cast<size_t>(batchSize * nnXLen * nnYLen);
+    const size_t logicalSpatialSize = static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
+    const int paddedSpatialSize = handle->paddedNNXYLen;
+    const int trunkChannels = desc->preBN.numChannels;
+    const int trunkChannelsPadded = useNHWC ? handle->getNHWCChannelsPadded(trunkChannels) : trunkChannels;
+    const size_t numTrunkFloats = static_cast<size_t>(batchSize) * trunkChannels * logicalSpatialSize;
+    const size_t nchwStorageElts = static_cast<size_t>(batchSize) * trunkChannels * paddedSpatialSize;
+    const size_t nhwcStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize * trunkChannelsPadded;
+    const size_t numMaskFloats = static_cast<size_t>(batchSize) * logicalSpatialSize;
     size_t numMaskSumFloats = static_cast<size_t>(batchSize);
 
     if ( numTrunkFloats != inputBuffer.size() ) {
@@ -6215,27 +6995,70 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     outputBuffer.resize(numTrunkFloats);
     ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
-    std::vector<float> inputTmp = inputBuffer;
-    std::vector<float> maskTmp = maskBuffer;
+    std::vector<float> paddedInputFP32;
+    std::vector<float> paddedMaskFP32;
+    std::vector<half_t> paddedInputHalf;
+    std::vector<half_t> paddedMaskHalf;
+    if(useNHWC) {
+      paddedInputHalf.assign(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+      paddedMaskHalf.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < trunkChannels; ++c) {
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
+            paddedInputHalf[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
+          }
+        }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
+          paddedMaskHalf[idx] = half_float::half_cast<half_t>(maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy]);
+        }
+      }
+    }
+    else {
+      paddedInputFP32.assign(nchwStorageElts, 0.0f);
+      paddedMaskFP32.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, 0.0f);
+      for(int n = 0; n < batchSize; ++n) {
+        for(int c = 0; c < trunkChannels; ++c) {
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
+            paddedInputFP32[dst] = inputBuffer[src];
+          }
+        }
+        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+          const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
+          paddedMaskFP32[idx] = maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy];
+        }
+      }
+    }
     VulkanBuffer* dTrunk = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
-      byteSizeofVectorContents(inputTmp),
-      inputTmp.data(),
-      false,
+      useNHWC ? byteSizeofVectorContents(paddedInputHalf) : byteSizeofVectorContents(paddedInputFP32),
+      useNHWC ? static_cast<const void*>(paddedInputHalf.data()) : static_cast<const void*>(paddedInputFP32.data()),
+      useNHWC,
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device trunk buffer with data", res);
+    VulkanBuffer* dNhwcTrunk = dTrunk;
+    if(useNHWC) {
+      dNhwcTrunk = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create NHWC trunk buffer", res);
+    }
     VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
       handle->vulkanDevice,
-      byteSizeofVectorContents(maskTmp),
-      maskTmp.data(),
+      useNHWC ? byteSizeofVectorContents(paddedMaskHalf) : byteSizeofVectorContents(paddedMaskFP32),
+      useNHWC ? static_cast<const void*>(paddedMaskHalf.data()) : static_cast<const void*>(paddedMaskFP32.data()),
       true,
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device mask buffer with data", res);
     VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
-      numTrunkFloats * sizeof(float),
+      scratch->getBufSizeXY(std::max({trunkChannels, desc->regularConv.outChannels, desc->gpoolConv.outChannels})),
       false,
       &res
     );
@@ -6246,19 +7069,37 @@ bool NeuralNet::testEvaluateBatchNorm(
       false,
       &res
     );
+    const size_t workspaceEltBytes = handle->usingFP16Storage ? sizeof(half_t) : sizeof(float);
     VulkanBuffer* convWorkspace = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
-      layer->requiredConvWorkspaceElts(handle, batchSize).size1 * sizeof(float),
+      layer->requiredConvWorkspaceElts(handle, batchSize).size1 * workspaceEltBytes,
       false,
       &res
     );
     VulkanBuffer* convWorkspace2 = vk_helper::createDeviceBuffer(
       handle->vulkanDevice,
-      layer->requiredConvWorkspaceElts(handle, batchSize).size2 * sizeof(float),
+      layer->requiredConvWorkspaceElts(handle, batchSize).size2 * workspaceEltBytes,
       false,      
       &res
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device mask sum buffer", res);
+    VkDescriptorSet nchwToNhwcDS = VK_NULL_HANDLE;
+    VkDescriptorSet nhwcToNchwDS = VK_NULL_HANDLE;
+    VulkanBuffer* dOutputNCHW = nullptr;
+    if(useNHWC) {
+      nchwToNhwcDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to allocate NCHW-to-NHWC descriptor set", res);
+      nhwcToNchwDS = vk_helper::allocateDescriptorSet(
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to allocate NHWC-to-NCHW descriptor set", res);
+      dOutputNCHW = vk_helper::createDeviceBuffer(
+        handle->vulkanDevice, nchwStorageElts * sizeof(half_t), false, &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create NCHW output buffer", res);
+    }
     std::vector<float> maskSumTmp(numMaskSumFloats, 0.0f);
     VkCommandBuffer maskSumsCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     const LocalDim maskSumDim = {
@@ -6282,20 +7123,69 @@ bool NeuralNet::testEvaluateBatchNorm(
     VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to begin command buffer", res);
-    layer->forward(commandBuffer, batchSize, scratch, dTrunk, dTrunkScratch, dMask, dMaskSum, convWorkspace, convWorkspace2);
+    if(useNHWC) {
+      vkcompute::convertNCHWToNHWC(
+        handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, commandBuffer, nchwToNhwcDS,
+        dTrunk, dNhwcTrunk, batchSize, trunkChannels, paddedSpatialSize,
+        paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to convert NCHW input to NHWC", res);
+    }
+    layer->forward(commandBuffer, batchSize, scratch, dNhwcTrunk, dTrunkScratch, dMask, dMaskSum, convWorkspace, convWorkspace2);
+    if(useNHWC) {
+      vkcompute::convertNHWCToNCHW(
+        handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, commandBuffer, nhwcToNchwDS,
+        dNhwcTrunk, dOutputNCHW, batchSize, trunkChannels, paddedSpatialSize,
+        paddedSpatialSize, static_cast<int>(logicalSpatialSize), &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to convert NHWC output to NCHW", res);
+    }
     res = vk_helper::endCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to end command buffer", res);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, nullptr);
-    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * numTrunkFloats), outputBuffer.data(), true, &res);
+    if(useNHWC) {
+      std::vector<half_t> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dOutputNCHW,
+        static_cast<VkDeviceSize>(nchwStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
+      );
+      CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy NCHW output buffer to host", res);
+      for(int n = 0; n < batchSize; ++n)
+        for(int c = 0; c < trunkChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = static_cast<float>(outputPadded[src]);
+          }
+    } else {
+      std::vector<float> outputPadded(nchwStorageElts);
+      vk_helper::copyDeviceBufferToHost(
+        handle->vulkanDevice, dTrunk,
+        static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+      );
+      for(int n = 0; n < batchSize; ++n)
+        for(int c = 0; c < trunkChannels; ++c)
+          for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
+            const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            outputBuffer[dst] = outputPadded[src];
+          }
+    }
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device trunk buffer to host", res);
     vkQueueWaitIdle(handle->vulkanDevice->queue);
     vkDeviceWaitIdle(handle->vulkanDevice->device);
 
     printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Output", outputBuffer.data(), outputBuffer.size(), batchSize, desc->preBN.numChannels, nnYLen, nnXLen);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);
+    if(useNHWC) {
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNhwcTrunk);
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dOutputNCHW);
+    }
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunkScratch);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMaskSum);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace);
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, convWorkspace2);
     dTrunk = nullptr;
     dMask = nullptr;
     dTrunkScratch = nullptr;

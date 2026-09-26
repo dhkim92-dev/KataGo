@@ -10,6 +10,7 @@ layout(push_constant) uniform AddChannelBiasNCHWParams {
     int xySize;
     int cSize;
     int channelsPadded;
+    int logicalSpatialSize;
 };
 
 layout(set = 0, binding = 0) buffer Accum {
@@ -54,14 +55,17 @@ void addChannelBiasNHWC() {
     const int nc = ncBase + r;
     if(nc >= ncSize)
       return;
-    const int batch = nc / cSize;
-    const int channel = nc - batch * cSize;
-    real bias = floatToReal(biases[nc]);
+    const int batch = nc / channelStride;
+    const int channel = nc - batch * channelStride;
+    const bool validChannel = channel < cSize;
+    real bias = validChannel ? floatToReal(biases[batch * cSize + channel]) : floatToReal(0.0);
     for(int d = 0; d < XY_ELTS_PER_THREAD; d++) {
       int xy = xyTileStart + d * LocalSize0() + xyOffsetInTile;
       if(xy < xySize) {
         int idx = (batch * xySize + xy) * channelStride + channel;
-        real result = LOAD(accum,idx) + bias;
+        real result = validChannel && xy < logicalSpatialSize
+          ? LOAD(accum,idx) + bias
+          : floatToReal(0.0);
         STORE(accum, idx, result);
       }
     }

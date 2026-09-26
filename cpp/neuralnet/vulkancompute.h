@@ -15,6 +15,8 @@ struct ComputeHandleInternal;
 
 namespace vkcompute {
 
+  void clearBufferForCompute(VkCommandBuffer commandBuffer, VulkanBuffer* buffer);
+
   void dispatchPipeline(
     ComputeHandleInternal* benchmarkHandle,
     const VulkanDevice* device,
@@ -26,7 +28,8 @@ namespace vkcompute {
     uint32_t workgroupCountX,
     uint32_t workgroupCountY,
     uint32_t workgroupCountZ,
-    const char* benchmarkName
+    const char* benchmarkName,
+    bool recordBenchmark = true
   );
 
   void doBatchNormMask(
@@ -536,7 +539,12 @@ namespace vkcompute {
     VulkanBuffer* output,
     int totalSize,
     int packedInputBatchStride = 0,
-    int outputBatchStride = 0
+    int outputBatchStride = 0,
+    int outputPhysicalBatchStride = 0,
+    bool useNHWC = false,
+    int ffnSize = 0,
+    int inputChannelsPadded = 0,
+    int outputChannelsPadded = 0
   );
 }
 

@@ -28,6 +28,11 @@ layout(push_constant) uniform TransformerSwiGLUParams {
   int size;
   int packedInputBatchStride;
   int outputBatchStride;
+  int outputPhysicalBatchStride;
+  int ffnSize;
+  int inputChannelsPadded;
+  int outputChannelsPadded;
+  int useNHWC;
 };
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
@@ -36,14 +41,28 @@ void main() {
   const int lid = int(gl_LocalInvocationID.x);
   const int batchIndex = packedInputBatchStride > 0 ? int(gl_WorkGroupID.y) : 0;
   const int inputBase = batchIndex * packedInputBatchStride;
-  const int outputBase = batchIndex * outputBatchStride;
+  const int outputBase = batchIndex * outputPhysicalBatchStride;
 
   for ( int d = 0 ; d < ELTS_PER_THREAD ; d++ ) {
     int s = tileStart + d * int(gl_WorkGroupSize.x) + lid;
     if ( s < size ) {
-      int mainIndex = inputBase + s;
-      int gateIndex = packedInputBatchStride > 0 ? inputBase + outputBatchStride + s : s;
-      int outputIndex = outputBase + s;
+      int mainIndex;
+      int gateIndex;
+      int outputIndex;
+      if(useNHWC != 0) {
+        int spatial = s / ffnSize;
+        int channel = s - spatial * ffnSize;
+        int inputRow = inputBase + spatial * inputChannelsPadded;
+        int outputRow = outputBase + spatial * outputChannelsPadded;
+        mainIndex = inputRow + channel;
+        gateIndex = inputRow + ffnSize + channel;
+        outputIndex = outputRow + channel;
+      }
+      else {
+        mainIndex = inputBase + s;
+        gateIndex = packedInputBatchStride > 0 ? inputBase + outputBatchStride + s : s;
+        outputIndex = outputBase + s;
+      }
       float a = LOAD(main_proj, mainIndex);
       float b = LOAD(gate_proj, gateIndex);
       float silu_a = a / (1.0f + exp(-a));

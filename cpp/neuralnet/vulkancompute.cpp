@@ -63,11 +63,23 @@ void convertNCHWNHWC(
   dispatchPipeline(
     handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     workgroupCount == 0 ? 1 : workgroupCount, 1, 1,
-    nhwcToNchw ? "NHWC_TO_NCHW" : "NCHW_TO_NHWC"
+    nhwcToNchw ? "NHWC_TO_NCHW" : "NCHW_TO_NHWC", false
   );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
 
+}
+
+void clearBufferForCompute(VkCommandBuffer commandBuffer, VulkanBuffer* buffer) {
+  vkCmdFillBuffer(commandBuffer, buffer->buffer, 0, VK_WHOLE_SIZE, 0);
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer,
+    buffer,
+    VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+  );
 }
 
 void dispatchPipeline(
@@ -81,7 +93,8 @@ void dispatchPipeline(
   uint32_t workgroupCountX,
   uint32_t workgroupCountY,
   uint32_t workgroupCountZ,
-  const char* benchmarkName
+  const char* benchmarkName,
+  bool recordBenchmark
 ) {
   assert(device != nullptr);
   assert(pipeline != nullptr);
@@ -90,6 +103,7 @@ void dispatchPipeline(
 #ifndef VK_BENCHMARK
   (void)benchmarkHandle;
   (void)benchmarkName;
+  (void)recordBenchmark;
 #endif
   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
   vkCmdBindDescriptorSets(
@@ -112,9 +126,14 @@ void dispatchPipeline(
       pushConstants
     );
   }
-  VK_BENCHMARK_START(benchmarkHandle, benchmarkName, cb);
+#ifdef VK_BENCHMARK
+  ComputeHandleInternal* dispatchBenchmarkHandle = recordBenchmark ? benchmarkHandle : nullptr;
+  VK_BENCHMARK_START(dispatchBenchmarkHandle, benchmarkName, cb);
+#endif
   vkCmdDispatch(cb, workgroupCountX, workgroupCountY, workgroupCountZ);
-  VK_BENCHMARK_END(benchmarkHandle, benchmarkName, cb);
+#ifdef VK_BENCHMARK
+  VK_BENCHMARK_END(dispatchBenchmarkHandle, benchmarkName, cb);
+#endif
 }
 
 void doBatchNormMask(
@@ -154,7 +173,8 @@ void doBatchNormMask(
     static_cast<uint32_t>(channelsPadded)
   };
   const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(spatialSize));
-  const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(numChannels));
+  const int dispatchedChannels = handle->pipelines->useNHWC ? channelsPadded : numChannels;
+  const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(dispatchedChannels));
   dispatchPipeline(
     handle, handle->vulkanDevice, pipeline, cb, descriptorSet,
     &pushParams, sizeof(pushParams),
@@ -380,6 +400,8 @@ void transformerRMSNorm(
 
   VulkanBuffer* shaderInput = input;
   VulkanBuffer* shaderOutput = output;
+  if(useNHWC && shaderOutput != shaderInput)
+    clearBufferForCompute(cb, shaderOutput);
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 0, shaderInput),
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 1, shaderOutput),
@@ -475,6 +497,8 @@ void transformerScaleDotProductCooperative(
   }
   const int qkvBatchStride = seqLen * qkvChannelsPadded;
   const int outputBatchStride = seqLen * outputChannelsPadded;
+
+  clearBufferForCompute(cb, output);
 
   (void)nchwToNhwcPipeline;
   (void)nchwToNhwcDescriptorSet;
@@ -634,7 +658,7 @@ void convertNHWCMatrixToNCHW(
   const uint32_t workgroupCount = static_cast<uint32_t>((total + pipeline->localSizeX - 1) / pipeline->localSizeX);
   dispatchPipeline(
     handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
-    workgroupCount == 0 ? 1 : workgroupCount, 1, 1, "NHWC_TO_NCHW_MATRIX"
+    workgroupCount == 0 ? 1 : workgroupCount, 1, 1, "NHWC_TO_NCHW_MATRIX", false
   );
   vk_helper::barrierCommandBufferForBuffer(cb, output);
 }
@@ -1415,9 +1439,8 @@ void doTransformerDualGemmSwiGLU(
     return;
   }
 
-  const int nhwcChannelAlignment = tuneParams.hgemmCooperativeMatrixNHWC.NWG;
-  const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, nhwcChannelAlignment);
-  const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, nhwcChannelAlignment);
+  const int inputChannelStride = handle->getNHWCChannelsPadded(cSize);
+  const int outputChannelStride = handle->getNHWCChannelsPadded(ffnSize);
   (void)nchwToNhwcPipeline;
   (void)nchwToNhwcDescriptorSet;
   (void)nhwcToNchwPipeline;
@@ -1436,6 +1459,7 @@ void doTransformerDualGemmSwiGLU(
   const vk_shader::push::TransformerDualGemmSwiGLUPushParams pushParams = {
     cSize, hwSize, packedOCSize, ffnSize, inputChannelStride, outputChannelStride
   };
+  clearBufferForCompute(cb, output);
   dispatchPipeline(
     handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     static_cast<uint32_t>((hwSize + params.MWG - 1) / params.MWG),
@@ -1489,14 +1513,15 @@ void performAddChannelBiases(
   const int xyEltsPerThread = handle->tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
   const int ncEltsPerThread = handle->tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
   const int xyThreads = (xySize + xyEltsPerThread - 1) / xyEltsPerThread;
-  const int ncThreads = (ncSize + ncEltsPerThread - 1) / ncEltsPerThread;
+  const int channelsPadded = useNHWC ? handle->getNHWCChannelsPadded(cSize) : cSize;
+  const int dispatchNCSize = useNHWC ? batchSize * channelsPadded : ncSize;
+  const int ncThreads = (dispatchNCSize + ncEltsPerThread - 1) / ncEltsPerThread;
   vk_shader::push::AddChannelBiasNCHWParams pushConstants = {};
-  pushConstants.ncSize = static_cast<uint32_t>(ncSize);
+  pushConstants.ncSize = static_cast<uint32_t>(dispatchNCSize);
   pushConstants.xySize = static_cast<uint32_t>(xySize);
   pushConstants.cSize = static_cast<uint32_t>(cSize);
-  pushConstants.channelsPadded = static_cast<uint32_t>(
-    useNHWC ? handle->getNHWCChannelsPadded(cSize) : cSize
-  );
+  pushConstants.channelsPadded = static_cast<uint32_t>(channelsPadded);
+  pushConstants.logicalSpatialSize = static_cast<uint32_t>(logicalSpatialSize);
 
   const uint32_t globalSizeX = vk_helper::roundUpToMultiple(xyThreads, 32);
   const uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1) / targetPipeline.localSizeX;
@@ -1760,7 +1785,12 @@ void doSwiGLU(
     VulkanBuffer* output,
     int totalSize,
     int packedInputBatchStride,
-    int outputBatchStride
+    int outputBatchStride,
+    int outputPhysicalBatchStride,
+    bool useNHWC,
+    int ffnSize,
+    int inputChannelsPadded,
+    int outputChannelsPadded
   ) {
     auto writeDescriptorSets = {
       vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, mainProj),
@@ -1779,6 +1809,16 @@ void doSwiGLU(
     params.size = dispatchSize;
     params.packedInputBatchStride = usePackedBatches ? packedInputBatchStride : 0;
     params.outputBatchStride = usePackedBatches ? outputBatchStride : 0;
+    params.outputPhysicalBatchStride = usePackedBatches
+      ? (outputPhysicalBatchStride > 0 ? outputPhysicalBatchStride : outputBatchStride)
+      : 0;
+    params.ffnSize = ffnSize;
+    params.inputChannelsPadded = inputChannelsPadded;
+    params.outputChannelsPadded = outputChannelsPadded;
+    params.useNHWC = useNHWC ? 1 : 0;
+
+    if(useNHWC)
+      clearBufferForCompute(cb, output);
 
     size_t numThreads = ((size_t)dispatchSize + eltsPerThread - 1) / eltsPerThread;
     size_t globalSize = vk_helper::roundUpToMultiple(numThreads, pipeline.localSizeX);

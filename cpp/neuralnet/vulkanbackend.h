@@ -74,6 +74,15 @@ struct VulkanBenchmarkExecutionInfo {
   uint64_t totalExecutionTimeNs;
 };
 
+#ifdef VK_DUMP_BUFFER
+struct VulkanLayerBufferDumpInfo {
+  std::string name;
+  VulkanBuffer* buffer;
+  size_t numElts;
+  bool fp16;
+};
+#endif
+
 struct ComputeHandleInternal {
   const ComputeContext* context;
   const VulkanDevice* vulkanDevice;
@@ -89,6 +98,10 @@ struct ComputeHandleInternal {
 
   bool usingFP16Storage = false;
   bool usingFP16Compute = false;
+
+#ifdef VK_DUMP_BUFFER
+  std::vector<VulkanLayerBufferDumpInfo> layerBufferDumpInfos;
+#endif
 
 #ifdef VK_BENCHMARK
   bool benchmarkEnabled = true;
@@ -227,11 +240,19 @@ struct ComputeHandleInternal {
     if(queryPool != VK_NULL_HANDLE)
       vkDestroyQueryPool(device, queryPool, nullptr);
 #endif
+#ifdef VK_DUMP_BUFFER
+    for(const VulkanLayerBufferDumpInfo& info : layerBufferDumpInfos) {
+      if(info.buffer != nullptr)
+        vk_helper::releaseVulkanBuffer(vulkanDevice, info.buffer);
+    }
+#endif
   }
 
 #endif
 
-  ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC);
+  ComputeHandleInternal(
+    ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC
+  );
 
   int getXGemmMPaddingMult() const {
     if(usingFP16Compute)

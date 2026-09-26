@@ -1277,6 +1277,7 @@ struct LocalDimHash {
       uint32_t xySize;
       uint32_t cSize;
       uint32_t channelsPadded;
+      uint32_t logicalSpatialSize;
     };
 
     /**
@@ -1412,6 +1413,11 @@ struct LocalDimHash {
       int size;
       int packedInputBatchStride;
       int outputBatchStride;
+      int outputPhysicalBatchStride;
+      int ffnSize;
+      int inputChannelsPadded;
+      int outputChannelsPadded;
+      int useNHWC;
     };
 
     struct TransformerSpatialRMSNormApplyPushParams {
@@ -1471,6 +1477,10 @@ struct LocalDimHash {
       uint32_t outputTransformLocalXSize;
       uint32_t outputTransformLocalYSize;
       uint32_t outputTransformLocalZSize;
+      uint32_t inputTransformNHWCLocalXSize;
+      uint32_t inputTransformNHWCLocalYSize;
+      uint32_t outputTransformNHWCLocalXSize;
+      uint32_t outputTransformNHWCLocalYSize;
 
       bool isValid(uint32_t convSize) const;
     };
@@ -1658,6 +1668,7 @@ struct LocalDimHash {
       bool shouldUseFP16Compute = false;
       // Generic Winograd HGEMM only. NCHW HGEMM is controlled independently below.
       bool shouldUseCooperativeMatrix = false;
+      bool shouldUseNHWC = false;
       bool shouldUseHgemmCooperativeMatrixNCHW = false;
       bool shouldUseSubgroup = false;
       bool shouldUseTransformerDualGemmSwiGLU = false;
@@ -1699,6 +1710,10 @@ struct LocalDimHash {
         conv3x3.outputTransformLocalXSize = 8;
         conv3x3.outputTransformLocalYSize = 2;
         conv3x3.outputTransformLocalZSize = 2;
+        conv3x3.inputTransformNHWCLocalXSize = 4;
+        conv3x3.inputTransformNHWCLocalYSize = 2;
+        conv3x3.outputTransformNHWCLocalXSize = 8;
+        conv3x3.outputTransformNHWCLocalYSize = 2;
 
         conv5x5 = ConvTuneParams();
         conv5x5.inTileYSize = 6;
@@ -1710,6 +1725,10 @@ struct LocalDimHash {
         conv5x5.outputTransformLocalXSize = 8;
         conv5x5.outputTransformLocalYSize = 2;
         conv5x5.outputTransformLocalZSize = 2;
+        conv5x5.inputTransformNHWCLocalXSize = 4;
+        conv5x5.inputTransformNHWCLocalYSize = 2;
+        conv5x5.outputTransformNHWCLocalXSize = 8;
+        conv5x5.outputTransformNHWCLocalYSize = 2;
         // xgemm = XgemmTuneParams{
         //   .MDIMC = 16,
         //   .NDIMC = 16,
@@ -1886,6 +1905,8 @@ struct LocalDimHash {
     Pipeline hgemmCooperativeMatrixNHWC;
     Pipeline winogradInputTransform3x3;
     Pipeline winogradInputTransform5x5;
+    Pipeline winogradInputTransform3x3NHWC;
+    Pipeline winogradInputTransform5x5NHWC;
 
     Pipeline winogradInputTransform3x3_bnact_identity;
     Pipeline winogradInputTransform3x3_bnact_relu;
@@ -1897,9 +1918,21 @@ struct LocalDimHash {
     Pipeline winogradInputTransform5x5_bnact_mish;
     Pipeline winogradInputTransform5x5_bnact_mish_scale8;
     Pipeline winogradInputTransform5x5_bnact_silu;
+    Pipeline winogradInputTransform3x3_bnact_identityNHWC;
+    Pipeline winogradInputTransform3x3_bnact_reluNHWC;
+    Pipeline winogradInputTransform3x3_bnact_mishNHWC;
+    Pipeline winogradInputTransform3x3_bnact_mish_scale8NHWC;
+    Pipeline winogradInputTransform3x3_bnact_siluNHWC;
+    Pipeline winogradInputTransform5x5_bnact_identityNHWC;
+    Pipeline winogradInputTransform5x5_bnact_reluNHWC;
+    Pipeline winogradInputTransform5x5_bnact_mishNHWC;
+    Pipeline winogradInputTransform5x5_bnact_mish_scale8NHWC;
+    Pipeline winogradInputTransform5x5_bnact_siluNHWC;
 
     Pipeline winogradOutputTransform3x3;
     Pipeline winogradOutputTransform5x5;
+    Pipeline winogradOutputTransform3x3NHWC;
+    Pipeline winogradOutputTransform5x5NHWC;
 
     Pipeline addPointWise;  // operation for skipping connections
 
