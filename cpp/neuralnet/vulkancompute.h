@@ -47,7 +47,8 @@ namespace vkcompute {
     int spatialSize,
     int maskSpatialStride,
     int channelsPadded,
-    const char* benchmarkName
+    const char* benchmarkName,
+    bool useNHWC = false
   );
 
   void doMatBiasNC(
@@ -99,12 +100,7 @@ namespace vkcompute {
     const Pipeline* ropePipeline,
     VkCommandBuffer cb,
     VkDescriptorSet ropeDescriptorSet,
-    const Pipeline* nchwToNhwcPipeline,
-    VkDescriptorSet nchwToNhwcDescriptorSet,
-    const Pipeline* nhwcToNchwPipeline,
-    VkDescriptorSet nhwcToNchwDescriptorSet,
     VulkanBuffer* input,
-    VulkanBuffer* nhwcScratch,
     VulkanBuffer* cosTable,
     VulkanBuffer* sinTable,
     int batchSize,
@@ -130,14 +126,8 @@ namespace vkcompute {
     const Pipeline* rmsNormPipeline,
     VkCommandBuffer cb,
     VkDescriptorSet rmsNormDescriptorSet,
-    const Pipeline* nchwToNhwcPipeline,
-    VkDescriptorSet nchwToNhwcDescriptorSet,
-    const Pipeline* nhwcToNchwPipeline,
-    VkDescriptorSet nhwcToNchwDescriptorSet,
     VulkanBuffer* input,
     VulkanBuffer* output,
-    VulkanBuffer* nhwcInput,
-    VulkanBuffer* nhwcOutput,
     VulkanBuffer* weight,
     VulkanBuffer* beta,
     VulkanBuffer* mask,
@@ -159,14 +149,8 @@ namespace vkcompute {
     const Pipeline* attentionPipeline,
     VkCommandBuffer cb,
     VkDescriptorSet attentionDescriptorSet,
-    const Pipeline* nchwToNhwcPipeline,
-    VkDescriptorSet nchwToNhwcDescriptorSet,
-    const Pipeline* nhwcToNchwPipeline,
-    VkDescriptorSet nhwcToNchwDescriptorSet,
     const VulkanBuffer* packedQKV,
     VulkanBuffer* output,
-    VulkanBuffer* nhwcQKV,
-    VulkanBuffer* nhwcOutput,
     VulkanBuffer* mask,
     VulkanBuffer* ropeCosTable,
     VulkanBuffer* ropeSinTable,
@@ -180,6 +164,7 @@ namespace vkcompute {
     int spatialStride,
     int qkvChannels,
     int outputChannels,
+    int nchwQKVChannels,
     int qkvChannelsPadded,
     int outputChannelsPadded,
     int qTotalDim,
@@ -188,7 +173,8 @@ namespace vkcompute {
     bool useRope,
     bool learnableRope,
     int ropeNumPairs,
-    const vk_shader::tune::TransformerTuneParams& tuneParams,
+    bool useNHWC,
+    const vk_shader::tune::TransformerCooperativeMatrixTuneParams& tuneParams,
     VkResult* result
   );
 
@@ -434,21 +420,17 @@ namespace vkcompute {
     const Pipeline* pipeline,
     const VkCommandBuffer cb,
     const VkDescriptorSet descriptorSet,
-    const VulkanBuffer* input,
-    VulkanBuffer* nhwcInput,
+    const VulkanBuffer* nhwcInput,
     const VulkanBuffer* packedFilter,
     VulkanBuffer* nhwcOutput,
-    VulkanBuffer* output,
-    const Pipeline* nchwToNhwcPipeline,
-    const VkDescriptorSet nchwToNhwcDescriptorSet,
-    const Pipeline* nhwcToNchwPipeline,
-    const VkDescriptorSet nhwcToNchwDescriptorSet,
     int batchSize,
     int hwSize,
     int logicalSpatialSize,
     int ffnSize,
     int cSize,
     int packedOCSize,
+    int inputChannelStride,
+    int outputChannelStride,
     VkResult* result
   );
 
@@ -456,14 +438,11 @@ namespace vkcompute {
     ComputeHandleInternal* handle,
     VkCommandBuffer& commandBuffer,
     VkDescriptorSet& descriptorSet,
-    VkDescriptorSet& nchwToNhwcDescriptorSet,
-    VkDescriptorSet& nhwcToNchwDescriptorSet,
     VulkanBuffer* input,
     VulkanBuffer* bias,
     int ncSize,
     int cSize,
     int nchwSpatialStride,
-    VulkanBuffer* nhwcScratch,
     bool begin = true
   );
 
@@ -481,7 +460,6 @@ namespace vkcompute {
     ComputeHandleInternal* handle,
     VkCommandBuffer& commandBuffer,
     VkDescriptorSet& descriptorSet,
-    VkDescriptorSet& nchwToNhwcDescriptorSet,
     VulkanBuffer* gpoolConvOut,
     VulkanBuffer* gpoolConcat,
     VulkanBuffer* mask,
@@ -489,7 +467,6 @@ namespace vkcompute {
     int batchSize,
     int gpoolChannels,
     int nnXYLen,
-    VulkanBuffer* nhwcScratch,
     VkResult* result,
     bool begin = true
   );
@@ -498,11 +475,9 @@ namespace vkcompute {
     ComputeHandleInternal* handle,
     VkCommandBuffer& commandBuffer,
     VkDescriptorSet& descriptorSet,
-    VkDescriptorSet& nchwToNhwcDescriptorSet,
     VulkanBuffer* gpoolConvOut,
     VulkanBuffer* gpoolConcat,
     VulkanBuffer* maskSum,
-    VulkanBuffer* nhwcScratch,
     int batchSize,
     int gPoolChannels,
     int nnXYLen,

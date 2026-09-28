@@ -342,6 +342,11 @@ struct ScratchBuffers {
     return static_cast<size_t>(storageChannels) * batchXYBytes;
   }
 
+  size_t getNHWCBufSizeXY(int channels) const {
+    const int storageChannels = handle->getNHWCChannelsPadded(channels, true);
+    return static_cast<size_t>(storageChannels) * batchXYBytes;
+  }
+
   size_t getBufSizeXYFloat(int channels) const {
     return static_cast<size_t>(channels) * batchXYFloatBytes;
   }

@@ -1623,7 +1623,12 @@ struct LocalDimHash {
       int ATTN_BLOCK_KV=32;
       int Q_PER_THREAD=1;
       int USE_TILED_ATTN=1;
-      int USE_COOPERATIVE_ATTN=0;
+      bool isValid() const;
+    };
+
+    struct TransformerCooperativeMatrixTuneParams {
+      int ATTN_BLOCK_Q=16;
+      int ATTN_BLOCK_KV=16;
       int COOP_ACC_TYPE=32;
       int COOP_M_SIZE=16;
       int COOP_N_SIZE=16;
@@ -1637,7 +1642,7 @@ struct LocalDimHash {
 
     bool isValidCooperativeMatrixConfig(
       const VulkanDeviceInfo& deviceInfo,
-      const TransformerTuneParams& params,
+      const TransformerCooperativeMatrixTuneParams& params,
       int qHeadDim,
       int vHeadDim
     );
@@ -1672,6 +1677,8 @@ struct LocalDimHash {
       bool shouldUseHgemmCooperativeMatrixNCHW = false;
       bool shouldUseSubgroup = false;
       bool shouldUseTransformerDualGemmSwiGLU = false;
+      bool shouldUseTransformerCooperativeMatrixNCHW = false;
+      bool shouldUseTransformerCooperativeMatrixNHWC = false;
     };
 
     // All non-GEMM specialization parameters are stored once for the final
@@ -1691,6 +1698,8 @@ struct LocalDimHash {
       XgemmTuneParams xgemm16;
       XgemmDirectTuneParams xgemmDirect;
       TransformerTuneParams transformer;
+      TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNCHW;
+      TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNHWC;
       TransformerRMSNormTuneParms rmsNorm;
       TransformerSpatialRmsNormTuneParams spatialRMSNorm;
 
@@ -1950,27 +1959,36 @@ struct LocalDimHash {
     // note that prediction phase does not need batch normalization operation separately
     // as the parameters can be folded into convolution scale and bias.
     Pipeline batchNormMaskIdentity;
+    Pipeline batchNormMaskIdentityNHWC;
     Pipeline batchNormMaskRelu;
+    Pipeline batchNormMaskReluNHWC;
     Pipeline batchNormMaskMish;
+    Pipeline batchNormMaskMishNHWC;
     Pipeline batchNormMaskMishScale8;
+    Pipeline batchNormMaskMishScale8NHWC;
     Pipeline batchNormMaskSilu;
+    Pipeline batchNormMaskSiluNHWC;
     Pipeline batchNormMaskSiluNCHW;
 
     // Pooling pipelines
     Pipeline globalPoolingChannelsFp32;
-    
+    Pipeline globalPoolingChannelsFp32NHWC;
+
     std::map<LocalDim, Pipeline> valueHeadPoolingChannels;
+    std::map<LocalDim, Pipeline> valueHeadPoolingChannelsNHWC;
     
     // Element wise operations
     std::map<LocalDim, Pipeline> sumChannels;
 
     Pipeline addChannelBias;
+    Pipeline addChannelBiasNHWC;
     Pipeline addChannelBiasNCIdentity;
     Pipeline addChannelBiasNCRelu;
     Pipeline addChannelBiasNCMish;
     Pipeline addChannelBiasNCMishScale8;
     Pipeline addChannelBiasNCSilu;
     Pipeline extractChannel0Fp32;
+    Pipeline extractChannel0Fp32NHWC;
 
     // Transformer
 
@@ -1985,8 +2003,10 @@ struct LocalDimHash {
     Pipeline transformerSwiGLU;
     Pipeline transformerDualGemmSwiGLU;
     Pipeline transformerSpatialRMSNormApply;
+    Pipeline transformerSpatialRMSNormApplyNHWC;
     Pipeline transformerSpatialRMSNormReduce;
     Pipeline transformerSpatialRMSNormSumSq;
+    Pipeline transformerSpatialRMSNormSumSqNHWC;
 
     ComputePipelines(
       VkDevice device_,
@@ -2039,7 +2059,7 @@ struct LocalDimHash {
     VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
-    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerCooperativeMatrixTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
     VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
