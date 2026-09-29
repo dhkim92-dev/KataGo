@@ -4439,7 +4439,7 @@ struct Trunk {
     blockStack(handle, desc->blocks, desc->numBlocks, trunkNumChannels, nnXLen_, nnYLen_, useFP16)
   {
     // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = false;
+    usingNHWC = true;
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,trunkNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,midNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,regularNumChannels);
@@ -4865,7 +4865,7 @@ struct ValueHead {
     ownershipChannels(desc->vOwnershipConv.outChannels)
   {
     // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = false;
+    usingNHWC = true;
     v1Conv = std::make_unique<ConvLayer>(handle, &desc->v1Conv, nnXLen, nnYLen, useFP16);
     v1BN = std::make_unique<BatchNormLayer>(handle, &desc->v1BN, &desc->v1Activation, useFP16);
     v2Mul = std::make_unique<MatmulLayer>(handle, &desc->v2Mul);
