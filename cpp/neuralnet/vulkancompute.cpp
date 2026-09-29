@@ -152,7 +152,7 @@ void doBatchNormMask(
   int maskSpatialStride,
   int channelsPadded,
   const char* benchmarkName,
-  bool useNHWC
+  int dispatchedChannels
 ) {
   assert(handle != nullptr);
   assert(pipeline != nullptr);
@@ -174,7 +174,6 @@ void doBatchNormMask(
     static_cast<uint32_t>(channelsPadded)
   };
   const uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify(spatialSize));
-  const int dispatchedChannels = useNHWC ? channelsPadded : numChannels;
   const uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(dispatchedChannels));
   dispatchPipeline(
     handle, handle->vulkanDevice, pipeline, cb, descriptorSet,
@@ -285,7 +284,6 @@ void transformerApplyRoPE(
   int channelsPadded,
   int spatialStride,
   int logicalSpatialSize,
-  bool useNHWC,
   VkResult* result
 ) {
   assert(device != nullptr);
@@ -324,7 +322,7 @@ void transformerApplyRoPE(
   params.numPairs = numPairs;
   params.learnableRope = learnableRope;
   params.regionOffset = regionOffset;
-  params.batchStride = useNHWC ? seqLen * channelsPadded : batchStride;
+  params.batchStride = batchStride;
   params.channelsPadded = channelsPadded;
 
   const uint32_t globalSize[3] = {
@@ -340,7 +338,7 @@ void transformerApplyRoPE(
   dispatchPipeline(
     handle, device, ropePipeline, cb, ropeDescriptorSet, &params, sizeof(params),
     workgroupCount[0], workgroupCount[1], workgroupCount[2],
-    useNHWC ? "TRANSFORMER_APPLY_ROPE_NHWC" : "TRANSFORMER_APPLY_ROPE"
+    "TRANSFORMER_APPLY_ROPE"
   );
   vk_helper::barrierCommandBufferForBuffer(cb, shaderInput);
 }
@@ -364,7 +362,6 @@ void transformerRMSNorm(
   int channelsPadded,
   float epsilon,
   const vk_shader::tune::TransformerRMSNormTuneParms& tuneParams,
-  bool useNHWC,
   VkResult* result
 ) {
   assert(device != nullptr);
@@ -377,8 +374,6 @@ void transformerRMSNorm(
 
   VulkanBuffer* shaderInput = input;
   VulkanBuffer* shaderOutput = output;
-  if(useNHWC)
-    clearBufferForCompute(cb, shaderOutput);
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 0, shaderInput),
     vk_helper::writeDescriptorSetBuffer(rmsNormDescriptorSet, 1, shaderOutput),
@@ -410,7 +405,7 @@ void transformerRMSNorm(
   dispatchPipeline(
     handle, device, rmsNormPipeline, cb, rmsNormDescriptorSet, &params, sizeof(params),
     workgroupCounts[0], workgroupCounts[1], workgroupCounts[2],
-    useNHWC ? "TRANSFORMER_RMS_NORM_NHWC" : "TRANSFORMER_RMS_NORM"
+    "TRANSFORMER_RMS_NORM"
   );
   vk_helper::barrierCommandBufferForBuffer(cb, shaderOutput);
 }
@@ -445,7 +440,6 @@ void transformerScaleDotProductCooperative(
   bool useRope,
   bool learnableRope,
   int ropeNumPairs,
-  bool useNHWC,
   const vk_shader::tune::TransformerCooperativeMatrixTuneParams& tuneParams,
   VkResult* result
 ) {
@@ -537,7 +531,6 @@ void extractChannel0(
   int nchwSpatialStride,
   int logicalSpatialSize,
   int channelsPadded,
-  bool useNHWC,
   bool begin
 ) {
   assert(device != nullptr);
@@ -1430,19 +1423,19 @@ void performAddChannelBiases(
   ComputeHandleInternal* handle,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
+  const Pipeline* targetPipeline,
   VulkanBuffer* input,
   VulkanBuffer* bias,
   int ncSize,
   int cSize,
   int nchwSpatialStride,
+  int xySize,
+  int channelsPadded,
+  int dispatchNCSize,
   bool begin
 ) {
-  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
-  const bool useNHWC = pipelines->useNHWC;
-  const Pipeline& targetPipeline = useNHWC ? pipelines->addChannelBiasNHWC : pipelines->addChannelBias;
   const int batchSize = ncSize / cSize;
   const int logicalSpatialSize = handle->nnXLen * handle->nnYLen;
-  const int xySize = useNHWC ? handle->paddedNNXYLen : nchwSpatialStride;
 
   assert(cSize > 0 && ncSize % cSize == 0);
   assert(nchwSpatialStride >= logicalSpatialSize);
@@ -1463,8 +1456,6 @@ void performAddChannelBiases(
   const int xyEltsPerThread = handle->tuneParams.addChannelBiases.XY_ELTS_PER_THREAD;
   const int ncEltsPerThread = handle->tuneParams.addChannelBiases.NC_ELTS_PER_THREAD;
   const int xyThreads = (xySize + xyEltsPerThread - 1) / xyEltsPerThread;
-  const int channelsPadded = useNHWC ? handle->getNHWCChannelsPadded(cSize) : cSize;
-  const int dispatchNCSize = useNHWC ? batchSize * channelsPadded : ncSize;
   const int ncThreads = (dispatchNCSize + ncEltsPerThread - 1) / ncEltsPerThread;
   vk_shader::push::AddChannelBiasNCHWParams pushConstants = {};
   pushConstants.ncSize = static_cast<uint32_t>(dispatchNCSize);
@@ -1474,10 +1465,10 @@ void performAddChannelBiases(
   pushConstants.logicalSpatialSize = static_cast<uint32_t>(logicalSpatialSize);
 
   const uint32_t globalSizeX = vk_helper::roundUpToMultiple(xyThreads, 32);
-  const uint32_t wgCountX = (globalSizeX + targetPipeline.localSizeX - 1) / targetPipeline.localSizeX;
+  const uint32_t wgCountX = (globalSizeX + targetPipeline->localSizeX - 1) / targetPipeline->localSizeX;
   const uint32_t wgCountY = static_cast<uint32_t>(ncThreads);
   dispatchPipeline(
-    handle, handle->vulkanDevice, &targetPipeline, commandBuffer, descriptorSet,
+    handle, handle->vulkanDevice, targetPipeline, commandBuffer, descriptorSet,
     &pushConstants, sizeof(pushConstants), wgCountX, wgCountY, 1u, "ADD_CHANNEL_BIAS"
   );
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, pipelineInput);
@@ -1527,6 +1518,7 @@ void performGpoolMask(
   ComputeHandleInternal* handle,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
+  const Pipeline* pipeline,
   VulkanBuffer* gpoolConvOut,
   VulkanBuffer* gpoolConcat,
   VulkanBuffer* mask,
@@ -1534,15 +1526,11 @@ void performGpoolMask(
   int batchSize,
   int gpoolChannels,
   int nnXYLen,
+  int spatialSize,
+  int channelsPadded,
   VkResult* result,
   bool begin
 ) {
-  const vk_shader::ComputePipelines* pipelines = handle->pipelines;
-  const bool useNHWC = pipelines->useNHWC;
-  const Pipeline& pipeline = useNHWC
-    ? pipelines->globalPoolingChannelsFp32NHWC
-    : pipelines->globalPoolingChannelsFp32;
-  const int spatialSize = useNHWC ? handle->paddedNNXYLen : nnXYLen;
   assert(commandBuffer != VK_NULL_HANDLE);
   assert(descriptorSet != VK_NULL_HANDLE);
   VkResult res = VK_ERROR_UNKNOWN;
@@ -1563,19 +1551,18 @@ void performGpoolMask(
   pushConstants.nSize = batchSize;
   pushConstants.cSize = gpoolChannels;
   pushConstants.xySize = spatialSize;
-  pushConstants.maskSpatialStride = useNHWC ? handle->paddedNNXYLen : nnXYLen;
-  pushConstants.channelsPadded = useNHWC
-    ? handle->getNHWCChannelsPadded(gpoolChannels) : gpoolChannels;
+  pushConstants.maskSpatialStride = spatialSize;
+  pushConstants.channelsPadded = channelsPadded;
   const uint32_t globalSizeY = static_cast<uint32_t>(
-    vk_helper::roundUpToMultiple(gpoolChannels, pipeline.localSizeY)
+    vk_helper::roundUpToMultiple(gpoolChannels, pipeline->localSizeY)
   );
   const uint32_t globalSizeZ = static_cast<uint32_t>(
-    vk_helper::roundUpToMultiple(batchSize, pipeline.localSizeZ)
+    vk_helper::roundUpToMultiple(batchSize, pipeline->localSizeZ)
   );
   dispatchPipeline(
-    handle, handle->vulkanDevice, &pipeline, commandBuffer, descriptorSet,
-    &pushConstants, sizeof(pushConstants), 1u, globalSizeY / pipeline.localSizeY,
-    globalSizeZ / pipeline.localSizeZ, "GLOBAL_POOLING_CHANNELS_FP32"
+    handle, handle->vulkanDevice, pipeline, commandBuffer, descriptorSet,
+    &pushConstants, sizeof(pushConstants), 1u, globalSizeY / pipeline->localSizeY,
+    globalSizeZ / pipeline->localSizeZ, "GLOBAL_POOLING_CHANNELS_FP32"
   );
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, mask);
@@ -1590,12 +1577,15 @@ void performValueHeadPool(
   ComputeHandleInternal* handle,
   VkCommandBuffer& commandBuffer,
   VkDescriptorSet& descriptorSet,
+  const Pipeline* pipeline,
   VulkanBuffer* gpoolConvOut,
   VulkanBuffer* gpoolConcat,
   VulkanBuffer* maskSum,
   int batchSize,
   int gPoolChannels,
   int nnXYLen,
+  int spatialSize,
+  int channelsPadded,
   bool begin
 ) {
   assert(commandBuffer != VK_NULL_HANDLE);
@@ -1605,18 +1595,6 @@ void performValueHeadPool(
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("Begin command buffer for ValueHeadPool", res);
   }
-  const auto pipelines = handle->pipelines;
-  const bool useNHWC = pipelines->useNHWC;
-  const int spatialSize = useNHWC ? handle->paddedNNXYLen : nnXYLen;
-  const vk_shader::LocalDim dim = {
-    handle->tuneParams.gPool.XYSTRIDE,
-    std::min(handle->tuneParams.gPool.CHANNELSTRIDE, static_cast<int>(vk_helper::powerOf2ify(gPoolChannels))),
-    std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
-  };
-  const auto& pipelineMap = useNHWC
-    ? pipelines->valueHeadPoolingChannelsNHWC
-    : pipelines->valueHeadPoolingChannels;
-  const Pipeline& pipeline = pipelineMap.at(dim);
   VulkanBuffer* pipelineInput = gpoolConvOut;
   const std::vector<WriteDescriptorSet> writeDescriptorSets = {
     vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, pipelineInput),
@@ -1637,16 +1615,15 @@ void performValueHeadPool(
   pushConstants.nSize = batchSize;
   pushConstants.cSize = gPoolChannels;
   pushConstants.xySize = spatialSize;
-  pushConstants.channelsPadded = useNHWC
-    ? handle->getNHWCChannelsPadded(gPoolChannels) : gPoolChannels;
+  pushConstants.channelsPadded = channelsPadded;
   const uint32_t globalSizeY = vk_helper::roundUpToMultiple(gPoolChannels, localSizeY);
   const uint32_t globalSizeZ = vk_helper::roundUpToMultiple(batchSize, localSizeZ);
   dispatchPipeline(
-    handle, handle->vulkanDevice, &pipeline, commandBuffer, descriptorSet,
+    handle, handle->vulkanDevice, pipeline, commandBuffer, descriptorSet,
     &pushConstants, sizeof(pushConstants),
-    (handle->tuneParams.gPool.XYSTRIDE + pipeline.localSizeX - 1) / pipeline.localSizeX,
-    (globalSizeY + pipeline.localSizeY - 1) / pipeline.localSizeY,
-    (globalSizeZ + pipeline.localSizeZ - 1) / pipeline.localSizeZ,
+    (handle->tuneParams.gPool.XYSTRIDE + pipeline->localSizeX - 1) / pipeline->localSizeX,
+    (globalSizeY + pipeline->localSizeY - 1) / pipeline->localSizeY,
+    (globalSizeZ + pipeline->localSizeZ - 1) / pipeline->localSizeZ,
     "VALUE_HEAD_POOLING_CHANNELS_FP32"
   );
   vk_helper::barrierCommandBufferForBuffer(commandBuffer, maskSum);

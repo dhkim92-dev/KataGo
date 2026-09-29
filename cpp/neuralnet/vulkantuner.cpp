@@ -5413,7 +5413,6 @@ namespace {
           pipelines.destroyPipeline(*pipeline);
         previousTargets.clear();
         vector<const Pipeline*> targets;
-        pipelines.useNHWC = usesGenericNHWC(candidate);
         VkResult result = Tuner::create(context, candidate, pipelines, targets);
         if(result != VK_SUCCESS) {
           if(isReferenceCandidate) {
@@ -6478,15 +6477,15 @@ namespace {
     }
     static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
       Pipeline& pipeline = InputTransform
-        ? (pipelines.useNHWC
+        ? (UseNHWC
             ? (ConvSize == 3 ? pipelines.winogradInputTransform3x3NHWC : pipelines.winogradInputTransform5x5NHWC)
             : (ConvSize == 3 ? pipelines.winogradInputTransform3x3 : pipelines.winogradInputTransform5x5))
-        : (pipelines.useNHWC
+        : (UseNHWC
             ? (ConvSize == 3 ? pipelines.winogradOutputTransform3x3NHWC : pipelines.winogradOutputTransform5x5NHWC)
             : (ConvSize == 3 ? pipelines.winogradOutputTransform3x3 : pipelines.winogradOutputTransform5x5));
       VkResult result = InputTransform
-        ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC)
-        : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan, pipelines.useNHWC);
+        ? pipelines.createWinogradInputTransform(pipeline, params(config), ConvSize, config.vulkan, UseNHWC)
+        : pipelines.createWinogradOutputTransform(pipeline, params(config), ConvSize, config.vulkan, UseNHWC);
       if(result == VK_SUCCESS) {
         pipeline.name += UseNHWC ? "_nhwc" : "_nchw";
         pipeline.name += ConvSize == 3 ? "_3x3" : "_5x5";

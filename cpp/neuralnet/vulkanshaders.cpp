@@ -651,7 +651,7 @@ namespace vk_shader {
     }
   }
 
-  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool useNHWCMode, bool print) {
+  VkResult ComputePipelines::createPipelines(const VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print) {
     struct PrintGuard {
       bool& value;
       bool oldValue;
@@ -659,10 +659,6 @@ namespace vk_shader {
     } guard{printPipelineCreation, printPipelineCreation};
     printPipelineCreation = print;
     VkResult result;
-    const bool useGenericNHWC =
-      tuneParams.vulkan.canUseCooperativeMatrix && tuneParams.vulkan.shouldUseCooperativeMatrix &&
-      tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
-      tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute;
     const bool supportsNHWC =
       tuneParams.vulkan.canUseCooperativeMatrix &&
       tuneParams.vulkan.canUseFP16Storage && tuneParams.vulkan.canUseFP16Compute &&
@@ -673,19 +669,11 @@ namespace vk_shader {
     const bool useConvNHWC =
       supportsNHWC &&
       tuneParams.hgemmCooperativeMatrixNHWC.isValid();
-    const bool useTransformerAttentionNHWC =
+    const bool buildTransformerAttentionNHWC =
       qHeadDim > 0 && vHeadDim > 0 &&
-      supportsNHWC &&
-      tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNHWC;
-    const bool useTransformerDualGemmSwiGLUNHWC =
-      tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
       supportsNHWC;
-    if(tuneParams.vulkan.canUseCooperativeMatrix &&
-       tuneParams.vulkan.canUseFP16Storage &&
-       tuneParams.vulkan.canUseFP16Compute &&
-       tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseFP16Compute &&
-       tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW) {
+    if(supportsNHWC && tuneParams.vulkan.canUseCooperativeMatrix &&
+       tuneParams.hgemmCooperativeMatrixNCHW.isValid()) {
       if((result = createHgemmCooperativeMatrixNCHW(
            hgemmCooperativeMatrixNCHW, tuneParams.hgemmCooperativeMatrixNCHW
          )) != VK_SUCCESS)
@@ -694,20 +682,14 @@ namespace vk_shader {
     if(supportsNHWC) {
       if((result = createNchwToNhwc(nchwToNhwc)) != VK_SUCCESS) return result;
       if((result = createNhwcToNchw(nhwcToNchw)) != VK_SUCCESS) return result;
-      if(useConvNHWC || useGenericNHWC || tuneParams.hgemmCooperativeMatrixNHWC.isValid()) {
+      if(useConvNHWC || tuneParams.hgemmCooperativeMatrixNHWC.isValid()) {
         if((result = createNHWCMatrixToNCHW(nhwcMatrixToNchw)) != VK_SUCCESS) return result;
         if(tuneParams.hgemmCooperativeMatrixNHWC.isValid()) {
           if((result = createHgemmCooperativeMatrixNHWC(hgemmCooperativeMatrixNHWC, tuneParams.hgemmCooperativeMatrixNHWC)) != VK_SUCCESS) return result;
         }
       }
     }
-    if(tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU) {
-      if(!tuneParams.vulkan.canUseCooperativeMatrix ||
-         !tuneParams.vulkan.canUseFP16Storage ||
-         !tuneParams.vulkan.canUseFP16Compute ||
-         !tuneParams.vulkan.shouldUseFP16Storage ||
-         !tuneParams.vulkan.shouldUseFP16Compute)
-        return VK_ERROR_INITIALIZATION_FAILED;
+    if(supportsNHWC && tuneParams.transformerDualGemmSwiGLU.isValid()) {
       if((result = createTransformerDualGemmSwiGLU(
            transformerDualGemmSwiGLU, tuneParams.transformerDualGemmSwiGLU
          )) != VK_SUCCESS)
@@ -715,7 +697,7 @@ namespace vk_shader {
     }
     // Tile base conv no longer used.
     // createConv2dFp32();
-    const bool useConvWinogradNHWC = useConvNHWC || useGenericNHWC;
+    const bool useConvWinogradNHWC = supportsNHWC && tuneParams.hgemmCooperativeMatrixNHWC.isValid();
     if((result = createWinogradInputTransform(winogradInputTransform3x3, tuneParams.conv3x3, 3, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     if((result = createWinogradInputTransform(winogradInputTransform5x5, tuneParams.conv5x5, 5, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     if(useConvWinogradNHWC) {
@@ -762,11 +744,11 @@ namespace vk_shader {
     if((result = createAddPointWise(addPointWise, tuneParams.pointwise, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmDirectBatchedTT(xgemmDirectBatchedTT, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if(tuneParams.vulkan.canUseCooperativeMatrix &&
-       tuneParams.vulkan.shouldUseCooperativeMatrix &&
        tuneParams.vulkan.canUseFP16Storage &&
        tuneParams.vulkan.canUseFP16Compute &&
        tuneParams.vulkan.shouldUseFP16Storage &&
-       tuneParams.vulkan.shouldUseFP16Compute) {
+       tuneParams.vulkan.shouldUseFP16Compute &&
+       tuneParams.hgemmCooperativeMatrix.isValid()) {
       if((result = createHgemmCooperativeMatrix(
            hgemmCooperativeMatrix, tuneParams.hgemmCooperativeMatrix
          )) != VK_SUCCESS)
@@ -774,17 +756,6 @@ namespace vk_shader {
     }
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
-    this->useNHWC =
-      useNHWCMode &&
-      tuneParams.vulkan.canUseCooperativeMatrix &&
-      tuneParams.vulkan.canUseFP16Storage &&
-      tuneParams.vulkan.canUseFP16Compute &&
-      tuneParams.vulkan.shouldUseFP16Storage &&
-      tuneParams.vulkan.shouldUseFP16Compute &&
-      (tuneParams.vulkan.shouldUseCooperativeMatrix ||
-       tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNCHW ||
-       tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNHWC ||
-       tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU);
     const bool buildNHWCPipelines = supportsNHWC;
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
@@ -853,10 +824,10 @@ namespace vk_shader {
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
-      if(tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNCHW) {
+      if(tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformerCooperativeMatrixNCHW, qHeadDim, vHeadDim, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
       }
-      if(useTransformerAttentionNHWC) {
+      if(buildTransformerAttentionNHWC) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperativeNHWC, tuneParams.transformerCooperativeMatrixNHWC, qHeadDim, vHeadDim, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
       }
       if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;

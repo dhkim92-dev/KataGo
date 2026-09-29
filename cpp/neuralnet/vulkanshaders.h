@@ -1788,7 +1788,6 @@ struct LocalDimHash {
     VkPipelineCache cache;
     Logger* logger;
     bool printPipelineCreation = false;
-    bool useNHWC = false;
 
     // Shader modules are shared by all specialization variants of a SPIR-V binary.
     VkShaderModule shaderModule_add_channel_bias_nc_identity_fp32 = VK_NULL_HANDLE;
@@ -2020,7 +2019,7 @@ struct LocalDimHash {
 
     ~ComputePipelines();
 
-    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool useNHWC, bool print);
+    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print);
     VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createNchwToNhwc(Pipeline& pipeline);
     VkResult createNhwcToNchw(Pipeline& pipeline);

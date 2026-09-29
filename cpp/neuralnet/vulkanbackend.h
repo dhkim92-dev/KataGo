@@ -98,6 +98,7 @@ struct ComputeHandleInternal {
 
   bool usingFP16Storage = false;
   bool usingFP16Compute = false;
+  bool usingNHWC = false;
 
 #ifdef VK_DUMP_BUFFER
   std::vector<VulkanLayerBufferDumpInfo> layerBufferDumpInfos;
@@ -273,7 +274,7 @@ struct ComputeHandleInternal {
   }
 
   int getNHWCChannelsPadded(int channels, bool forceNHWC = false) const {
-    if(!pipelines->useNHWC && !forceNHWC)
+    if(!usingNHWC && !forceNHWC)
       return channels;
     const auto channelAlignment = [](const auto& params) {
       if(params.NWG <= 0)
