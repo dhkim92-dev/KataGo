@@ -792,8 +792,7 @@ struct BatchNormLayer {
     paddedNNXYLen(handle_->paddedNNXYLen),
     usingNHWC(false)
   {
-    // usingNHWC = handle_->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle_->tuneParams.vulkan.shouldUseNHWC;
     assert(desc->mean.size() == static_cast<size_t>(numChannels));
     assert(desc->variance.size() == static_cast<size_t>(numChannels));
     assert(desc->scale.size() == static_cast<size_t>(numChannels));
@@ -915,29 +914,28 @@ struct BatchNormLayer {
     assert(cb != VK_NULL_HANDLE);
     assert(input != nullptr && mask != nullptr && output != nullptr);
     assert(nhwcSpatialSize >= logicalSpatialSize);
-    if(nhwcInput == nullptr || nhwcOutput == nullptr || nhwcDescriptorSet == VK_NULL_HANDLE)
-      throw StringError("BatchNormLayer " + name + " requires NHWC boundary buffers");
+    if(nhwcDescriptorSet == VK_NULL_HANDLE)
+      throw StringError("BatchNormLayer " + name + " requires an NHWC pipeline");
 
-    VkResult res = VK_ERROR_UNKNOWN;
-    vkcompute::convertNCHWToNHWC(
+    /*vkcompute::convertNCHWToNHWC(
       handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
       nchwToNhwcDescriptorSet, input, nhwcInput, batchSize, numChannels,
       paddedNNXYLen, paddedNNXYLen, logicalSpatialSize, &res
     );
-    CHECK_VK_MSG("Convert BatchNorm input from NCHW to NHWC: " + name, res);
+    CHECK_VK_MSG("Convert BatchNorm input from NCHW to NHWC: " + name, res);*/
     vkcompute::doBatchNormMask(
-      handle, &nhwcPipeline, cb, nhwcDescriptorSet, nhwcInput, nhwcOutput,
+      handle, &nhwcPipeline, cb, nhwcDescriptorSet, input, output,
       mergedScaleBuf, mergedBiasBuf, mask, batchSize, numChannels,
       paddedNNXYLen, paddedNNXYLen,
       handle->getNHWCChannelsPadded(numChannels, true), "BATCHNORM_MASK_NHWC",
       handle->getNHWCChannelsPadded(numChannels, true)
     );
-    vkcompute::convertNHWCToNCHW(
+    /*vkcompute::convertNHWCToNCHW(
       handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
       nhwcToNchwDescriptorSet, nhwcOutput, output, batchSize, numChannels,
       paddedNNXYLen, paddedNNXYLen, logicalSpatialSize, &res
     );
-    CHECK_VK_MSG("Convert BatchNorm output from NHWC to NCHW: " + name, res);
+    CHECK_VK_MSG("Convert BatchNorm output from NHWC to NCHW: " + name, res);*/
   }
 
   /**
@@ -1071,9 +1069,7 @@ struct ConvLayer {
 
     if ((convXSize == 1 && convYSize == 1) ||
         (convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-      // Original selection inherited shouldUseNHWC; restore after ConvLayer
-      // layout testing is complete.
-      // usingNHWC = handle_->tuneParams.vulkan.shouldUseNHWC;
+      usingNHWC = handle_->tuneParams.vulkan.shouldUseNHWC;
       // const auto& hgemmParams = getNhwcConvTuneParams();
       // usingHgemmCooperativeMatrix =
       //   handle_->usingNHWC &&
@@ -1086,7 +1082,7 @@ struct ConvLayer {
       //   handle_->tuneParams.vulkan.shouldUseFP16Compute &&
       //   hgemmParams.isValid();
       // usingNHWC = usingHgemmCooperativeMatrix;
-      usingNHWC = true;
+      // usingNHWC = true;
       usingHgemmCooperativeMatrix =
         usingNHWC &&
         handle_->usingFP16Storage &&
@@ -2239,8 +2235,7 @@ struct TransformerMatMulLayer {
     nhwcToNchwDescriptorSet(VK_NULL_HANDLE),
     filter(nullptr)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     testAssert(desc->weights.size() == static_cast<size_t>(inChannels * outChannels));
     std::vector<float> weights = desc->weights;
     const auto& hgemmParams = handle->tuneParams.hgemmCooperativeMatrixNHWC;
@@ -2322,17 +2317,16 @@ struct TransformerMatMulLayer {
         static_cast<uint32_t>(batchSize), &res
       );
     } else {
-      if(!usingHgemmCooperativeMatrixNHWC || nhwcDescriptorSet == VK_NULL_HANDLE ||
-         nhwcInput == nullptr || nhwcOutput == nullptr)
-        throw StringError("Vulkan TransformerMatMulLayer " + name + " requires NHWC HGEMM and boundary buffers");
-      vkcompute::convertNCHWToNHWC(
+      if(!usingHgemmCooperativeMatrixNHWC || nhwcDescriptorSet == VK_NULL_HANDLE)
+        throw StringError("Vulkan TransformerMatMulLayer " + name + " requires NHWC HGEMM");
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         nchwToNhwcDescriptorSet, input, nhwcInput, batchSize, inChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerMatMul input from NCHW to NHWC: " + name, res);
+      CHECK_VK_MSG("Convert TransformerMatMul input from NCHW to NHWC: " + name, res);*/
       Pipeline pipeline = handle->pipelines->hgemmCooperativeMatrixNHWC;
-      vkcompute::clearBufferForCompute(cb, nhwcOutput);
+      vkcompute::clearBufferForCompute(cb, output);
       const int cRowStride = outputRowStride > 0
         ? outputRowStride
         : handle->getNHWCChannelsPadded(outChannels, true);
@@ -2345,9 +2339,9 @@ struct TransformerMatMulLayer {
         &pipeline,
         cb,
         nhwcDescriptorSet,
-        nhwcInput,
+        input,
         filter,
-        nhwcOutput,
+        output,
         batchSize,
         paddedNNXYLen,
         outChannels,
@@ -2358,12 +2352,12 @@ struct TransformerMatMulLayer {
         &res
       );
       CHECK_VK_MSG("Execute matmul for TransformerMatMulLayer: " + name, res);
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         nhwcToNchwDescriptorSet, nhwcOutput, output, batchSize, outChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerMatMul output from NHWC to NCHW: " + name, res);
+      CHECK_VK_MSG("Convert TransformerMatMul output from NHWC to NCHW: " + name, res);*/
     }
     if(!usingNHWC)
       CHECK_VK_MSG("Execute matmul for TransformerMatMulLayer: " + name, res);
@@ -2400,13 +2394,12 @@ struct TransformerApplyRoPELayer {
     int channels
   ):
     handle(handle),
-    useNHWC(true),
+    useNHWC(false),
     channels(channels),
     channelsPadded(handle->getNHWCChannelsPadded(channels, true)),
     pipeline(handle->pipelines->transformerApplyRoPE)
   {
-    // useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    useNHWC = true;
+    useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     VkResult res = VK_ERROR_UNKNOWN;
     descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
@@ -2457,15 +2450,12 @@ struct TransformerApplyRoPELayer {
     VkResult res = VK_ERROR_UNKNOWN;
     VulkanBuffer* pipelineInput = input;
     if(useNHWC) {
-      if(nhwcScratch == nullptr)
-        throw StringError("Vulkan TransformerApplyRoPELayer requires an NHWC boundary buffer");
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         nchwToNhwcDescriptorSet, input, nhwcScratch, batchSize, channels,
         handle->paddedNNXYLen, handle->paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerApplyRoPE input from NCHW to NHWC", res);
-      pipelineInput = nhwcScratch;
+      CHECK_VK_MSG("Convert TransformerApplyRoPE input from NCHW to NHWC", res);*/
     }
     vkcompute::transformerApplyRoPE(
       handle,
@@ -2493,12 +2483,12 @@ struct TransformerApplyRoPELayer {
     );
     CHECK_VK_MSG("Execute TransformerApplyRoPE", res);
     if(useNHWC) {
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         nhwcToNchwDescriptorSet, pipelineInput, input, batchSize, channels,
         handle->paddedNNXYLen, handle->paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerApplyRoPE output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert TransformerApplyRoPE output from NHWC to NCHW", res);*/
     }
   }
 
@@ -2538,8 +2528,7 @@ struct TransformerAttentionLayer {
     useCooperativeNCHW(handle->tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNCHW),
     useCooperativeNHWC(handle->tuneParams.vulkan.shouldUseTransformerCooperativeMatrixNHWC)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
 
     const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
     params.seqLen = handle->paddedNNXYLen;
@@ -2610,7 +2599,7 @@ struct TransformerAttentionLayer {
     if(usingNHWC && !useCooperative)
       throw StringError("Vulkan TransformerAttentionLayer NHWC requires cooperative attention");
     if(useCooperative) {
-      if(usingNHWC && (nhwcDescriptorSet == VK_NULL_HANDLE || nhwcQKV == nullptr || nhwcOutput == nullptr))
+      if(usingNHWC && nhwcDescriptorSet == VK_NULL_HANDLE)
         throw StringError("Vulkan TransformerAttentionLayer requires NHWC pipeline boundary buffers");
       if(usingNHWC && handle->pipelines->transformerScaleDotProductCooperativeNHWC.pipeline == VK_NULL_HANDLE)
         throw StringError("Vulkan TransformerAttentionLayer NHWC pipeline is unavailable");
@@ -2626,15 +2615,13 @@ struct TransformerAttentionLayer {
       VulkanBuffer* pipelineQKV = packedQKV;
       VulkanBuffer* pipelineOutput = output;
       if(usingNHWC) {
-        vkcompute::convertNCHWToNHWC(
+        /*vkcompute::convertNCHWToNHWC(
           handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
           nchwToNhwcDescriptorSet, const_cast<VulkanBuffer*>(packedQKV), nhwcQKV,
           batchSize, batchStride / seqLen, seqLen, seqLen,
           handle->nnXLen * handle->nnYLen, &res
         );
-        CHECK_VK_MSG("Convert TransformerAttention QKV from NCHW to NHWC", res);
-        pipelineQKV = nhwcQKV;
-        pipelineOutput = nhwcOutput;
+        CHECK_VK_MSG("Convert TransformerAttention QKV from NCHW to NHWC", res);*/
       }
       vkcompute::transformerScaleDotProductCooperative(
         handle,
@@ -2673,12 +2660,12 @@ struct TransformerAttentionLayer {
       CHECK_VK_MSG((usingNHWC ? "Execute cooperative Transformer attention in NHWC" :
                                 "Execute cooperative Transformer attention in NCHW"), res);
       if(usingNHWC) {
-        vkcompute::convertNHWCToNCHW(
+        /*vkcompute::convertNHWCToNCHW(
           handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
           nhwcToNchwDescriptorSet, pipelineOutput, output, batchSize,
           numHeads * vHeadDim, seqLen, seqLen, handle->nnXLen * handle->nnYLen, &res
         );
-        CHECK_VK_MSG("Convert TransformerAttention output from NHWC to NCHW", res);
+        CHECK_VK_MSG("Convert TransformerAttention output from NHWC to NCHW", res);*/
       }
       return;
     }
@@ -2782,8 +2769,7 @@ struct TransformerRMSNormLayer {
     nchwToNhwcDescriptorSet(VK_NULL_HANDLE),
     nhwcToNchwDescriptorSet(VK_NULL_HANDLE)
   {
-    // useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    useNHWC = true;
+    useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     testAssert(desc->weight.size() == numChannels);
     vector<float> weight = desc->weight;
     bool useFP16 = false;
@@ -2834,16 +2820,12 @@ struct TransformerRMSNormLayer {
     VulkanBuffer* pipelineInput = input;
     VulkanBuffer* pipelineOutput = output;
     if(useNHWC) {
-      if(nhwcInput == nullptr || nhwcOutput == nullptr)
-        throw StringError("Vulkan TransformerRMSNormLayer requires NHWC boundary buffers");
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         nchwToNhwcDescriptorSet, input, nhwcInput, batchSize, numChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerRMSNorm input from NCHW to NHWC", res);
-      pipelineInput = nhwcInput;
-      pipelineOutput = nhwcOutput;
+      CHECK_VK_MSG("Convert TransformerRMSNorm input from NCHW to NHWC", res);*/
       vkcompute::clearBufferForCompute(cb, pipelineOutput);
     }
     vkcompute::transformerRMSNorm(
@@ -2869,12 +2851,12 @@ struct TransformerRMSNormLayer {
     );
     CHECK_VK_MSG("Execute TransformerRMSNorm", res);
     if(useNHWC) {
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         nhwcToNchwDescriptorSet, pipelineOutput, output, batchSize, numChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert TransformerRMSNorm output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert TransformerRMSNorm output from NHWC to NCHW", res);*/
     }
 
   }
@@ -2923,8 +2905,7 @@ struct RMSNormLayer {
     actOnesBuf(nullptr),
     actZerosBuf(nullptr)
   {
-    // useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    useNHWC = true;
+    useNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     testAssert(desc->gamma.size() == numChannels);
     testAssert(desc->beta.size() == numChannels);
     vector<float> gamma = desc->gamma;
@@ -3007,21 +2988,17 @@ struct RMSNormLayer {
     VulkanBuffer* nhwcOutput = nullptr
   ) {
     VK_DUMP_LAYER_SCOPE(layerDump, handle, cb, "RMSNormLayer", input, output);
-    if(useNHWC && (nhwcInput == nullptr || nhwcOutput == nullptr))
-      throw StringError("RMSNormLayer requires NHWC boundary buffers");
-    VkResult conversionResult = VK_ERROR_UNKNOWN;
     VulkanBuffer* pipelineInput = input;
     VulkanBuffer* pipelineOutput = output;
-    if(useNHWC) {
+    /*if(useNHWC) {
+      VkResult conversionResult = VK_ERROR_UNKNOWN;
       vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         nchwToNhwcDS, input, nhwcInput, batchSize, numChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &conversionResult
       );
       CHECK_VK_MSG("Convert RMSNorm input from NCHW to NHWC", conversionResult);
-      pipelineInput = nhwcInput;
-      pipelineOutput = nhwcOutput;
-    }
+    }*/
     if(!spatial) {
       const Pipeline& pipeline = useNHWC
         ? handle->pipelines->transformerRmsNormNHWC
@@ -3155,18 +3132,21 @@ struct RMSNormLayer {
       }
     }
 
-    if(useNHWC) {
+    /*if(useNHWC) {
+      VkResult conversionResult = VK_ERROR_UNKNOWN;
       vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         nhwcToNchwDS, pipelineOutput, output, batchSize, numChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &conversionResult
       );
       CHECK_VK_MSG("Convert RMSNorm output from NHWC to NCHW", conversionResult);
-    }
+    }*/
 
     // Apply activation in-place on output if needed
     if(activation == ACTIVATION_SILU) {
-      Pipeline pipeline = handle->pipelines->batchNormMaskSilu;
+      Pipeline pipeline = useNHWC
+        ? handle->pipelines->batchNormMaskSiluNHWC
+        : handle->pipelines->batchNormMaskSilu;
       auto writeDescriptorSets = {
         vk_helper::writeDescriptorSetBuffer(scaleBiasMaskDS, 0, output),
         vk_helper::writeDescriptorSetBuffer(scaleBiasMaskDS, 1, output),
@@ -3180,8 +3160,11 @@ struct RMSNormLayer {
       params.numChannels = numChannels;
       params.nnXYLen = paddedNNXYLen;
       params.maskSpatialStride = paddedNNXYLen;
+      params.channelsPadded = useNHWC
+        ? handle->getNHWCChannelsPadded(numChannels, true)
+        : numChannels;
       uint32_t globalSizeX = static_cast<uint32_t>(vk_helper::powerOf2ify((size_t)paddedNNXYLen));
-      uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify((size_t)numChannels));
+      uint32_t globalSizeY = static_cast<uint32_t>(vk_helper::powerOf2ify(static_cast<size_t>(params.channelsPadded)));
       uint32_t wgCountX = (globalSizeX + pipeline.localSizeX - 1) / pipeline.localSizeX;
       uint32_t wgCountY = (globalSizeY + pipeline.localSizeY - 1) / pipeline.localSizeY;
       uint32_t wgCountZ = 1;
@@ -3385,11 +3368,11 @@ struct TransformerAttentionBlock {
     ropeNumPairs(0),
     attention(new TransformerAttentionLayer(handle, numHeads, numKVHeads))
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    // preLN->useNHWC = usingNHWC;
-    // qRoPE->useNHWC = usingNHWC;
-    // kRoPE->useNHWC = usingNHWC;
-    // attention->usingNHWC = usingNHWC;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
+    preLN->useNHWC = usingNHWC;
+    qRoPE->useNHWC = usingNHWC;
+    kRoPE->useNHWC = usingNHWC;
+    attention->usingNHWC = usingNHWC;
     qkvProjDesc.releaseWeights();
     ropeNumPairs = qHeadDim / 2;
     vector<float> cosTableData;
@@ -3545,7 +3528,8 @@ struct TransformerAttentionBlock {
     );
     // Step 5: Add residual: trunk += trunkScratch
     const int residualSize = checkedTotalElts(
-      batchSize, inChannels, paddedNNXYLen, "Vulkan addPointwise"
+      batchSize, usingNHWC ? handle->getNHWCChannelsPadded(inChannels, true) : inChannels,
+      paddedNNXYLen, "Vulkan addPointwise"
     );
     vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, residualSize, false);
   }
@@ -3612,11 +3596,10 @@ struct TransformerFFNBlock {
     nchwToNhwcDS(VK_NULL_HANDLE),
     nhwcToNchwDS(VK_NULL_HANDLE)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
-    // preLN->useNHWC = usingNHWC;
-    linear1AndGate->usingNHWC = true;
-    linear2->usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
+    preLN->useNHWC = usingNHWC;
+    linear1AndGate->usingNHWC = usingNHWC;
+    linear2->usingNHWC = usingNHWC;
     packedLinearDesc.releaseWeights();
     VkResult res;
     pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
@@ -3694,29 +3677,29 @@ struct TransformerFFNBlock {
       VkResult res;
       SizedBuf<VulkanBuffer*> nhwcInput(scratch->allocator, scratch->getNHWCBufSizeXY(numChannels));
       SizedBuf<VulkanBuffer*> nhwcOutput(scratch->allocator, scratch->getNHWCBufSizeXY(ffnChannels));
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         nchwToNhwcDS, trunkScratch, nhwcInput.buf, batchSize, numChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert fused transformer dual-GEMM input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert fused transformer dual-GEMM input from NCHW to NHWC", res);*/
       vkcompute::doTransformerDualGemmSwiGLU(
         handle,
         handle->vulkanDevice, handle->tuneParams, &handle->pipelines->transformerDualGemmSwiGLU,
         cb, transformerDualGemmSwiGLUDS,
-        nhwcInput.buf, linear1AndGate->filter, nhwcOutput.buf,
+        trunkScratch, linear1AndGate->filter, ffnOutBuf.buf,
         batchSize, paddedNNXYLen, handle->nnXLen * handle->nnYLen,
         ffnChannels, numChannels, packedOutChannels,
         handle->getNHWCChannelsPadded(numChannels, true),
         handle->getNHWCChannelsPadded(ffnChannels, true), &res
       );
       CHECK_VK_MSG("Execute fused transformer dual-GEMM SwiGLU", res);
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         nhwcToNchwDS, nhwcOutput.buf, ffnOutBuf.buf, batchSize, ffnChannels,
         paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
       );
-      CHECK_VK_MSG("Convert fused transformer dual-GEMM output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert fused transformer dual-GEMM output from NHWC to NCHW", res);*/
     }
     else {
       VkResult res = VK_SUCCESS;
@@ -3733,7 +3716,7 @@ struct TransformerFFNBlock {
         linear1NHWCOutput ? linear1NHWCOutput->buf : nullptr
       );
       const int totalSize = checkedTotalElts(batchSize, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
-      const bool useNHWC = true;
+      const bool useNHWC = usingNHWC;
       const int packedInputChannels = useNHWC ? packedOutRowStride : packedOutChannels;
       const int packedInputBatchStride = checkedTotalElts(1, packedInputChannels, paddedNNXYLen, "Vulkan packed FFN");
       const int outputBatchStride = checkedTotalElts(1, ffnChannels, paddedNNXYLen, "Vulkan SwiGLU");
@@ -3744,14 +3727,12 @@ struct TransformerFFNBlock {
       if(useNHWC) {
         swigluNHWCInput = std::make_unique<SizedBuf<VulkanBuffer*>>(scratch->allocator, scratch->getNHWCBufSizeXY(packedOutChannels));
         swigluNHWCOutput = std::make_unique<SizedBuf<VulkanBuffer*>>(scratch->allocator, scratch->getNHWCBufSizeXY(ffnChannels));
-        vkcompute::convertNCHWToNHWC(
+        /*vkcompute::convertNCHWToNHWC(
           handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb, nchwToNhwcDS,
           ffnBuf.buf, swigluNHWCInput->buf, batchSize, packedOutChannels,
           paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
         );
-        CHECK_VK_MSG("Convert Transformer SwiGLU input from NCHW to NHWC", res);
-        swigluInput = swigluNHWCInput->buf;
-        swigluOutput = swigluNHWCOutput->buf;
+        CHECK_VK_MSG("Convert Transformer SwiGLU input from NCHW to NHWC", res);*/
       }
       vkcompute::doSwiGLU(
         handle, handle->vulkanDevice, cb, swigluDS, handle->pipelines->transformerSwiGLU,
@@ -3766,12 +3747,12 @@ struct TransformerFFNBlock {
         useNHWC ? handle->getNHWCChannelsPadded(ffnChannels, true) : ffnChannels
       );
       if(useNHWC) {
-        vkcompute::convertNHWCToNCHW(
+        /*vkcompute::convertNHWCToNCHW(
           handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb, nhwcToNchwDS,
           swigluOutput, ffnOutBuf.buf, batchSize, ffnChannels,
           paddedNNXYLen, paddedNNXYLen, handle->nnXLen * handle->nnYLen, &res
         );
-        CHECK_VK_MSG("Convert Transformer SwiGLU output from NHWC to NCHW", res);
+        CHECK_VK_MSG("Convert Transformer SwiGLU output from NHWC to NCHW", res);*/
       }
     }
     // Step 3: linear2 projection: ffnOutBuf (N, ffnC, H, W) -> trunkScratch (N, C, H, W)
@@ -3789,7 +3770,8 @@ struct TransformerFFNBlock {
 
     // Step 4: Add residual
     const int residualSize = checkedTotalElts(
-      batchSize, numChannels, paddedNNXYLen, "Vulkan addPointWise"
+      batchSize, usingNHWC ? handle->getNHWCChannelsPadded(numChannels, true) : numChannels,
+      paddedNNXYLen, "Vulkan addPointWise"
     );
     vkcompute::performAddPointWise(handle, cb, pointwiseDS, trunk, trunkScratch, residualSize, false);
   }
@@ -3943,8 +3925,7 @@ struct GlobalPoolingResidualBlock {
     gpoolChannels(desc->gpoolConv.outChannels),
     paddedNNXYLen(handle->paddedNNXYLen)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = false;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     preBN = new BatchNormLayer(handle, &desc->preBN, &desc->preActivation, useFP16);
     regularConv = new ConvLayer(handle, &desc->regularConv, nnXLen, nnYLen, useFP16);
     gpoolConv = new ConvLayer(handle, &desc->gpoolConv, nnXLen, nnYLen, useFP16);
@@ -4039,35 +4020,35 @@ struct GlobalPoolingResidualBlock {
     );
     VkResult res;;
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         gpoolNchwToNhwcDS, gpoolOut.buf, convWorkspace, batchSize, gpoolChannels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert residual global-pooling input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert residual global-pooling input from NCHW to NHWC", res);*/
     }
     const Pipeline& gpoolPipeline = usingNHWC
       ? handle->pipelines->globalPoolingChannelsFp32NHWC
       : handle->pipelines->globalPoolingChannelsFp32;
     vkcompute::performGpoolMask(
-      handle, cb, gpoolDS, &gpoolPipeline, usingNHWC ? convWorkspace : gpoolOut.buf,
+      handle, cb, gpoolDS, &gpoolPipeline, gpoolOut.buf,
       gpoolConcat.buf, mask, maskSum, batchSize, gpoolChannels, paddedNNXYLen,
       paddedNNXYLen, usingNHWC ? handle->getNHWCChannelsPadded(gpoolChannels, true) : gpoolChannels,
       &res, false
     );
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         addChannelNchwToNhwcDS, regularOut.buf, convWorkspace, batchSize, regularChannels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert residual channel-bias input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert residual channel-bias input from NCHW to NHWC", res);*/
     }
     vkcompute::performAddChannelBiases(
       handle, cb, addChannelDS,
       usingNHWC ? &handle->pipelines->addChannelBiasNHWC : &handle->pipelines->addChannelBias,
-      usingNHWC ? convWorkspace : regularOut.buf,
+      regularOut.buf,
       gpoolBias.buf, batchSize * regularChannels, regularChannels, paddedNNXYLen,
       paddedNNXYLen,
       usingNHWC ? handle->getNHWCChannelsPadded(regularChannels, true) : regularChannels,
@@ -4075,12 +4056,12 @@ struct GlobalPoolingResidualBlock {
       false
     );
     if(usingNHWC) {
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         addChannelNhwcToNchwDS, convWorkspace, regularOut.buf, batchSize, regularChannels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert residual channel-bias output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert residual channel-bias output from NHWC to NCHW", res);*/
     }
     normActConv2->forward(cb, batchSize, regularOut.buf, regularOut.buf, trunkScratch, mask, convWorkspace, convWorkspace2);
     vkcompute::performAddPointWise(handle, cb, addPointWiseDS, trunk, trunkScratch, checkedTensorElts(handle, batchSize, normActConv2->outChannels, paddedNNXYLen, "Vulkan addPointWise"), false);
@@ -4438,8 +4419,7 @@ struct Trunk {
     paddedNNXYLen(handle->paddedNNXYLen),
     blockStack(handle, desc->blocks, desc->numBlocks, trunkNumChannels, nnXLen_, nnYLen_, useFP16)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,trunkNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,midNumChannels);
     checkBufferSize(maxBatchSize_,nnXLen_,nnYLen_,regularNumChannels);
@@ -4529,19 +4509,18 @@ struct Trunk {
 
     initialConv->forward(cb, batchSize, input, trunk, convWorkspace, convWorkspace2);
     initialMatmul->forward(cb, batchSize, inputGlobal, trunkScratch.buf);
-    VkResult res = VK_SUCCESS;
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         addChannelBiasNchwToNhwcDS, trunk, convWorkspace, batchSize, trunkNumChannels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert trunk channel-bias input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert trunk channel-bias input from NCHW to NHWC", res);*/
     }
     vkcompute::performAddChannelBiases(
       handle, cb, addChannelBiasDS,
       usingNHWC ? &handle->pipelines->addChannelBiasNHWC : &handle->pipelines->addChannelBias,
-      usingNHWC ? convWorkspace : trunk,
+      trunk,
       trunkScratch.buf, batchSize * trunkNumChannels, trunkNumChannels, paddedNNXYLen,
       paddedNNXYLen,
       usingNHWC ? handle->getNHWCChannelsPadded(trunkNumChannels, true) : trunkNumChannels,
@@ -4549,28 +4528,28 @@ struct Trunk {
       false
     );
     if(usingNHWC) {
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         addChannelBiasNhwcToNchwDS, convWorkspace, trunk, batchSize, trunkNumChannels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert trunk channel-bias output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert trunk channel-bias output from NHWC to NCHW", res);*/
     }
     if ( sgfMetadataEncoder != nullptr ) {
       SizedBuf<VulkanBuffer*> sgfEncodedMeta(scratch->allocator, scratch->getBufSizeFloat(sgfMetadataEncoder->matmul3->outChannels));
       sgfMetadataEncoder->forward(cb, batchSize, scratch, inputMeta, sgfEncodedMeta.buf);
       if(usingNHWC) {
-        vkcompute::convertNCHWToNHWC(
+        /*vkcompute::convertNCHWToNHWC(
           handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
           addChannelBiasNchwToNhwcDS, trunk, convWorkspace, batchSize, trunkNumChannels,
           paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
         );
-        CHECK_VK_MSG("Convert metadata channel-bias input from NCHW to NHWC", res);
+        CHECK_VK_MSG("Convert metadata channel-bias input from NCHW to NHWC", res);*/
       }
       vkcompute::performAddChannelBiases(
         handle, cb, addChannelBiasDS2,
         usingNHWC ? &handle->pipelines->addChannelBiasNHWC : &handle->pipelines->addChannelBias,
-        usingNHWC ? convWorkspace : trunk,
+        trunk,
         sgfEncodedMeta.buf, batchSize * trunkNumChannels, trunkNumChannels,
         handle->paddedNNXYLen, paddedNNXYLen,
         usingNHWC ? handle->getNHWCChannelsPadded(trunkNumChannels, true) : trunkNumChannels,
@@ -4578,12 +4557,12 @@ struct Trunk {
         false
       );
       if(usingNHWC) {
-        vkcompute::convertNHWCToNCHW(
+        /*vkcompute::convertNHWCToNCHW(
           handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
           addChannelBiasNhwcToNchwDS, convWorkspace, trunk, batchSize, trunkNumChannels,
           paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
         );
-        CHECK_VK_MSG("Convert metadata channel-bias output from NHWC to NCHW", res);
+        CHECK_VK_MSG("Convert metadata channel-bias output from NHWC to NCHW", res);*/
       }
     } else {
       testAssert(inputMeta == NULL);
@@ -4666,8 +4645,7 @@ struct PolicyHead {
     p2Channels(desc->p2Conv.outChannels),
     paddedNNXYLen(handle->paddedNNXYLen)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     p1Conv = std::make_unique<ConvLayer>(handle, &desc->p1Conv, nnXLen, nnYLen, useFP16);
     g1Conv = std::make_unique<ConvLayer>(handle, &desc->g1Conv, nnXLen, nnYLen, useFP16);
     g1BN = std::make_unique<BatchNormLayer>(handle, &desc->g1BN, &desc->g1Activation, useFP16);
@@ -4752,37 +4730,37 @@ struct PolicyHead {
       cb, batchSize, gpoolOut.buf, mask, gpoolOut.buf,
       convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
     );
-    VkResult res;;
+    VkResult res = VK_SUCCESS;
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         gpoolNchwToNhwcDS, gpoolOut.buf, convWorkspace, batchSize, g1Channels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert policy-head global-pooling input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert policy-head global-pooling input from NCHW to NHWC", res);*/
     }
     const Pipeline& gpoolPipeline = usingNHWC
       ? handle->pipelines->globalPoolingChannelsFp32NHWC
       : handle->pipelines->globalPoolingChannelsFp32;
     vkcompute::performGpoolMask(
-      handle, cb, gpoolDS, &gpoolPipeline, usingNHWC ? convWorkspace : gpoolOut.buf,
+      handle, cb, gpoolDS, &gpoolPipeline, gpoolOut.buf,
       gpoolConcat.buf, mask, maskSum, batchSize, g1Channels, paddedNNXYLen,
       paddedNNXYLen, usingNHWC ? handle->getNHWCChannelsPadded(g1Channels, true) : g1Channels,
       &res, false
     );
     gpoolToBiasMul->forward(cb, batchSize, gpoolConcat.buf, gpoolBias.buf);
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         addChannelBiasNchwToNhwcDS, p1Out.buf, convWorkspace, batchSize, p1Channels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert policy-head channel-bias input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert policy-head channel-bias input from NCHW to NHWC", res);*/
     }
     vkcompute::performAddChannelBiases(
       handle, cb, addChannelBiasDS,
       usingNHWC ? &handle->pipelines->addChannelBiasNHWC : &handle->pipelines->addChannelBias,
-      usingNHWC ? convWorkspace : p1Out.buf,
+      p1Out.buf,
       gpoolBias.buf, p1Channels * batchSize, p1Channels, paddedNNXYLen,
       paddedNNXYLen,
       usingNHWC ? handle->getNHWCChannelsPadded(p1Channels, true) : p1Channels,
@@ -4790,12 +4768,12 @@ struct PolicyHead {
       false
     );
     if(usingNHWC) {
-      vkcompute::convertNHWCToNCHW(
+      /*vkcompute::convertNHWCToNCHW(
         handle, handle->vulkanDevice, &handle->pipelines->nhwcToNchw, cb,
         addChannelBiasNhwcToNchwDS, convWorkspace, p1Out.buf, batchSize, p1Channels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert policy-head channel-bias output from NHWC to NCHW", res);
+      CHECK_VK_MSG("Convert policy-head channel-bias output from NHWC to NCHW", res);*/
     }
     p1BN->forward(
       cb, batchSize, p1Out.buf, mask, p1Out.buf,
@@ -4864,8 +4842,7 @@ struct ValueHead {
     scoreValueChannels(desc->sv3Mul.outChannels),
     ownershipChannels(desc->vOwnershipConv.outChannels)
   {
-    // usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
-    usingNHWC = true;
+    usingNHWC = handle->tuneParams.vulkan.shouldUseNHWC;
     v1Conv = std::make_unique<ConvLayer>(handle, &desc->v1Conv, nnXLen, nnYLen, useFP16);
     v1BN = std::make_unique<BatchNormLayer>(handle, &desc->v1BN, &desc->v1Activation, useFP16);
     v2Mul = std::make_unique<MatmulLayer>(handle, &desc->v2Mul);
@@ -4942,14 +4919,13 @@ struct ValueHead {
       cb, batchSize, v1Out.buf, mask, v1Out.buf,
       convWorkspace, convWorkspace2, nnXLen * nnYLen, nnXLen * nnYLen
     );
-    VkResult res;;
     if(usingNHWC) {
-      vkcompute::convertNCHWToNHWC(
+      /*vkcompute::convertNCHWToNHWC(
         handle, handle->vulkanDevice, &handle->pipelines->nchwToNhwc, cb,
         gpoolNchwToNhwcDS, v1Out.buf, convWorkspace, batchSize, v1Channels,
         paddedNNXYLen, paddedNNXYLen, nnXLen * nnYLen, &res
       );
-      CHECK_VK_MSG("Convert value-head pooling input from NCHW to NHWC", res);
+      CHECK_VK_MSG("Convert value-head pooling input from NCHW to NHWC", res);*/
     }
     const auto& poolingPipelines = usingNHWC
       ? handle->pipelines->valueHeadPoolingChannelsNHWC
@@ -4960,7 +4936,7 @@ struct ValueHead {
       std::min(handle->tuneParams.gPool.BATCHSTRIDE, static_cast<int>(vk_helper::powerOf2ify(batchSize)))
     });
     vkcompute::performValueHeadPool(
-      handle, cb, gpoolDS, &poolingPipeline, usingNHWC ? convWorkspace : v1Out.buf,
+      handle, cb, gpoolDS, &poolingPipeline, v1Out.buf,
       v1Mean.buf, maskSum, batchSize, v1Channels, paddedNNXYLen, paddedNNXYLen,
       usingNHWC ? handle->getNHWCChannelsPadded(v1Channels, true) : v1Channels, false
     );
@@ -5470,11 +5446,8 @@ struct ComputeHandle {
   const bool inputUsingNHWC;
 
   static bool shouldUseNHWC(const ComputeContext* context, int gpuIdx) {
-    // const uint32_t normalizedGpuIdx = gpuIdx < 0 ? 0u : static_cast<uint32_t>(gpuIdx);
-    // return context->tuneParamsPerDev.at(normalizedGpuIdx).vulkan.shouldUseNHWC;
-    (void)context;
-    (void)gpuIdx;
-    return false;
+    const uint32_t normalizedGpuIdx = gpuIdx < 0 ? 0u : static_cast<uint32_t>(gpuIdx);
+    return context->tuneParamsPerDev.at(normalizedGpuIdx).vulkan.shouldUseNHWC;
   }
 
   ComputeHandle(
@@ -6346,32 +6319,23 @@ void NeuralNet::getOutput(
 
 
     // Read back Policy result
-    if ( useFP16Storage ) {
-      if (computeHandle->inputUsingNHWC) {
-        const int storageChannels = handle->getNHWCChannelsPadded(numPolicyChannels);
-        for (int n = 0; n < batchSize; ++n) {
-          for (int xy = 0; xy < nnXYLen; ++xy) {
-            for (int c = 0; c < numPolicyChannels; ++c) {
-              const size_t src = (static_cast<size_t>(n) * paddedNNXYLen + xy) * storageChannels + c;
-              const size_t dst = (static_cast<size_t>(n) * numPolicyChannels + c) * nnXYLen + xy;
-              inputBuffers->policyResults[dst] = inputBuffers->policyResultsHalf[src];
-            }
-          }
-        }
-      } else if ( paddedNNXYLen == nnXYLen ) {
-        size_t totalChannels = static_cast<size_t>(numPolicyChannels) * batchSize;
-        for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
-          inputBuffers->policyResults[i] = inputBuffers->policyResultsHalf[i];
-      } else {
-        size_t totalChannels = static_cast<size_t>(numPolicyChannels) * batchSize;
-        for ( size_t c = 0 ; c < totalChannels ; ++c )
-          for ( int xy = 0 ; xy < nnXYLen ; ++xy )
-            inputBuffers->policyResults[c * nnXYLen + xy] = inputBuffers->policyResultsHalf[c * paddedNNXYLen + xy];
-      }
+    if(computeHandle->inputUsingNHWC) {
+      const int storageChannels = handle->getNHWCChannelsPadded(numPolicyChannels);
+      vkcompute::unpackSpatialOutputFromNHWC(
+        useFP16Storage ? static_cast<const void*>(inputBuffers->policyResultsHalf) : static_cast<const void*>(inputBuffers->policyResults),
+        inputBuffers->policyResults, useFP16Storage, batchSize, numPolicyChannels,
+        storageChannels, paddedNNXYLen, nnXYLen
+      );
     } else {
-      if ( paddedNNXYLen != nnXYLen ) {
+      if(!useFP16Storage && paddedNNXYLen != nnXYLen)
         ASSERT_UNREACHABLE;
-      }
+      vkcompute::unpackSpatialOutputFromNCHW(
+        useFP16Storage ? static_cast<const void*>(inputBuffers->policyResultsHalf) : static_cast<const void*>(inputBuffers->policyResults),
+        inputBuffers->policyResults, useFP16Storage, batchSize, numPolicyChannels,
+        paddedNNXYLen, nnXYLen
+      );
+    }
+    if(!useFP16Storage) {
       #ifdef VK_DUMP_BUFFER
       printHostBuffer(
         "[NeuralNet::getOutput] policy results",
@@ -6435,32 +6399,23 @@ void NeuralNet::getOutput(
     #endif
 
     // Read back Ownership result
-    if ( useFP16Storage ) {
-      if (computeHandle->inputUsingNHWC) {
-        const int storageChannels = handle->getNHWCChannelsPadded(ownershipChannels);
-        for (int n = 0; n < batchSize; ++n) {
-          for (int xy = 0; xy < nnXYLen; ++xy) {
-            for (int c = 0; c < ownershipChannels; ++c) {
-              const size_t src = (static_cast<size_t>(n) * paddedNNXYLen + xy) * storageChannels + c;
-              const size_t dst = (static_cast<size_t>(n) * ownershipChannels + c) * nnXYLen + xy;
-              inputBuffers->ownershipResults[dst] = inputBuffers->ownershipResultsHalf[src];
-            }
-          }
-        }
-      } else if ( paddedNNXYLen == nnXYLen ) {
-        size_t totalChannels = static_cast<size_t>(ownershipChannels) * batchSize;
-        for ( size_t i = 0 ; i < totalChannels * nnXYLen ; ++i )
-          inputBuffers->ownershipResults[i] = inputBuffers->ownershipResultsHalf[i];
-      } else {
-        size_t totalChannels = static_cast<size_t>(ownershipChannels) * batchSize;
-        for ( size_t c = 0 ; c < totalChannels ; ++c )
-          for ( int xy = 0 ; xy < nnXYLen ; ++xy )
-            inputBuffers->ownershipResults[c * nnXYLen + xy] = inputBuffers->ownershipResultsHalf[c * paddedNNXYLen + xy];
-      }
+    if(computeHandle->inputUsingNHWC) {
+      const int storageChannels = handle->getNHWCChannelsPadded(ownershipChannels);
+      vkcompute::unpackSpatialOutputFromNHWC(
+        useFP16Storage ? static_cast<const void*>(inputBuffers->ownershipResultsHalf) : static_cast<const void*>(inputBuffers->ownershipResults),
+        inputBuffers->ownershipResults, useFP16Storage, batchSize, ownershipChannels,
+        storageChannels, paddedNNXYLen, nnXYLen
+      );
     } else {
-      if ( paddedNNXYLen != nnXYLen ) {
+      if(!useFP16Storage && paddedNNXYLen != nnXYLen)
         ASSERT_UNREACHABLE;
-      }
+      vkcompute::unpackSpatialOutputFromNCHW(
+        useFP16Storage ? static_cast<const void*>(inputBuffers->ownershipResultsHalf) : static_cast<const void*>(inputBuffers->ownershipResults),
+        inputBuffers->ownershipResults, useFP16Storage, batchSize, ownershipChannels,
+        paddedNNXYLen, nnXYLen
+      );
+    }
+    if(!useFP16Storage) {
       #ifdef VK_DUMP_BUFFER
       printHostBuffer(
         "[NeuralNet::getOutput] ownership results",
@@ -6853,25 +6808,30 @@ bool NeuralNet::testEvaluateTransformerFFN(
 
   const VulkanDevice* device = handle->vulkanDevice;
   const int paddedSpatialSize = handle->paddedNNXYLen;
-  const size_t nchwStorageElts = static_cast<size_t>(batchSize) * desc->numChannels * paddedSpatialSize;
+  const int inputChannelStride = useNHWC
+    ? handle->getNHWCChannelsPadded(desc->numChannels, true)
+    : desc->numChannels;
+  const size_t inputStorageElts = static_cast<size_t>(batchSize) * inputChannelStride * paddedSpatialSize;
   std::vector<float> paddedInputFP32;
   std::vector<half_t> paddedInputFP16;
   std::vector<float> maskFP32;
   std::vector<half_t> maskFP16;
   const bool storageFP16 = handle->usingFP16Storage;
   if(storageFP16) {
-    paddedInputFP16.assign(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+    paddedInputFP16.assign(inputStorageElts, half_float::half_cast<half_t>(0.0f));
     maskFP16.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
   }
   else {
-    paddedInputFP32.assign(nchwStorageElts, 0.0f);
+    paddedInputFP32.assign(inputStorageElts, 0.0f);
     maskFP32.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, 0.0f);
   }
   for(int n = 0; n < batchSize; ++n) {
     for(int c = 0; c < desc->numChannels; ++c) {
       for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
         const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
-        const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+        const size_t dst = useNHWC
+          ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
+          : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
         if(storageFP16)
           paddedInputFP16[dst] = half_float::half_cast<half_t>(inputNCHW[src]);
         else
@@ -6894,7 +6854,7 @@ bool NeuralNet::testEvaluateTransformerFFN(
     storageFP16 ? static_cast<const void*>(paddedInputFP16.data()) : static_cast<const void*>(paddedInputFP32.data()),
     true, &res
   );
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded NCHW input", res);
+  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded model-layout input", res);
   VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
     device,
     storageFP16 ? byteSizeofVectorContents(maskFP16) : byteSizeofVectorContents(maskFP32),
@@ -6920,31 +6880,35 @@ bool NeuralNet::testEvaluateTransformerFFN(
 
   outputNCHW.resize(expectedInputSize);
   if(storageFP16) {
-    std::vector<half_t> outputPadded(nchwStorageElts);
+    std::vector<half_t> outputPadded(inputStorageElts);
     vk_helper::copyDeviceBufferToHost(
       device, dInput,
-      static_cast<VkDeviceSize>(nchwStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
+      static_cast<VkDeviceSize>(inputStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
     );
     CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
     for(int n = 0; n < batchSize; ++n)
       for(int c = 0; c < desc->numChannels; ++c)
         for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-          const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+          const size_t src = useNHWC
+            ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
+            : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
           const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
           outputNCHW[dst] = static_cast<float>(outputPadded[src]);
         }
   }
   else {
-    std::vector<float> outputPadded(nchwStorageElts);
+    std::vector<float> outputPadded(inputStorageElts);
     vk_helper::copyDeviceBufferToHost(
       device, dInput,
-      static_cast<VkDeviceSize>(nchwStorageElts * sizeof(float)), outputPadded.data(), true, &res
+      static_cast<VkDeviceSize>(inputStorageElts * sizeof(float)), outputPadded.data(), true, &res
     );
     CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
     for(int n = 0; n < batchSize; ++n)
       for(int c = 0; c < desc->numChannels; ++c)
         for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-          const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+          const size_t src = useNHWC
+            ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
+            : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
           const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
           outputNCHW[dst] = outputPadded[src];
         }
@@ -7008,19 +6972,17 @@ bool NeuralNet::testEvaluateBatchNorm(
     const size_t nchwStorageElts = static_cast<size_t>(batchSize) * desc->numChannels * paddedSpatialSize;
     const size_t nhwcStorageElts = static_cast<size_t>(batchSize) * paddedSpatialSize * channelsPadded;
     VulkanBuffer* dInput = nullptr;
-    VulkanBuffer* dNHWCInput = nullptr;
     VulkanBuffer* dMask = nullptr;
-    VulkanBuffer* dNHWCOutput = nullptr;
     VulkanBuffer* dOutput = nullptr;
 
     if(useNHWC) {
-      std::vector<half_t> inputPadded(nchwStorageElts, half_float::half_cast<half_t>(0.0f));
+      std::vector<half_t> inputPadded(nhwcStorageElts, half_float::half_cast<half_t>(0.0f));
       std::vector<half_t> maskPadded(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
       for(int n = 0; n < batchSize; ++n) {
         for(int c = 0; c < desc->numChannels; ++c) {
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
             const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
-            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * paddedSpatialSize + xy) * channelsPadded + c;
             inputPadded[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
           }
         }
@@ -7032,23 +6994,15 @@ bool NeuralNet::testEvaluateBatchNorm(
       dInput = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
       );
-      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NCHW input buffer", res);
-      dNHWCInput = vk_helper::createDeviceBuffer(
-        handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
-      );
-      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create NHWC input buffer", res);
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NHWC input buffer", res);
       dMask = vk_helper::createDeviceBufferWithData(
         handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded mask buffer", res);
-      dNHWCOutput = vk_helper::createDeviceBuffer(
+      dOutput = vk_helper::createDeviceBuffer(
         handle->vulkanDevice, nhwcStorageElts * sizeof(half_t), false, &res
       );
-      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create NHWC output buffer", res);
-      dOutput = vk_helper::createDeviceBuffer(
-        handle->vulkanDevice, nchwStorageElts * sizeof(half_t), false, &res
-      );
-      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NCHW output buffer", res);
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NHWC output buffer", res);
     }
     else {
       std::vector<float> inputPadded(nchwStorageElts, 0.0f);
@@ -7083,7 +7037,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     if(useNHWC) {
       layer->forward(
         commandBuffer, batchSize, dInput, dMask, dOutput,
-        dNHWCInput, dNHWCOutput, paddedSpatialSize, static_cast<int>(logicalSpatialSize)
+        nullptr, nullptr, paddedSpatialSize, static_cast<int>(logicalSpatialSize)
       );
     }
     else
@@ -7094,15 +7048,15 @@ bool NeuralNet::testEvaluateBatchNorm(
 
     outputBuffer.resize(numInputFloats);
     if(useNHWC) {
-      std::vector<half_t> outputPadded(nchwStorageElts);
+      std::vector<half_t> outputPadded(nhwcStorageElts);
       vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nchwStorageElts), outputPadded.data(), true, &res
+        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nhwcStorageElts), outputPadded.data(), true, &res
       );
-      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NCHW output", res);
+      CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NHWC output", res);
       for(int n = 0; n < batchSize; ++n)
         for(int c = 0; c < desc->numChannels; ++c)
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
+            const size_t src = (static_cast<size_t>(n) * paddedSpatialSize + xy) * channelsPadded + c;
             const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
             outputBuffer[dst] = static_cast<float>(outputPadded[src]);
           }
@@ -7122,11 +7076,7 @@ bool NeuralNet::testEvaluateBatchNorm(
           }
     }
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dInput);
-    if(dNHWCInput != nullptr)
-      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNHWCInput);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dMask);
-    if(dNHWCOutput != nullptr)
-      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNHWCOutput);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dOutput);
     dInput = nullptr;
     dMask = nullptr;

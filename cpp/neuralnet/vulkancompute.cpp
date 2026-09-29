@@ -14,6 +14,47 @@ namespace vkcompute {
 
 namespace {
 
+template<typename T>
+void unpackSpatialOutputNCHW(
+  const T* input,
+  float* output,
+  int batchSize,
+  int channels,
+  int spatialStride,
+  int logicalSpatialSize
+) {
+  for(int n = 0; n < batchSize; n++) {
+    for(int c = 0; c < channels; c++) {
+      for(int xy = 0; xy < logicalSpatialSize; xy++) {
+        const size_t src = (static_cast<size_t>(n) * channels + c) * spatialStride + xy;
+        const size_t dst = (static_cast<size_t>(n) * channels + c) * logicalSpatialSize + xy;
+        output[dst] = static_cast<float>(input[src]);
+      }
+    }
+  }
+}
+
+template<typename T>
+void unpackSpatialOutputNHWC(
+  const T* input,
+  float* output,
+  int batchSize,
+  int channels,
+  int channelsPadded,
+  int spatialStride,
+  int logicalSpatialSize
+) {
+  for(int n = 0; n < batchSize; n++) {
+    for(int xy = 0; xy < logicalSpatialSize; xy++) {
+      for(int c = 0; c < channels; c++) {
+        const size_t src = (static_cast<size_t>(n) * spatialStride + xy) * channelsPadded + c;
+        const size_t dst = (static_cast<size_t>(n) * channels + c) * logicalSpatialSize + xy;
+        output[dst] = static_cast<float>(input[src]);
+      }
+    }
+  }
+}
+
 void convertNCHWNHWC(
   ComputeHandleInternal* handle,
   const VulkanDevice* device,
@@ -260,6 +301,43 @@ void convertNHWCToNCHW(
     handle, device, pipeline, cb, descriptorSet, input, output,
     batchSize, channels, spatialSize, spatialStride, logicalSpatialSize, true, result
   );
+}
+
+void unpackSpatialOutputFromNCHW(
+  const void* input,
+  float* output,
+  bool inputIsFP16,
+  int batchSize,
+  int channels,
+  int spatialStride,
+  int logicalSpatialSize
+) {
+  assert(input != nullptr && output != nullptr);
+  assert(batchSize > 0 && channels > 0);
+  assert(spatialStride >= logicalSpatialSize && logicalSpatialSize > 0);
+  if(inputIsFP16)
+    unpackSpatialOutputNCHW(static_cast<const half_t*>(input), output, batchSize, channels, spatialStride, logicalSpatialSize);
+  else
+    unpackSpatialOutputNCHW(static_cast<const float*>(input), output, batchSize, channels, spatialStride, logicalSpatialSize);
+}
+
+void unpackSpatialOutputFromNHWC(
+  const void* input,
+  float* output,
+  bool inputIsFP16,
+  int batchSize,
+  int channels,
+  int channelsPadded,
+  int spatialStride,
+  int logicalSpatialSize
+) {
+  assert(input != nullptr && output != nullptr);
+  assert(batchSize > 0 && channels > 0);
+  assert(channelsPadded >= channels && spatialStride >= logicalSpatialSize && logicalSpatialSize > 0);
+  if(inputIsFP16)
+    unpackSpatialOutputNHWC(static_cast<const half_t*>(input), output, batchSize, channels, channelsPadded, spatialStride, logicalSpatialSize);
+  else
+    unpackSpatialOutputNHWC(static_cast<const float*>(input), output, batchSize, channels, channelsPadded, spatialStride, logicalSpatialSize);
 }
 
 void transformerApplyRoPE(

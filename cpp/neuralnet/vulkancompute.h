@@ -94,6 +94,27 @@ namespace vkcompute {
     VkResult* result
   );
 
+  void unpackSpatialOutputFromNCHW(
+    const void* input,
+    float* output,
+    bool inputIsFP16,
+    int batchSize,
+    int channels,
+    int spatialStride,
+    int logicalSpatialSize
+  );
+
+  void unpackSpatialOutputFromNHWC(
+    const void* input,
+    float* output,
+    bool inputIsFP16,
+    int batchSize,
+    int channels,
+    int channelsPadded,
+    int spatialStride,
+    int logicalSpatialSize
+  );
+
   void transformerApplyRoPE(
     ComputeHandleInternal* handle,
     const VulkanDevice* device,
