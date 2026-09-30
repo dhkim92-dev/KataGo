@@ -1065,6 +1065,7 @@ struct LocalDimHash {
       int COOP_Q_TILES_PER_WORKGROUP = 1;
       int COOP_PV_N_SIZE = 16;
       uint32_t USE_NHWC = 0;
+      int COOP_KV_STAGES = 1;
     };
 
     struct ScaleDotProductNaiveSpec {

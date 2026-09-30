@@ -3464,7 +3464,8 @@ struct TransformerAttentionBlock {
       qkvNHWCOutput ? qkvNHWCOutput->buf : nullptr
     );
 
-    if(useRope) {
+    const bool fuseRopeIntoAttention = useRope && attention->usingNHWC;
+    if(useRope && !fuseRopeIntoAttention) {
       const int ropeBatchStride = packedBatchStride;
       const int qRegionOffset = qRoPE->useNHWC ? 0 : qOffset;
       const int kRegionOffset = qRoPE->useNHWC ? qTotalDim : kOffset;
@@ -3485,8 +3486,8 @@ struct TransformerAttentionBlock {
       );
     }
 
-    // Step 3: Scaled dot product attention. RoPE has already been applied to
-    // the packed Q and K regions, so the attention shader must not rotate them again.
+    // Step 3: Scaled dot product attention. NHWC applies RoPE while loading Q and K;
+    // NCHW receives Q and K already rotated above.
     SizedBuf<VulkanBuffer*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
     std::unique_ptr<SizedBuf<VulkanBuffer*>> attentionNHWCQKV;
     std::unique_ptr<SizedBuf<VulkanBuffer*>> attentionNHWCOutput;
@@ -3509,9 +3510,9 @@ struct TransformerAttentionBlock {
       vOffset,
       qkvLogicalOutChannels,
       packedBatchStride,
-      false,
-      false,
-      0
+      fuseRopeIntoAttention,
+      fuseRopeIntoAttention && learnableRope,
+      fuseRopeIntoAttention ? ropeNumPairs : 0
     );
     vk_helper::barrierCommandBufferForBuffer(cb, attnOut.buf);
     // Step 4: Output projection: attnOut (N, numHeads*vHeadDim, H, W) -> trunkScratch (N, C, H, W)

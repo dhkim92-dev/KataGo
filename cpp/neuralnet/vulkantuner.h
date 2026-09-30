@@ -13,7 +13,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 33;
+  constexpr int TUNER_VERSION = 35;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -100,7 +100,8 @@ namespace VulkanTuner {
     bool full,
     Logger* logger,
     VulkanTuneParams& tunedConfig,
-    bool printOnlyOnImprovement = true);
+    bool printOnlyOnImprovement = true,
+    bool attentionOnly = false);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
   std::string

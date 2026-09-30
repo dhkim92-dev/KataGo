@@ -1841,7 +1841,8 @@ namespace vk_shader {
        !vulkanParams.canUseFP16Storage ||
        !vulkanParams.canUseFP16Compute ||
        !vulkanParams.shouldUseFP16Storage ||
-       !isValidCooperativeMatrixConfig(deviceInfo, tuneParams, qHeadDim, vHeadDim))
+       !isValidCooperativeMatrixConfig(deviceInfo, tuneParams, qHeadDim, vHeadDim) ||
+       (!useNHWC && tuneParams.ATTN_BLOCK_KV != tuneParams.COOP_N_SIZE))
       return VK_ERROR_FEATURE_NOT_PRESENT;
 
     ScaleDotProductCooperativeSpec spec;
@@ -1856,6 +1857,7 @@ namespace vk_shader {
     spec.COOP_Q_TILES_PER_WORKGROUP = tuneParams.COOP_Q_TILES_PER_WORKGROUP;
     spec.COOP_PV_N_SIZE = tuneParams.COOP_PV_N_SIZE;
     spec.USE_NHWC = useNHWC ? 1u : 0u;
+    spec.COOP_KV_STAGES = useNHWC ? tuneParams.ATTN_BLOCK_KV / tuneParams.COOP_N_SIZE : 1;
     SpecializationData specData(spec);
     const std::string suffix = useNHWC ? "_nhwc" : "";
 

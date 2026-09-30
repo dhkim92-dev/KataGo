@@ -507,18 +507,20 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const int kvPad = ((params.COOP_N_SIZE + params.COOP_K_SIZE - 1) / params.COOP_K_SIZE) * params.COOP_K_SIZE;
   const int vHeadDimPad = ((vHeadDim + params.COOP_PV_N_SIZE - 1) / params.COOP_PV_N_SIZE) * params.COOP_PV_N_SIZE;
   const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
+  const int kvStages = params.ATTN_BLOCK_KV / params.COOP_N_SIZE;
   const uint64_t localSize = static_cast<uint64_t>(params.COOP_SUBGROUP_SIZE) * params.COOP_Q_TILES_PER_WORKGROUP;
   const uint64_t sharedBytes =
     6 * 16ull +
     2ull * (
       static_cast<uint64_t>(headDimPad) * qBlock +
-      static_cast<uint64_t>(headDimPad) * params.COOP_N_SIZE +
-      static_cast<uint64_t>(kvPad) * vHeadDimPad
+      static_cast<uint64_t>(headDimPad) * params.ATTN_BLOCK_KV +
+      static_cast<uint64_t>(kvPad) * kvStages * vHeadDimPad +
+      static_cast<uint64_t>(qBlock) * params.COOP_N_SIZE
     ) +
     static_cast<uint64_t>(params.COOP_ACC_TYPE == 32 ? 4 : 2) *
       qBlock * params.COOP_N_SIZE +
     4ull * qBlock * vHeadDimPad +
-    4ull * params.COOP_N_SIZE;
+    4ull * params.ATTN_BLOCK_KV;
   const VkPhysicalDeviceLimits& limits = deviceInfo.properties.limits;
   return localSize <= limits.maxComputeWorkGroupSize[0] &&
          localSize <= limits.maxComputeWorkGroupInvocations &&
@@ -810,7 +812,8 @@ bool TransformerCooperativeMatrixTuneParams::isValid() const {
   if(ATTN_BLOCK_Q > 256 || ATTN_BLOCK_KV > 128)
     return false;
   if(ATTN_BLOCK_Q != COOP_M_SIZE * static_cast<int>(COOP_Q_TILES_PER_WORKGROUP) ||
-     ATTN_BLOCK_KV != COOP_N_SIZE)
+     ATTN_BLOCK_KV < COOP_N_SIZE || ATTN_BLOCK_KV % COOP_N_SIZE != 0 ||
+     ATTN_BLOCK_KV / COOP_N_SIZE > 8)
     return false;
   return true;
 }
@@ -2385,10 +2388,19 @@ namespace {
         (transformerAttentionNHWC
           ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
           : attentionOutputChannels);
+      const size_t attentionInputChannels = static_cast<size_t>(
+        (std::max(1, context.modelInfo.transformerNumHeads) +
+         std::max(1, context.modelInfo.transformerNumKVHeads)) *
+          std::max(1, context.modelInfo.transformerHeadDim) +
+        std::max(1, context.modelInfo.transformerNumKVHeads) *
+          std::max(1, context.modelInfo.transformerVHeadDim)
+      );
+      const size_t attentionInputRowStride = vk_helper::roundUpToMultiple(attentionInputChannels, size_t(4));
       const size_t transformElements = std::max({
         static_cast<size_t>(batchSize) * maxChannelsPadded * xySize,
         paddedTiles * paddedChannels * 36,
-        attentionOutputElements
+        attentionOutputElements,
+        transformerAttentionNHWC ? static_cast<size_t>(batchSize) * xySize * attentionInputRowStride : size_t(0)
       });
       const size_t addChannelBiasesElements = batchSize *
         addChannelBiasesChannelsPadded * addChannelBiasesSpatialSize;
@@ -2450,6 +2462,7 @@ namespace {
         return config.vulkan.shouldUseFP16Storage;
       };
       vector<float> gemmInput, gemmFilter, gemmScale, gemmBias;
+      vector<float> packedAttentionInput;
       bool gemmOutputIsHalf = false;
       vector<vector<float>> hostFloatBuffers;
       hostFloatBuffers.reserve(descriptorCount);
@@ -2667,11 +2680,15 @@ namespace {
                 const size_t channels = binding == 0 ? heads : kvHeads;
                 const size_t dimension = binding == 2 ? vHeadDim : headDim;
                 if(transformerAttentionNHWC) {
-                  const size_t rowChannels = vk_helper::roundUpToMultiple(channels * dimension, size_t(4));
-                  for(size_t n = 0; n < batchSize; n++)
-                    for(size_t xy = 0; xy < xySize; xy++)
-                      for(size_t c = 0; c < channels * dimension; c++)
-                        data[(n * xySize + xy) * rowChannels + c] = static_cast<float>(rand.nextDouble());
+                  if(binding == 0) {
+                    for(size_t n = 0; n < batchSize; n++)
+                      for(size_t xy = 0; xy < xySize; xy++)
+                        for(size_t c = 0; c < attentionInputChannels; c++)
+                          data[(n * xySize + xy) * attentionInputRowStride + c] = static_cast<float>(rand.nextDouble());
+                    packedAttentionInput = data;
+                  }
+                  else
+                    data = packedAttentionInput;
                 }
                 else
                   fillPaddedNCHWInput(data, channels * dimension, rand);
@@ -2923,9 +2940,8 @@ namespace {
             return static_cast<size_t>(learnableRope ? tableHead * ropeNumPairs + pairIdx : pairIdx) *
               xySize + position;
           };
-          const int qChannelsPadded = vk_helper::roundUpToMultipleInt(heads * headDim, 4);
-          const int kChannelsPadded = vk_helper::roundUpToMultipleInt(kvHeads * headDim, 4);
-          const int vChannelsPadded = vk_helper::roundUpToMultipleInt(kvHeads * vHeadDim, 4);
+          const int qChannels = heads * headDim;
+          const int kChannels = kvHeads * headDim;
           const int outputChannelsPadded = vk_helper::roundUpToMultipleInt(heads * vHeadDim, 4);
           vector<float> nhwcOutput;
           if(transformerAttentionNHWC)
@@ -2945,7 +2961,7 @@ namespace {
               vector<float> rotatedQuery(headDim);
               for(int d = 0; d < headDim; d++)
                 rotatedQuery[d] = transformerAttentionNHWC
-                  ? query[(static_cast<size_t>(n) * xySize + qPos) * qChannelsPadded + head * headDim + d]
+                  ? query[(static_cast<size_t>(n) * xySize + qPos) * attentionInputRowStride + head * headDim + d]
                   : query[(bh * headDim + d) * cpuXYSize + qPos];
               if(useRope) {
                 for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
@@ -2967,7 +2983,7 @@ namespace {
                 vector<float> rotatedKey(headDim);
                 for(int d = 0; d < headDim; d++)
                   rotatedKey[d] = transformerAttentionNHWC
-                    ? key[(static_cast<size_t>(n) * xySize + kPos) * kChannelsPadded + kvHead * headDim + d]
+                    ? key[(static_cast<size_t>(n) * xySize + kPos) * attentionInputRowStride + qChannels + kvHead * headDim + d]
                     : key[(kvBase * headDim + d) * cpuXYSize + kPos];
                 if(useRope) {
                   for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
@@ -2990,7 +3006,7 @@ namespace {
                 for(int d = 0; d < vHeadDim; d++)
                   accum[d] = accum[d] * oldWeight + weight * (
                     transformerAttentionNHWC
-                      ? value[(static_cast<size_t>(n) * xySize + kPos) * vChannelsPadded + kvHead * vHeadDim + d]
+                      ? value[(static_cast<size_t>(n) * xySize + kPos) * attentionInputRowStride + qChannels + kChannels + kvHead * vHeadDim + d]
                       : value[(kvBase * vHeadDim + d) * cpuXYSize + kPos]
                   );
                 runningSum = runningSum * oldWeight + weight;
@@ -3166,6 +3182,8 @@ namespace {
         writes.reserve(pipeline->bindingCount);
         for(uint32_t binding = 0; binding < pipeline->bindingCount; binding++) {
           VulkanBuffer* buffer = tuningBuffers[bufferIndex];
+          if(transformerAttentionNHWC && binding < 3)
+            buffer = tuningBuffers[bufferIndex - binding];
           if(plan.kernelName == "spatialRMSNorm") {
             if(pipeline->name.find("transformer_spatial_rms_norm_reduce") == 0 && binding == 0)
               buffer = tuningBuffers[2];
@@ -3387,9 +3405,9 @@ namespace {
             const int qChannels = heads * std::max(1, context.modelInfo.transformerHeadDim);
             const int kChannels = kvHeads * std::max(1, context.modelInfo.transformerHeadDim);
             const int vChannels = kvHeads * std::max(1, context.modelInfo.transformerVHeadDim);
-            const int qRowStride = transformerAttentionNHWC ? vk_helper::roundUpToMultipleInt(qChannels, 4) : qChannels;
-            const int kRowStride = transformerAttentionNHWC ? vk_helper::roundUpToMultipleInt(kChannels, 4) : kChannels;
-            const int vRowStride = transformerAttentionNHWC ? vk_helper::roundUpToMultipleInt(vChannels, 4) : vChannels;
+            const int qRowStride = transformerAttentionNHWC ? static_cast<int>(attentionInputRowStride) : qChannels;
+            const int kRowStride = transformerAttentionNHWC ? static_cast<int>(attentionInputRowStride) : kChannels;
+            const int vRowStride = transformerAttentionNHWC ? static_cast<int>(attentionInputRowStride) : vChannels;
             const int outputChannels = heads * std::max(1, context.modelInfo.transformerVHeadDim);
             const int outputRowStride = transformerAttentionNHWC
               ? vk_helper::roundUpToMultipleInt(outputChannels, 4) : outputChannels;
@@ -3399,8 +3417,8 @@ namespace {
               kvHeads,
               1.0f / sqrtf((float)std::max(1, context.modelInfo.transformerHeadDim)),
               0,
-              0,
-              0,
+              transformerAttentionNHWC ? qChannels : 0,
+              transformerAttentionNHWC ? qChannels + kChannels : 0,
               transformerAttentionNHWC ? qRowStride * pipelineXYSize : qBatchStride,
               transformerAttentionNHWC ? kRowStride * pipelineXYSize : kBatchStride,
               transformerAttentionNHWC ? vRowStride * pipelineXYSize : vBatchStride,
@@ -6653,7 +6671,7 @@ namespace {
       params(result) = params(defaults);
       return result;
     }
-    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool, const TuningContext& context) {
+    static vector<VulkanTuneParams> candidates(const VulkanTuneParams& current, bool full, const TuningContext& context) {
       vector<VulkanTuneParams> configs = {current};
       if(context.device == nullptr || context.modelInfo.transformerHeadDim <= 0 || context.modelInfo.transformerVHeadDim <= 0)
         return configs;
@@ -6671,18 +6689,22 @@ namespace {
           for(int qTiles: {1, 2, 4, 8, 16}) {
             if(shape.MSize * qTiles > 256)
               break;
-            VulkanTuneParams candidate = current;
-            TransformerCooperativeMatrixTuneParams& tuneParams = params(candidate);
-            tuneParams.ATTN_BLOCK_Q = shape.MSize * qTiles;
-            tuneParams.ATTN_BLOCK_KV = shape.NSize;
-            tuneParams.COOP_ACC_TYPE = shape.accType;
-            tuneParams.COOP_M_SIZE = shape.MSize;
-            tuneParams.COOP_N_SIZE = shape.NSize;
-            tuneParams.COOP_K_SIZE = shape.KSize;
-            tuneParams.COOP_SUBGROUP_SIZE = shape.subgroupSize;
-            tuneParams.COOP_Q_TILES_PER_WORKGROUP = qTiles;
-            tuneParams.COOP_PV_N_SIZE = pvNSize;
-            configs.push_back(candidate);
+            for(int kvStages: (NHWC ? (full ? vector<int>{1, 2, 4, 8} : vector<int>{1, 2, 4}) : vector<int>{1})) {
+              if(shape.NSize * kvStages > 128)
+                continue;
+              VulkanTuneParams candidate = current;
+              TransformerCooperativeMatrixTuneParams& tuneParams = params(candidate);
+              tuneParams.ATTN_BLOCK_Q = shape.MSize * qTiles;
+              tuneParams.ATTN_BLOCK_KV = shape.NSize * kvStages;
+              tuneParams.COOP_ACC_TYPE = shape.accType;
+              tuneParams.COOP_M_SIZE = shape.MSize;
+              tuneParams.COOP_N_SIZE = shape.NSize;
+              tuneParams.COOP_K_SIZE = shape.KSize;
+              tuneParams.COOP_SUBGROUP_SIZE = shape.subgroupSize;
+              tuneParams.COOP_Q_TILES_PER_WORKGROUP = qTiles;
+              tuneParams.COOP_PV_N_SIZE = pvNSize;
+              configs.push_back(candidate);
+            }
           }
         }
       }
@@ -6750,9 +6772,11 @@ namespace {
     const double callsPerSecond = runTuner<TransformerScaleDotProductCooperativeMatrixTuner<NHWC>>(
       context, cooperativeConfig
     );
-    const bool selected = VulkanTuner::isFastEnough(
-      callsPerSecond, scalarCallsPerSecond, VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
-    );
+    const bool selected = NHWC
+      ? isfinite(callsPerSecond) && callsPerSecond > 0.0
+      : VulkanTuner::isFastEnough(
+          callsPerSecond, scalarCallsPerSecond, VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
+        );
     if(isfinite(callsPerSecond) && callsPerSecond > 0.0)
       TransformerScaleDotProductCooperativeMatrixTuner<NHWC>::params(config) =
         TransformerScaleDotProductCooperativeMatrixTuner<NHWC>::params(cooperativeConfig);
@@ -6766,7 +6790,8 @@ namespace {
         " comparison: scalar=" + Global::strprintf("%.6g", scalarCallsPerSecond) +
         " calls/s, cooperative=" + Global::strprintf("%.6g", callsPerSecond) +
         " calls/s, required_ratio=" +
-        Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO) +
+        (NHWC ? "n/a" : Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO)) +
+        ", selection_policy=" + (NHWC ? "valid_nhwc_candidate" : "scalar_ratio") +
         ", selected=" + (selected ? "true" : "false")
       );
     return callsPerSecond;
@@ -7092,6 +7117,107 @@ namespace {
     }
   }
 
+  struct TransformerDualGemmSwiGLUTuner {
+    static string name() { return "transformerDualGemmSwiGLU"; }
+    static bool isValid(const VulkanTuneParams& config) {
+      return config.transformerDualGemmSwiGLU.isValid();
+    }
+    static VulkanTuneParams reference(
+      const VulkanTuneParams& current, const VulkanTuneParams& defaults
+    ) {
+      VulkanTuneParams result = current;
+      result.transformerDualGemmSwiGLU = defaults.transformerDualGemmSwiGLU;
+      result.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+      return result;
+    }
+    static vector<VulkanTuneParams> candidates(
+      const VulkanTuneParams& current, bool full, const TuningContext& context
+    ) {
+      vector<VulkanTuneParams> configs;
+      const int cSize = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
+      const int ffnSize = context.modelInfo.transformerFFNChannels;
+      if(cSize <= 0 || ffnSize <= 0 || ffnSize > numeric_limits<int>::max() / 2 ||
+         context.cooperativeMatrixTuneShapes.empty())
+        return configs;
+
+      const vector<int> scales = full ? vector<int>{1, 2, 4} : vector<int>{1, 2};
+      for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
+        // Keep all supported accumulator/property shapes in both search modes.
+        vector<TransformerDualGemmSwiGLUTuneParams> geometry;
+        TransformerDualGemmSwiGLUTuneParams base;
+        base.accType = shape.accType;
+        base.MWARP = shape.MSize;
+        base.NWARP = shape.NSize;
+        base.KDIM = shape.KSize;
+        base.subgroupSize = shape.subgroupSize;
+        base.MWAVE = shape.MSize;
+        base.NWAVE = shape.NSize;
+        base.MWG = shape.MSize;
+        base.NWG = shape.NSize;
+        base.KWG = shape.KSize;
+        base.VWM = 1;
+        base.VWN = 1;
+        geometry.push_back(base);
+        for(int scale: scales) {
+          if(scale == 1)
+            continue;
+          TransformerDualGemmSwiGLUTuneParams mVariant = base;
+          if(checkedMultiply(shape.MSize, scale, mVariant.MWG)) {
+            mVariant.MWAVE = mVariant.MWG;
+            geometry.push_back(mVariant);
+          }
+          TransformerDualGemmSwiGLUTuneParams nVariant = base;
+          if(checkedMultiply(shape.NSize, scale, nVariant.NWG)) {
+            nVariant.NWAVE = nVariant.NWG;
+            geometry.push_back(nVariant);
+          }
+          TransformerDualGemmSwiGLUTuneParams kVariant = base;
+          if(checkedMultiply(shape.KSize, scale, kVariant.KWG))
+            geometry.push_back(kVariant);
+        }
+        for(const TransformerDualGemmSwiGLUTuneParams& geometryCandidate: geometry) {
+          for(int sb: {0, 1}) {
+            TransformerDualGemmSwiGLUTuneParams candidate = geometryCandidate;
+            candidate.SB = sb;
+            if(!candidate.isValid() || cSize % candidate.KWG != 0 || ffnSize % candidate.NWG != 0 ||
+               !isValidCooperativeMatrixTuneParams(context, candidate))
+              continue;
+            const bool duplicate = any_of(configs.begin(), configs.end(), [&](const VulkanTuneParams& existing) {
+              const auto& previous = existing.transformerDualGemmSwiGLU;
+              return previous.MWARP == candidate.MWARP && previous.NWARP == candidate.NWARP &&
+                     previous.KDIM == candidate.KDIM && previous.subgroupSize == candidate.subgroupSize &&
+                     previous.MWG == candidate.MWG && previous.NWG == candidate.NWG &&
+                     previous.KWG == candidate.KWG && previous.MWAVE == candidate.MWAVE &&
+                     previous.NWAVE == candidate.NWAVE && previous.accType == candidate.accType &&
+                     previous.SB == candidate.SB && previous.VWM == candidate.VWM &&
+                     previous.VWN == candidate.VWN;
+            });
+            if(duplicate)
+              continue;
+            VulkanTuneParams candidateConfig = current;
+            candidateConfig.vulkan.shouldUseFP16Storage = true;
+            candidateConfig.vulkan.shouldUseFP16Compute = true;
+            candidateConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+            candidateConfig.transformerDualGemmSwiGLU = candidate;
+            configs.push_back(candidateConfig);
+          }
+        }
+      }
+      return configs;
+    }
+    static VkResult create(
+      const TuningContext&, const VulkanTuneParams& config,
+      vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets
+    ) {
+      VkResult result = pipelines.createTransformerDualGemmSwiGLU(
+        pipelines.transformerDualGemmSwiGLU, config.transformerDualGemmSwiGLU
+      );
+      if(result == VK_SUCCESS)
+        targets.push_back(&pipelines.transformerDualGemmSwiGLU);
+      return result;
+    }
+  };
+
   bool tuneTransformerDualGemmSwiGLU(
     const TuningContext& context,
     VulkanTuneParams& config
@@ -7181,65 +7307,9 @@ namespace {
       return false;
     }
 
-    vector<TransformerDualGemmSwiGLUTuneParams> candidates;
-    const vector<int> scales = context.full ? vector<int>{1, 2, 4} : vector<int>{1, 2};
-    for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
-      // cooperativeMatrixTuneShapes contains every device-supported FP16 A/B
-      // tuple, for both 16-bit and 32-bit accumulators. Do not cap this list
-      // in quick mode; only the tile-size variants are reduced there.
-      vector<TransformerDualGemmSwiGLUTuneParams> geometry;
-      TransformerDualGemmSwiGLUTuneParams base;
-      base.accType = shape.accType;
-      base.MWARP = shape.MSize;
-      base.NWARP = shape.NSize;
-      base.KDIM = shape.KSize;
-      base.subgroupSize = shape.subgroupSize;
-      base.MWAVE = shape.MSize;
-      base.NWAVE = shape.NSize;
-      base.MWG = shape.MSize;
-      base.NWG = shape.NSize;
-      base.KWG = shape.KSize;
-      base.VWM = 1;
-      base.VWN = 1;
-      geometry.push_back(base);
-      for(int scale: scales) {
-        if(scale == 1)
-          continue;
-        TransformerDualGemmSwiGLUTuneParams mVariant = base;
-        if(checkedMultiply(shape.MSize, scale, mVariant.MWG)) {
-          mVariant.MWAVE = mVariant.MWG;
-          geometry.push_back(mVariant);
-        }
-        TransformerDualGemmSwiGLUTuneParams nVariant = base;
-        if(checkedMultiply(shape.NSize, scale, nVariant.NWG)) {
-          nVariant.NWAVE = nVariant.NWG;
-          geometry.push_back(nVariant);
-        }
-        TransformerDualGemmSwiGLUTuneParams kVariant = base;
-        if(checkedMultiply(shape.KSize, scale, kVariant.KWG))
-          geometry.push_back(kVariant);
-      }
-      for(const TransformerDualGemmSwiGLUTuneParams& geometryCandidate: geometry) {
-        for(int sb: {0, 1}) {
-          TransformerDualGemmSwiGLUTuneParams candidate = geometryCandidate;
-          candidate.SB = sb;
-          if(candidate.isValid() && cSize % candidate.KWG == 0 && ffnSize % candidate.NWG == 0 &&
-             isValidCooperativeMatrixTuneParams(context, candidate)) {
-            const bool duplicate = any_of(candidates.begin(), candidates.end(), [&](const auto& existing) {
-              return existing.MWARP == candidate.MWARP && existing.NWARP == candidate.NWARP &&
-                     existing.KDIM == candidate.KDIM && existing.subgroupSize == candidate.subgroupSize &&
-                     existing.MWG == candidate.MWG && existing.NWG == candidate.NWG &&
-                     existing.KWG == candidate.KWG && existing.MWAVE == candidate.MWAVE &&
-                     existing.NWAVE == candidate.NWAVE && existing.accType == candidate.accType &&
-                     existing.SB == candidate.SB && existing.VWM == candidate.VWM &&
-                     existing.VWN == candidate.VWN;
-            });
-            if(!duplicate)
-              candidates.push_back(candidate);
-          }
-        }
-      }
-    }
+    vector<VulkanTuneParams> candidates = TransformerDualGemmSwiGLUTuner::candidates(
+      config, context.full, context
+    );
     if(candidates.empty()) {
       if(context.logger != nullptr)
         context.logger->write(
@@ -7269,15 +7339,12 @@ namespace {
     }
     size_t candidateIndex = 0;
     bool printedReferenceHeartbeat = false;
-    for(const TransformerDualGemmSwiGLUTuneParams& params: candidates) {
+    for(const VulkanTuneParams& candidateConfig: candidates) {
       candidateIndex++;
-      VulkanTuneParams candidateConfig = config;
-      candidateConfig.vulkan.shouldUseFP16Storage = true;
-      candidateConfig.vulkan.shouldUseFP16Compute = true;
-      candidateConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
-      candidateConfig.transformerDualGemmSwiGLU = params;
-      result = candidatePipelines.createTransformerDualGemmSwiGLU(
-        candidatePipelines.transformerDualGemmSwiGLU, params
+      const TransformerDualGemmSwiGLUTuneParams& params = candidateConfig.transformerDualGemmSwiGLU;
+      vector<const Pipeline*> candidateTargets;
+      result = TransformerDualGemmSwiGLUTuner::create(
+        context, candidateConfig, candidatePipelines, candidateTargets
       );
       if(result != VK_SUCCESS) {
         if(!context.printOnlyOnImprovement && context.logger != nullptr)
@@ -7304,7 +7371,8 @@ namespace {
         legacyNCHW, hwSize, packedOCSize,
         fusedCallsPerSecond, legacyCallsPerSecond, errorProp, readback, error
       );
-      candidatePipelines.destroyPipeline(candidatePipelines.transformerDualGemmSwiGLU);
+      for(const Pipeline* pipeline: candidateTargets)
+        candidatePipelines.destroyPipeline(*const_cast<Pipeline*>(pipeline));
       if(!measured || !isfinite(fusedCallsPerSecond) || fusedCallsPerSecond <= 0.0 ||
          !isfinite(legacyCallsPerSecond) || legacyCallsPerSecond <= 0.0) {
         if(!context.printOnlyOnImprovement && context.logger != nullptr)
@@ -7392,13 +7460,16 @@ void VulkanTuner::tune(
   bool full,
   Logger* logger,
   VulkanTuneParams& tunedConfig,
-  bool printOnlyOnImprovement
+  bool printOnlyOnImprovement,
+  bool attentionOnly
 ) {
   const auto hostStart = std::chrono::steady_clock::now();
   if(device == nullptr)
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
+  if(attentionOnly && (modelInfo.transformerHeadDim <= 0 || modelInfo.transformerVHeadDim <= 0))
+    throw StringError("Vulkan attention-only tuning requires a transformer model");
   const VulkanParams hardwareParams = VulkanTuner::getHardwareParams(device->info);
   tunedConfig.vulkan.canUseFP16Storage = hardwareParams.canUseFP16Storage;
   tunedConfig.vulkan.canUseFP16Compute = hardwareParams.canUseFP16Compute;
@@ -7418,6 +7489,14 @@ void VulkanTuner::tune(
       ", subgroup=" + string(tunedConfig.vulkan.canUseSubgroup ? "true" : "false") +
       ", cooperativeMatrix=" + string(tunedConfig.vulkan.canUseCooperativeMatrix ? "true" : "false")
     );
+  }
+  if(attentionOnly) {
+    tunedConfig.vulkan.shouldUseFP16Storage = tunedConfig.vulkan.canUseFP16Storage;
+    tunedConfig.vulkan.shouldUseFP16Compute = tunedConfig.vulkan.canUseFP16Compute;
+    const double scalarCallsPerSecond = runTuner<TransformerScaleDotProductTuner>(context, tunedConfig);
+    tuneTransformerCooperativeMatrix<true>(context, tunedConfig, scalarCallsPerSecond);
+    dummyThread.stopAndJoin();
+    return;
   }
   const bool canUseHgemmCooperativeMatrix =
     tunedConfig.vulkan.canUseCooperativeMatrix &&
