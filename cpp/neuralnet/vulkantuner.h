@@ -13,7 +13,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 35;
+  constexpr int TUNER_VERSION = 36;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -53,6 +53,13 @@ namespace VulkanTuner {
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
 
   struct ModelInfoForTuning {
+    struct TransformerProjection {
+      int inChannels;
+      int outChannels;
+      bool packedOutput;
+      bool fusedFFNInput = false;
+    };
+    std::vector<TransformerProjection> transformerProjections;
     int numInputChannels = 0;
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;
@@ -101,7 +108,10 @@ namespace VulkanTuner {
     Logger* logger,
     VulkanTuneParams& tunedConfig,
     bool printOnlyOnImprovement = true,
-    bool attentionOnly = false);
+    bool attentionOnly = false,
+    bool transformerGemmOnly = false,
+    bool transformerFFNOnly = false,
+    bool transformerResidualOnly = false);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
   std::string

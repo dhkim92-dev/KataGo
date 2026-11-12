@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <fstream>
 #include <cstdint>
 #include <iomanip>
@@ -31,6 +32,10 @@ using half_t = half_float::half;
 
 // Vulkan shader benchmark timestamps are enabled independently of API debugging.
 #ifdef VK_BENCHMARK
+#define VK_BENCHMARK_LAYER(benchmarkHandle, layerName) \
+  VulkanBenchmarkLayerScope benchmarkLayerScope( \
+    benchmarkHandle->benchmarkEnabled ? &benchmarkHandle->benchmarkLayer : nullptr, \
+    benchmarkHandle->benchmarkEnabled ? (layerName) : std::string())
 #define VK_BENCHMARK_START(benchmarkHandle, shaderName, cb) \
   const bool benchmarkDispatchEnabled = \
     benchmarkHandle != nullptr && benchmarkHandle->benchmarkEnabled; \
@@ -45,11 +50,12 @@ using half_t = half_float::half;
 #define VK_BENCHMARK_END(benchmarkHandle, shaderName, cb)  \
   if(benchmarkDispatchEnabled) { \
     vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, benchmarkHandle->queryPool, benchmarkEndQueryIdx); \
-    benchmarkHandle->benchmarkDispatchInfos.push_back( { shaderName, benchmarkBeginQueryIdx, benchmarkEndQueryIdx } ); \
+    benchmarkHandle->benchmarkDispatchInfos.push_back( { benchmarkHandle->benchmarkLayer, shaderName, benchmarkBeginQueryIdx, benchmarkEndQueryIdx } ); \
   }
 #else 
 #define VK_BENCHMARK_START(benchmarkHandle, shaderName, cb)
 #define VK_BENCHMARK_END(benchmarkHandle, shaderName, cb)
+#define VK_BENCHMARK_LAYER(benchmarkHandle, layerName)
 #endif
 #define FLOAT16_SIZE_IN_BYTES 2
 
@@ -64,6 +70,7 @@ static size_t byteSizeofVectorContents(const typename std::vector<T>& vec) {
 }
 
 struct VulkanBenchmarkDispatchInfo {
+  std::string layerName;
   std::string shaderName;
   uint64_t startQueryIdx;
   uint64_t endQueryIdx;
@@ -110,7 +117,64 @@ struct ComputeHandleInternal {
   uint64_t queryIdx = 0;
   VkQueryPool queryPool = VK_NULL_HANDLE;
   std::vector<VulkanBenchmarkDispatchInfo> benchmarkDispatchInfos;
-  std::unordered_map<std::string, VulkanBenchmarkExecutionInfo> benchmarkInfos;
+  std::string benchmarkLayer;
+  using BenchmarkKey = std::pair<std::string, std::string>;
+  using BenchmarkInfos = std::map<BenchmarkKey, VulkanBenchmarkExecutionInfo>;
+  BenchmarkInfos benchmarkInfos;
+
+  static void writeVulkanBenchmarkCSV(std::ostream& output, const BenchmarkInfos& infos, uint64_t visitCount) {
+    uint64_t totalExecutionTimeNs = 0;
+    std::map<std::string, uint64_t> layerTimes;
+    for(const auto& pair : infos) {
+      totalExecutionTimeNs += pair.second.totalExecutionTimeNs;
+      layerTimes[pair.first.first] += pair.second.totalExecutionTimeNs;
+    }
+    std::vector<std::pair<BenchmarkKey, VulkanBenchmarkExecutionInfo>> rows(infos.begin(), infos.end());
+    std::sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+      const uint64_t aLayerTime = layerTimes.at(a.first.first);
+      const uint64_t bLayerTime = layerTimes.at(b.first.first);
+      if(aLayerTime != bLayerTime)
+        return aLayerTime > bLayerTime;
+      if(a.first.first != b.first.first)
+        return a.first.first < b.first.first;
+      if(a.second.totalExecutionTimeNs != b.second.totalExecutionTimeNs)
+        return a.second.totalExecutionTimeNs > b.second.totalExecutionTimeNs;
+      return a.first.second < b.first.second;
+    });
+    const auto writeName = [&](const std::string& name) {
+      output << '"';
+      for(char c : name) {
+        if(c == '"')
+          output << '"';
+        output << c;
+      }
+      output << '"';
+    };
+    output << "layer,pipeline,average_ms,calls_per_sec,calls_per_visit,total_ms,calls,execution_percent,layer_total_ms,layer_execution_percent,execution_percent_within_layer\n";
+    output << std::fixed << std::setprecision(6);
+    for(const auto& pair : rows) {
+      const auto& info = pair.second;
+      const uint64_t layerTime = layerTimes.at(pair.first.first);
+      const double totalTimeSec = static_cast<double>(info.totalExecutionTimeNs) / 1e9;
+      const double avgTimeMs = info.callCount > 0
+        ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(info.callCount) / 1e6 : 0.0;
+      const double callsPerSec = totalTimeSec > 0.0 ? static_cast<double>(info.callCount) / totalTimeSec : 0.0;
+      const double callsPerVisit = static_cast<double>(info.callCount) / static_cast<double>(visitCount);
+      const double executionPercent = totalExecutionTimeNs > 0
+        ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(totalExecutionTimeNs) * 100.0 : 0.0;
+      const double layerPercent = totalExecutionTimeNs > 0
+        ? static_cast<double>(layerTime) / static_cast<double>(totalExecutionTimeNs) * 100.0 : 0.0;
+      const double withinLayerPercent = layerTime > 0
+        ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(layerTime) * 100.0 : 0.0;
+      writeName(pair.first.first);
+      output << ',';
+      writeName(pair.first.second);
+      output << ',' << avgTimeMs << ',' << callsPerSec << ',' << callsPerVisit << ','
+             << static_cast<double>(info.totalExecutionTimeNs) / 1e6 << ',' << info.callCount << ','
+             << executionPercent << ',' << static_cast<double>(layerTime) / 1e6 << ','
+             << layerPercent << ',' << withinLayerPercent << '\n';
+    }
+  }
 
   void dumpVulkanBenchmark(const std::string& modelName) {
     if(!benchmarkEnabled)
@@ -126,7 +190,9 @@ struct ComputeHandleInternal {
 
     // Query results for each dispatch and accumulate into benchmarkInfos.
     for (const auto& dispatchInfo : benchmarkDispatchInfos) {
-      const std::string& name = dispatchInfo.shaderName;
+      const BenchmarkKey name = {
+        dispatchInfo.layerName.empty() ? "Unscoped" : dispatchInfo.layerName, dispatchInfo.shaderName
+      };
       uint64_t startIdx = dispatchInfo.startQueryIdx;
       uint64_t endIdx = dispatchInfo.endQueryIdx;
 
@@ -192,36 +258,7 @@ struct ComputeHandleInternal {
       if(!output)
         throw StringError("Could not open Vulkan benchmark output file: " + outputPath);
 
-      uint64_t totalExecutionTimeNs = 0;
-      for (const auto& pair : benchmarkInfos)
-        totalExecutionTimeNs += pair.second.totalExecutionTimeNs;
-
-      output << "pipeline,average_ms,calls_per_sec,calls_per_visit,total_ms,calls,execution_percent\n";
-      output << std::fixed << std::setprecision(6);
-      for (const auto& pair : benchmarkInfos) {
-        const std::string& name = pair.first;
-        const VulkanBenchmarkExecutionInfo& info = pair.second;
-
-        double totalTimeSec = static_cast<double>(info.totalExecutionTimeNs) / 1e9;
-        double avgTimeMs = info.callCount > 0
-          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(info.callCount) / 1e6
-          : 0.0;
-        double callsPerSec = totalTimeSec > 0.0
-          ? static_cast<double>(info.callCount) / totalTimeSec
-          : 0.0;
-        double callsPerVisit = static_cast<double>(info.callCount) / static_cast<double>(benchmarkVisitCount);
-        double executionPercent = totalExecutionTimeNs > 0
-          ? static_cast<double>(info.totalExecutionTimeNs) / static_cast<double>(totalExecutionTimeNs) * 100.0
-          : 0.0;
-
-        output << name << ","
-               << avgTimeMs << ","
-               << callsPerSec << ","
-               << callsPerVisit << ","
-               << static_cast<double>(info.totalExecutionTimeNs) / 1e6 << ","
-               << info.callCount << ","
-               << executionPercent << "\n";
-      }
+      writeVulkanBenchmarkCSV(output, benchmarkInfos, benchmarkVisitCount);
       output.flush();
       if(!output)
         throw StringError("Could not write Vulkan benchmark output file: " + outputPath);
@@ -293,6 +330,29 @@ struct ComputeHandleInternal {
   }
 };
 
+
+#ifdef VK_BENCHMARK
+struct VulkanBenchmarkLayerScope {
+  std::string* currentLayer;
+  std::string previousLayer;
+
+  VulkanBenchmarkLayerScope(std::string* currentLayer_, const std::string& layerName)
+    : currentLayer(currentLayer_) {
+    if(currentLayer != nullptr) {
+      previousLayer = std::move(*currentLayer);
+      *currentLayer = previousLayer.empty() ? layerName : previousLayer + "/" + layerName;
+    }
+  }
+
+  ~VulkanBenchmarkLayerScope() {
+    if(currentLayer != nullptr)
+      *currentLayer = std::move(previousLayer);
+  }
+
+  VulkanBenchmarkLayerScope(const VulkanBenchmarkLayerScope&) = delete;
+  VulkanBenchmarkLayerScope& operator=(const VulkanBenchmarkLayerScope&) = delete;
+};
+#endif
 
 struct ScratchBuffers {
   const size_t batchXYFloatBytes;

@@ -474,15 +474,42 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
          );
 }
 
+bool vk_shader::tune::canUseRegisterAttentionNHWC(
+  const VulkanDeviceInfo& deviceInfo, const TransformerCooperativeMatrixTuneParams& params,
+  int qHeadDim, int vHeadDim
+) {
+  const auto& limits = deviceInfo.cooperativeMatrix2Properties;
+  if(params.COOP_USE_NV2 != 1 || !deviceInfo.canUseRegisterAttentionNHWC || qHeadDim != 32 || vHeadDim != 32 ||
+     params.COOP_M_SIZE != 16 || params.COOP_N_SIZE != 16 || params.COOP_K_SIZE != 16 ||
+     params.COOP_SUBGROUP_SIZE != 32 || params.COOP_ACC_TYPE != 32 ||
+     params.ATTN_BLOCK_Q < 32 || params.ATTN_BLOCK_Q > 128 ||
+     params.ATTN_BLOCK_KV < 32 || params.ATTN_BLOCK_KV > 128 ||
+     limits.cooperativeMatrixWorkgroupScopeMaxWorkgroupSize < 128 ||
+     limits.cooperativeMatrixFlexibleDimensionsMaxDimension < uint32_t(std::max(params.ATTN_BLOCK_Q, params.ATTN_BLOCK_KV)))
+    return false;
+  for(const auto& p: deviceInfo.flexibleMatrixProperties)
+    if(p.scope == VK_SCOPE_WORKGROUP_KHR && p.workgroupInvocations == 128 &&
+       p.AType == VK_COMPONENT_TYPE_FLOAT16_KHR && p.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+       p.CType == VK_COMPONENT_TYPE_FLOAT32_KHR && p.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+       !p.saturatingAccumulation && p.MGranularity > 0 && p.NGranularity > 0 && p.KGranularity > 0 &&
+       params.ATTN_BLOCK_Q % p.MGranularity == 0 && params.ATTN_BLOCK_KV % p.NGranularity == 0 &&
+       32 % p.KGranularity == 0 && 32 % p.NGranularity == 0 && params.ATTN_BLOCK_KV % p.KGranularity == 0)
+      return true;
+  return false;
+}
+
 bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const VulkanDeviceInfo& deviceInfo,
   const TransformerCooperativeMatrixTuneParams& params,
   int qHeadDim,
-  int vHeadDim
+  int vHeadDim,
+  bool useNHWC
 ) {
   if(!params.isValid() || params.COOP_ACC_TYPE != 32 ||
      qHeadDim <= 0 || vHeadDim <= 0 ||
      params.COOP_M_SIZE > static_cast<int>(params.COOP_SUBGROUP_SIZE))
+    return false;
+  if(params.COOP_USE_NV2 && (!useNHWC || !canUseRegisterAttentionNHWC(deviceInfo, params, qHeadDim, vHeadDim)))
     return false;
   if(!isSupportedCooperativeMatrixShape(
        deviceInfo,
@@ -508,6 +535,13 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const int vHeadDimPad = ((vHeadDim + params.COOP_PV_N_SIZE - 1) / params.COOP_PV_N_SIZE) * params.COOP_PV_N_SIZE;
   const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
   const int kvStages = params.ATTN_BLOCK_KV / params.COOP_N_SIZE;
+  if(useNHWC && canUseRegisterAttentionNHWC(deviceInfo, params, qHeadDim, vHeadDim)) {
+    const uint64_t shared = 4 * 16ull + 2ull * qBlock * 32 + 4ull * params.ATTN_BLOCK_KV * 32 +
+      4ull * qBlock * 32 + deviceInfo.cooperativeMatrix2Properties.cooperativeMatrixWorkgroupScopeReservedSharedMemory;
+    const auto& limits = deviceInfo.properties.limits;
+    return 128 <= limits.maxComputeWorkGroupSize[0] && 128 <= limits.maxComputeWorkGroupInvocations &&
+      shared <= limits.maxComputeSharedMemorySize;
+  }
   const uint64_t localSize = static_cast<uint64_t>(params.COOP_SUBGROUP_SIZE) * params.COOP_Q_TILES_PER_WORKGROUP;
   const uint64_t sharedBytes =
     6 * 16ull +
@@ -795,6 +829,8 @@ bool TransformerTuneParams::isValid() const {
 }
 
 bool TransformerCooperativeMatrixTuneParams::isValid() const {
+  if(COOP_USE_NV2 != 0 && COOP_USE_NV2 != 1)
+    return false;
   if(COOP_ACC_TYPE != 32)
     return false;
   if(COOP_M_SIZE <= 0 || COOP_N_SIZE <= 0 || COOP_K_SIZE <= 0 || COOP_SUBGROUP_SIZE == 0)
@@ -839,7 +875,7 @@ bool TransformerSpatialRmsNormTuneParams::isValid() const {
 bool VulkanTuningProfile::isValid() const {
   return addChannelBiases.isValid() && pointwise.isValid() && gPool.isValid() &&
          conv3x3.isValid(3) && conv5x5.isValid(5) && hgemmCooperativeMatrix.isValid() &&
-         hgemmCooperativeMatrixNHWC.isValid() &&
+         hgemmCooperativeMatrixNHWC.isValid() && transformerHgemmNHWC.isValid() &&
          hgemmCooperativeMatrixNCHW.isValid() &&
          transformerDualGemmSwiGLU.isValid() &&
          xgemm.isValid() && xgemm16.isValid() && xgemmDirect.isValid() &&
@@ -906,6 +942,21 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          hgemmCooperativeMatrixNHWC.DB == other.hgemmCooperativeMatrixNHWC.DB &&
          hgemmCooperativeMatrixNHWC.VWK == other.hgemmCooperativeMatrixNHWC.VWK &&
          hgemmCooperativeMatrixNHWC.VWN == other.hgemmCooperativeMatrixNHWC.VWN &&
+         transformerHgemmNHWC.MWARP == other.transformerHgemmNHWC.MWARP &&
+         transformerHgemmNHWC.NWARP == other.transformerHgemmNHWC.NWARP &&
+         transformerHgemmNHWC.KDIM == other.transformerHgemmNHWC.KDIM &&
+         transformerHgemmNHWC.subgroupSize == other.transformerHgemmNHWC.subgroupSize &&
+         transformerHgemmNHWC.MWG == other.transformerHgemmNHWC.MWG &&
+         transformerHgemmNHWC.NWG == other.transformerHgemmNHWC.NWG &&
+         transformerHgemmNHWC.KWG == other.transformerHgemmNHWC.KWG &&
+         transformerHgemmNHWC.MWAVE == other.transformerHgemmNHWC.MWAVE &&
+         transformerHgemmNHWC.NWAVE == other.transformerHgemmNHWC.NWAVE &&
+         transformerHgemmNHWC.accType == other.transformerHgemmNHWC.accType &&
+         transformerHgemmNHWC.SA == other.transformerHgemmNHWC.SA &&
+         transformerHgemmNHWC.SB == other.transformerHgemmNHWC.SB &&
+         transformerHgemmNHWC.DB == other.transformerHgemmNHWC.DB &&
+         transformerHgemmNHWC.VWK == other.transformerHgemmNHWC.VWK &&
+         transformerHgemmNHWC.VWN == other.transformerHgemmNHWC.VWN &&
           hgemmCooperativeMatrixNCHW.MWARP == other.hgemmCooperativeMatrixNCHW.MWARP &&
          hgemmCooperativeMatrixNCHW.NWARP == other.hgemmCooperativeMatrixNCHW.NWARP &&
          hgemmCooperativeMatrixNCHW.KDIM == other.hgemmCooperativeMatrixNCHW.KDIM &&
@@ -957,6 +1008,7 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          transformerCooperativeMatrixNCHW.COOP_SUBGROUP_SIZE == other.transformerCooperativeMatrixNCHW.COOP_SUBGROUP_SIZE &&
          transformerCooperativeMatrixNCHW.COOP_Q_TILES_PER_WORKGROUP == other.transformerCooperativeMatrixNCHW.COOP_Q_TILES_PER_WORKGROUP &&
          transformerCooperativeMatrixNCHW.COOP_PV_N_SIZE == other.transformerCooperativeMatrixNCHW.COOP_PV_N_SIZE &&
+         transformerCooperativeMatrixNCHW.COOP_USE_NV2 == other.transformerCooperativeMatrixNCHW.COOP_USE_NV2 &&
          transformerCooperativeMatrixNHWC.ATTN_BLOCK_Q == other.transformerCooperativeMatrixNHWC.ATTN_BLOCK_Q &&
          transformerCooperativeMatrixNHWC.ATTN_BLOCK_KV == other.transformerCooperativeMatrixNHWC.ATTN_BLOCK_KV &&
          transformerCooperativeMatrixNHWC.COOP_ACC_TYPE == other.transformerCooperativeMatrixNHWC.COOP_ACC_TYPE &&
@@ -966,6 +1018,7 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
          transformerCooperativeMatrixNHWC.COOP_SUBGROUP_SIZE == other.transformerCooperativeMatrixNHWC.COOP_SUBGROUP_SIZE &&
          transformerCooperativeMatrixNHWC.COOP_Q_TILES_PER_WORKGROUP == other.transformerCooperativeMatrixNHWC.COOP_Q_TILES_PER_WORKGROUP &&
          transformerCooperativeMatrixNHWC.COOP_PV_N_SIZE == other.transformerCooperativeMatrixNHWC.COOP_PV_N_SIZE &&
+         transformerCooperativeMatrixNHWC.COOP_USE_NV2 == other.transformerCooperativeMatrixNHWC.COOP_USE_NV2 &&
          rmsNorm.WG_C_SIZE == other.rmsNorm.WG_C_SIZE &&
          rmsNorm.WG_XY_SIZE == other.rmsNorm.WG_XY_SIZE &&
          rmsNorm.C_PER_THREAD == other.rmsNorm.C_PER_THREAD &&
@@ -974,6 +1027,8 @@ bool VulkanTuningProfile::operator==(const VulkanTuningProfile& other) const {
 }
 
 bool VulkanTuneParams::isValid() const {
+  if(transformerCooperativeMatrixNCHW.COOP_USE_NV2 != 0)
+    return false;
   if(vulkan.shouldUseFP16Storage &&
      (!vulkan.canUseFP16Storage || !vulkan.canUseFP16Compute))
     return false;
@@ -1055,6 +1110,10 @@ namespace {
     WRITE("hgemmCooperativeMatrixNHWC.SA", profile.hgemmCooperativeMatrixNHWC.SA); WRITE("hgemmCooperativeMatrixNHWC.SB", profile.hgemmCooperativeMatrixNHWC.SB);
     WRITE("hgemmCooperativeMatrixNHWC.DB", profile.hgemmCooperativeMatrixNHWC.DB);
     WRITE("hgemmCooperativeMatrixNHWC.VWK", profile.hgemmCooperativeMatrixNHWC.VWK); WRITE("hgemmCooperativeMatrixNHWC.VWN", profile.hgemmCooperativeMatrixNHWC.VWN);
+    WRITE_HGEMM_NHWC("transformerHgemmNHWC", profile.transformerHgemmNHWC);
+    WRITE("transformerHgemmNHWC.SA", profile.transformerHgemmNHWC.SA); WRITE("transformerHgemmNHWC.SB", profile.transformerHgemmNHWC.SB);
+    WRITE("transformerHgemmNHWC.DB", profile.transformerHgemmNHWC.DB);
+    WRITE("transformerHgemmNHWC.VWK", profile.transformerHgemmNHWC.VWK); WRITE("transformerHgemmNHWC.VWN", profile.transformerHgemmNHWC.VWN);
     WRITE_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW);
     WRITE("hgemmCooperativeMatrixNCHW.SB", profile.hgemmCooperativeMatrixNCHW.SB);
 #undef WRITE_HGEMM
@@ -1076,7 +1135,8 @@ namespace {
     WRITE(name ".COOP_N_SIZE", params.COOP_N_SIZE); WRITE(name ".COOP_K_SIZE", params.COOP_K_SIZE); \
     WRITE(name ".COOP_SUBGROUP_SIZE", params.COOP_SUBGROUP_SIZE); \
     WRITE(name ".COOP_Q_TILES_PER_WORKGROUP", params.COOP_Q_TILES_PER_WORKGROUP); \
-    WRITE(name ".COOP_PV_N_SIZE", params.COOP_PV_N_SIZE)
+    WRITE(name ".COOP_PV_N_SIZE", params.COOP_PV_N_SIZE); \
+    WRITE(name ".COOP_USE_NV2", params.COOP_USE_NV2)
     WRITE_TRANSFORMER_COOPERATIVE("transformerCooperativeMatrixNCHW", profile.transformerCooperativeMatrixNCHW);
     WRITE_TRANSFORMER_COOPERATIVE("transformerCooperativeMatrixNHWC", profile.transformerCooperativeMatrixNHWC);
 #undef WRITE_TRANSFORMER_COOPERATIVE
@@ -1148,7 +1208,9 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
   }
   if(!foundVersion)
     throw IOError("VulkanTuneParams::load: no parameters in " + filename);
-  if(values.size() != 158)
+  const bool nv2Parameters = values.count("transformerCooperativeMatrixNCHW.COOP_USE_NV2") != 0 &&
+    values.count("transformerCooperativeMatrixNHWC.COOP_USE_NV2") != 0;
+  if(values.size() != (nv2Parameters ? 175 : 173))
     throw IOError("VulkanTuneParams::load: unexpected number of parameters in " + filename);
 
   const auto readProfile = [&](const string& prefix, VulkanTuningProfile& profile) {
@@ -1173,6 +1235,7 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
     params.KDIM = read(name ".KDIM"); params.subgroupSize = read(name ".subgroupSize"); params.accType = read(name ".accType")
     READ_HGEMM("hgemmCooperativeMatrix", profile.hgemmCooperativeMatrix); profile.hgemmCooperativeMatrix.SA = read("hgemmCooperativeMatrix.SA"); profile.hgemmCooperativeMatrix.SB = read("hgemmCooperativeMatrix.SB");
     READ_HGEMM_NHWC("hgemmCooperativeMatrixNHWC", profile.hgemmCooperativeMatrixNHWC); profile.hgemmCooperativeMatrixNHWC.SA = read("hgemmCooperativeMatrixNHWC.SA"); profile.hgemmCooperativeMatrixNHWC.SB = read("hgemmCooperativeMatrixNHWC.SB"); profile.hgemmCooperativeMatrixNHWC.DB = read("hgemmCooperativeMatrixNHWC.DB"); profile.hgemmCooperativeMatrixNHWC.VWK = read("hgemmCooperativeMatrixNHWC.VWK"); profile.hgemmCooperativeMatrixNHWC.VWN = read("hgemmCooperativeMatrixNHWC.VWN");
+    READ_HGEMM_NHWC("transformerHgemmNHWC", profile.transformerHgemmNHWC); profile.transformerHgemmNHWC.SA = read("transformerHgemmNHWC.SA"); profile.transformerHgemmNHWC.SB = read("transformerHgemmNHWC.SB"); profile.transformerHgemmNHWC.DB = read("transformerHgemmNHWC.DB"); profile.transformerHgemmNHWC.VWK = read("transformerHgemmNHWC.VWK"); profile.transformerHgemmNHWC.VWN = read("transformerHgemmNHWC.VWN");
     READ_HGEMM("hgemmCooperativeMatrixNCHW", profile.hgemmCooperativeMatrixNCHW); profile.hgemmCooperativeMatrixNCHW.SB = read("hgemmCooperativeMatrixNCHW.SB");
 #undef READ_HGEMM
 #undef READ_HGEMM_NHWC
@@ -1191,7 +1254,8 @@ VulkanTuneParams VulkanTuneParams::load(const string& filename) {
     params.COOP_N_SIZE = read(name ".COOP_N_SIZE"); params.COOP_K_SIZE = read(name ".COOP_K_SIZE"); \
     params.COOP_SUBGROUP_SIZE = read(name ".COOP_SUBGROUP_SIZE"); \
     params.COOP_Q_TILES_PER_WORKGROUP = read(name ".COOP_Q_TILES_PER_WORKGROUP"); \
-    params.COOP_PV_N_SIZE = read(name ".COOP_PV_N_SIZE")
+    params.COOP_PV_N_SIZE = read(name ".COOP_PV_N_SIZE"); \
+    params.COOP_USE_NV2 = nv2Parameters ? read(name ".COOP_USE_NV2") : 0
     READ_TRANSFORMER_COOPERATIVE("transformerCooperativeMatrixNCHW", profile.transformerCooperativeMatrixNCHW);
     READ_TRANSFORMER_COOPERATIVE("transformerCooperativeMatrixNHWC", profile.transformerCooperativeMatrixNHWC);
 #undef READ_TRANSFORMER_COOPERATIVE
@@ -1250,10 +1314,16 @@ namespace {
         modelInfo.transformerLearnableRope = attn->learnableRope;
         modelInfo.transformerRopeTheta = attn->ropeTheta;
         modelInfo.transformerRopeFreqs = attn->ropeFreqs;
+        modelInfo.transformerProjections.push_back({attn->qProj.inChannels,
+          attn->qProj.outChannels + attn->kProj.outChannels + attn->vProj.outChannels, true});
+        modelInfo.transformerProjections.push_back({attn->outProj.inChannels, attn->outProj.outChannels, false});
       }
       else if(block.first == TRANSFORMER_FFN_BLOCK_KIND) {
         const TransformerFFNDesc* ffn = static_cast<const TransformerFFNDesc*>(block.second.get());
         modelInfo.transformerFFNChannels = ffn->ffnChannels;
+        modelInfo.transformerProjections.push_back({ffn->linear1.inChannels,
+          ffn->linear1.outChannels + (ffn->useSwiGLU ? ffn->linearGate.outChannels : 0), true, ffn->useSwiGLU});
+        modelInfo.transformerProjections.push_back({ffn->linear2.inChannels, ffn->linear2.outChannels, false});
       }
       else if(block.first == NESTED_BOTTLENECK_BLOCK_KIND) {
         const NestedBottleneckResidualBlockDesc* nested =
@@ -1438,6 +1508,11 @@ namespace {
     Logger* logger;
     VulkanTimestampTimer* timer;
     bool printOnlyOnImprovement;
+    const HGemmCooperativeMatrixNHWCTuneParams* transformerPhysicalLayout = nullptr;
+    int transformerPhysicalSpatialSize = 0;
+    bool transformerFusedFFN = false;
+    int attentionValidationMask = 0;
+    bool recheckAttentionFinalists = false;
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
@@ -1588,6 +1663,20 @@ namespace {
     const string& tunerName,
     const TuningContext& context
   ) {
+    if(context.transformerPhysicalLayout != nullptr && tunerName == "hgemmCooperativeMatrixNHWC") {
+      vector<GemmTuneCase> cases;
+      for(const auto& projection: context.modelInfo.transformerProjections) {
+        if(context.transformerFusedFFN && projection.fusedFFNInput)
+          continue;
+        const int outChannels = projection.outChannels;
+        const auto existing = find_if(cases.begin(), cases.end(), [&](const GemmTuneCase& c) {
+          return c.inChannels == projection.inChannels && c.outChannels == outChannels;
+        });
+        if(existing == cases.end()) cases.push_back({projection.inChannels, outChannels, 1.0});
+        else existing->weight += 1.0;
+      }
+      return cases;
+    }
     const bool direct = tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW";
     const bool includeInputConvCase = tunerName != "hgemmCooperativeMatrix";
     return getGemmTuneCases(context, direct, !direct, includeInputConvCase);
@@ -2018,6 +2107,7 @@ namespace {
       add("COOP_SUBGROUP_SIZE", params.COOP_SUBGROUP_SIZE);
       add("COOP_Q_TILES_PER_WORKGROUP", params.COOP_Q_TILES_PER_WORKGROUP);
       add("COOP_PV_N_SIZE", params.COOP_PV_N_SIZE);
+      add("COOP_USE_NV2", params.COOP_USE_NV2);
     }
     else if(tunerName == "transformerRMSNorm") {
       add("WG_C_SIZE", config.rmsNorm.WG_C_SIZE);
@@ -2151,6 +2241,10 @@ namespace {
           casePlan.gemmCases = {gemmCase};
           casePlan.totalRuns = 3;
           casePlan.warmupRuns = 0;
+          if(context.transformerPhysicalLayout != nullptr) {
+            casePlan.warmupRuns = 2;
+            casePlan.totalRuns = casePlan.warmupRuns + static_cast<size_t>(gemmCase.weight);
+          }
           casePlan.workloadWeights = {1.0};
           vector<float> output;
           double rate = 0.0;
@@ -2196,13 +2290,15 @@ namespace {
           if(params.MWG > 0)
             nhwcSpatialAlignment = std::lcm(nhwcSpatialAlignment, params.MWG);
         };
-        addNhwcSpatialAlignment(config.hgemmCooperativeMatrixNHWC);
+        addNhwcSpatialAlignment(context.transformerPhysicalLayout != nullptr
+          ? *context.transformerPhysicalLayout : config.hgemmCooperativeMatrixNHWC);
       }
       int nhwcChannelAlignment = 1;
       if(useNHWC) {
         nhwcChannelAlignment = std::lcm(
           nhwcChannelAlignment,
-          channelAlignment(config.hgemmCooperativeMatrixNHWC)
+          channelAlignment(context.transformerPhysicalLayout != nullptr
+            ? *context.transformerPhysicalLayout : config.hgemmCooperativeMatrixNHWC)
         );
       }
       const size_t nhwcSpatialSize = vk_helper::roundUpToMultiple(
@@ -2302,7 +2398,7 @@ namespace {
       const int tilesY = (context.nnYLen + transformConvParams.outTileYSize - 1) / transformConvParams.outTileYSize;
       const size_t transformTiles = batchSize * static_cast<size_t>(tilesX) * static_cast<size_t>(tilesY);
       const int logicalM = nhwcCooperative
-        ? static_cast<int>(logicalXYSize)
+        ? (context.transformerPhysicalLayout != nullptr ? context.transformerPhysicalSpatialSize : static_cast<int>(logicalXYSize))
         : directGemm ? static_cast<int>(logicalXYSize) : static_cast<int>(batchSize) * tilesX * tilesY;
       const int logicalN = isGemm ? std::max(1, std::accumulate(
         plan.gemmCases.begin(), plan.gemmCases.end(), 0,
@@ -2553,7 +2649,8 @@ namespace {
             if(isGemm && binding < 2) {
               const int width = binding == 0 ? gemmM : gemmN;
               const int logicalWidth = binding == 0 ? logicalM : logicalN;
-              const int batches = ((directGemm && binding == 1) || nhwcCooperative ? 1 : gemmBatch);
+              const int batches = ((directGemm && binding == 1) ||
+                (nhwcCooperative && (binding == 1 || context.transformerPhysicalLayout == nullptr)) ? 1 : gemmBatch);
               for(int n = 0; n < batches; n++)
                 for(int k = 0; k < logicalK; k++)
                   for(int x = 0; x < logicalWidth; x++)
@@ -2730,6 +2827,13 @@ namespace {
                   for(int n = 0; n < maskBatchSize; n++)
                     std::fill(data.begin() + static_cast<size_t>(n) * xySize,
                               data.begin() + static_cast<size_t>(n) * xySize + logicalXYSize, 1.0f);
+                  if(isTransformerAttentionTuner(plan.kernelName) && context.attentionValidationMask != 0) {
+                    for(int n = 0; n < maskBatchSize; n++) for(size_t xy = 0; xy < logicalXYSize; xy++) {
+                      const bool valid = context.attentionValidationMask == 1 ? false :
+                        context.attentionValidationMask == 2 ? xy % 5 != 0 : xy < logicalXYSize / 2;
+                      data[static_cast<size_t>(n) * xySize + xy] = valid ? 1.0f : 0.0f;
+                    }
+                  }
                 }
                 else if(maskSum) {
                   std::fill(data.begin(), data.end(), 0.0f);
@@ -4367,6 +4471,7 @@ namespace {
       const int batchSize = std::max(1, context.batchSize);
       const int cSize = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
       const int ffnSize = context.modelInfo.transformerFFNChannels;
+      const bool legacyNHWC = legacyConfig.vulkan.shouldUseNHWC;
       if(fusedPipeline == nullptr || nchwToNhwcPipeline == nullptr || nhwcToNchwPipeline == nullptr ||
          legacyGemmPipeline == nullptr || swigluPipeline == nullptr ||
          batchSize <= 0 || hwSize <= 0 || cSize <= 0 || ffnSize <= 0 || packedOCSize < 2 * ffnSize) {
@@ -4384,9 +4489,13 @@ namespace {
       const size_t inputElements = static_cast<size_t>(batchSize) * cSize * hwSize;
       const size_t filterElements = static_cast<size_t>(cSize) * packedOCSize;
       const size_t outputElements = static_cast<size_t>(batchSize) * ffnSize * hwSize;
-      const size_t legacyGemmElements = static_cast<size_t>(batchSize) * packedOCSize * hwSize;
-      const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, 4);
-      const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, 4);
+      const int channelAlignment = legacyNHWC
+        ? std::lcm(4, std::lcm(legacyConfig.hgemmCooperativeMatrixNHWC.NWG, legacyConfig.hgemmCooperativeMatrixNHWC.KWG)) : 4;
+      const int inputChannelStride = vk_helper::roundUpToMultipleInt(cSize, channelAlignment);
+      const int outputChannelStride = vk_helper::roundUpToMultipleInt(ffnSize, channelAlignment);
+      const int packedOutputStride = std::max(packedOCSize, vk_helper::roundUpToMultipleInt(2 * ffnSize, channelAlignment));
+      const size_t legacyGemmElements = static_cast<size_t>(batchSize) *
+        (legacyNHWC ? packedOutputStride : packedOCSize) * hwSize;
       const size_t candidateInputNHWCElements =
         static_cast<size_t>(batchSize) * hwSize * inputChannelStride;
       const size_t candidateOutputNHWCElements =
@@ -4399,10 +4508,10 @@ namespace {
       const VkDeviceSize candidateFilterBytes = filterElements * sizeof(half_t);
       const VkDeviceSize candidateInputNHWCBytes = candidateInputNHWCElements * sizeof(half_t);
       const VkDeviceSize candidateOutputNHWCBytes = candidateOutputNHWCElements * sizeof(half_t);
-      const VkDeviceSize legacyInputBytes = inputElements * legacyElementBytes;
+      const VkDeviceSize legacyInputBytes = (legacyNHWC ? candidateInputNHWCElements : inputElements) * legacyElementBytes;
       const VkDeviceSize legacyFilterBytes = filterElements * legacyElementBytes;
       const VkDeviceSize legacyGemmBytes = legacyGemmElements * legacyElementBytes;
-      const VkDeviceSize legacyOutputBytes = outputElements * legacyElementBytes;
+      const VkDeviceSize legacyOutputBytes = (legacyNHWC ? candidateOutputNHWCElements : outputElements) * legacyElementBytes;
       const VkDeviceSize requiredBytes[] = {
         candidateInputBytes, candidateFilterBytes, candidateInputNHWCBytes,
         candidateOutputNHWCBytes, legacyInputBytes, legacyFilterBytes,
@@ -4472,7 +4581,7 @@ namespace {
           legacyInputHalf[i] = half_float::half_cast<half_t>(inputSource[i]);
         for(size_t i = 0; i < filterElements; i++)
           legacyFilterHalf[i] = half_float::half_cast<half_t>(packedFilter[i]);
-        if(!upload(legacyInputHalf.data(), legacyInputBytes, buffers[4], "legacy packed-GEMM input") ||
+        if(!upload(legacyNHWC ? candidateInputNHWCHalf.data() : legacyInputHalf.data(), legacyInputBytes, buffers[4], "legacy packed-GEMM input") ||
            !upload(legacyFilterHalf.data(), legacyFilterBytes, buffers[5], "legacy packed-GEMM filter"))
           return false;
       }
@@ -4480,7 +4589,7 @@ namespace {
               !upload(packedFilter.data(), legacyFilterBytes, buffers[5], "legacy packed-GEMM filter"))
         return false;
 
-      if(!ensureDescriptorPool(9, 5, result, error) || !ensureQueryPool(20, result, error) ||
+      if(!ensureDescriptorPool(13, 5, result, error) || !ensureQueryPool(20, result, error) ||
          !ensureCommandResources(result, error))
         return false;
       const auto allocateDescriptorSet = [&](const Pipeline* pipeline, VkDescriptorSet& descriptorSet) {
@@ -4527,7 +4636,20 @@ namespace {
         );
       };
       const auto recordLegacy = [&]() {
-        if(legacyNCHW) {
+        if(legacyNHWC) {
+          const auto& p = legacyConfig.transformerHgemmNHWC;
+          const auto& gemmParams = p.isValid() && hwSize % p.MWG == 0 &&
+            cSize % p.KWG == 0 && packedOCSize % p.NWG == 0
+            ? p : legacyConfig.hgemmCooperativeMatrixNHWC;
+          if(packedOutputStride != packedOCSize)
+            vkcompute::clearBufferForCompute(commandBuffer, buffers[6]);
+          vkcompute::doHgemmCooperativeMatrixNHWC(
+            nullptr, device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
+            buffers[4], buffers[5], buffers[6], batchSize, hwSize, packedOCSize, cSize,
+            inputChannelStride, packedOutputStride, gemmParams, &result
+          );
+        }
+        else if(legacyNCHW) {
           vkcompute::doHgemmCooperativeMatrixNCHW(
             nullptr, device, legacyConfig, legacyGemmPipeline, commandBuffer, legacyGemmDescriptorSet,
             buffers[4], buffers[5], buffers[6], batchSize, hwSize, packedOCSize, cSize, &result
@@ -4546,7 +4668,9 @@ namespace {
         vkcompute::doSwiGLU(
           nullptr, device, commandBuffer, swigluDescriptorSet, *swigluPipeline, legacyConfig,
           buffers[6], buffers[6], buffers[7], batchSize * ffnSize * hwSize,
-          packedOCSize * hwSize, ffnSize * hwSize
+          (legacyNHWC ? packedOutputStride : packedOCSize) * hwSize, ffnSize * hwSize,
+          (legacyNHWC ? outputChannelStride : ffnSize) * hwSize,
+          legacyNHWC, ffnSize, packedOutputStride, outputChannelStride
         );
       };
       recordFused();
@@ -4649,9 +4773,164 @@ namespace {
                 outputHalf[(static_cast<size_t>(batch) * hwSize + hw) * outputChannelStride + channel]
               );
       errorProp = VulkanTuner::computeErrorProp(reference, readback);
+      if(legacyNHWC) {
+        vk_helper::copyDeviceBufferToHost(
+          device, buffers[7], legacyOutputBytes, outputHalf.data(), true, &result
+        );
+        if(result != VK_SUCCESS) {
+          error = "could not read NHWC packed-GEMM plus SwiGLU output";
+          return false;
+        }
+        vector<float> legacyReadback(outputElements);
+        for(int b = 0; b < batchSize; b++) for(int c = 0; c < ffnSize; c++) for(int hw = 0; hw < hwSize; hw++)
+          legacyReadback[(static_cast<size_t>(b) * ffnSize + c) * hwSize + hw] =
+            static_cast<float>(outputHalf[(static_cast<size_t>(b) * hwSize + hw) * outputChannelStride + c]);
+        errorProp = std::max(errorProp, VulkanTuner::computeErrorProp(reference, legacyReadback));
+      }
       return true;
     }
 
+
+    bool measureTransformerResidualRMSNorm(
+      const VulkanTuneParams& config, const TuningContext& context,
+      const Pipeline& fused, const Pipeline& norm, const Pipeline& add,
+      int batchSize, int hwSize, int maskPattern, string& error
+    ) {
+      const int channels = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
+      const size_t elements = static_cast<size_t>(batchSize) * hwSize * channels;
+      if(!isUsable() || channels <= 0 || elements > UINT32_MAX) {
+        error = "invalid residual RMSNorm measurement dimensions or timestamps";
+        return false;
+      }
+      VkResult result = VK_SUCCESS;
+      ReusableResources resources(device);
+      activeResources = &resources;
+      const auto resourceGuard = makeScopeGuard([&]() { activeResources = nullptr; });
+      auto& buffers = resources.tuningBuffers;
+      const VkDeviceSize bytes = elements * sizeof(half_t);
+      if(!ensureBuffers(buffers, 9, std::max<VkDeviceSize>(bytes, channels * sizeof(float)), result, error, "residual RMSNorm buffer") ||
+         !ensureDescriptorPool(12, 3, result, error) || !ensureQueryPool(20, result, error) ||
+         !ensureCommandResources(result, error))
+        return false;
+      vector<half_t> trunk(elements), delta(elements), mask(static_cast<size_t>(batchSize) * hwSize);
+      vector<float> gamma(channels), beta(channels, 0.0f), cpuTrunk(elements), cpuOutput(elements);
+      Rand rand("TransformerResidualRMSNorm");
+      for(size_t i = 0; i < elements; i++) {
+        trunk[i] = half_t(2.0 * rand.nextDouble() - 1.0);
+        delta[i] = half_t(0.2 * rand.nextDouble() - 0.1);
+        cpuTrunk[i] = static_cast<float>(half_t(float(trunk[i]) + float(delta[i])));
+      }
+      for(int c = 0; c < channels; c++) gamma[c] = 0.5f + static_cast<float>(rand.nextDouble());
+      for(int b = 0; b < batchSize; b++) for(int xy = 0; xy < hwSize; xy++) {
+        const float m = xy >= context.nnXLen * context.nnYLen || maskPattern == 1 ? 0.0f :
+          maskPattern == 2 && xy % 5 == 0 ? 0.0f : maskPattern == 3 ? 0.5f : 1.0f;
+        mask[b * hwSize + xy] = half_t(m);
+        const size_t offset = (static_cast<size_t>(b) * hwSize + xy) * channels;
+        float sum = 0.0f;
+        for(int c = 0; c < channels; c++) {
+          const float val = cpuTrunk[offset + c] * m;
+          sum += val * val;
+        }
+        const float rms = 1.0f / sqrtf(sum / channels + 1e-6f);
+        for(int c = 0; c < channels; c++)
+          cpuOutput[offset + c] = float(half_t(cpuTrunk[offset + c] * rms * gamma[c] * m));
+      }
+      const auto upload = [&](int index, const void* source, VkDeviceSize size) {
+        vk_helper::copyHostToDeviceBuffer(device, source, buffers[index], size, false, &result);
+        return result == VK_SUCCESS;
+      };
+      if(!upload(0, trunk.data(), bytes) || !upload(1, delta.data(), bytes) ||
+         !upload(6, gamma.data(), channels * sizeof(float)) || !upload(7, beta.data(), channels * sizeof(float)) ||
+         !upload(8, mask.data(), mask.size() * sizeof(half_t))) {
+        error = "could not upload residual RMSNorm inputs";
+        return false;
+      }
+      VkDescriptorSet sets[3] = {};
+      const Pipeline* pipelines[] = {&fused, &norm, &add};
+      for(int i = 0; i < 3; i++) {
+        VkDescriptorSetAllocateInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        info.descriptorPool = resources.descriptorPool;
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &pipelines[i]->descriptorSetLayout;
+        if(vkAllocateDescriptorSets(device->device, &info, &sets[i]) != VK_SUCCESS) {
+          error = "could not allocate residual RMSNorm descriptors";
+          return false;
+        }
+      }
+      const auto cb = resources.commandBuffer;
+      const auto cbGuard = makeScopeGuard([&]() { vkResetCommandBuffer(cb, 0); });
+      result = vk_helper::beginCommandBuffer(cb);
+      if(result != VK_SUCCESS) { error = "could not begin residual RMSNorm commands"; return false; }
+      vkCmdResetQueryPool(cb, resources.queryPool, 0, 20);
+      double seconds[2] = {};
+      for(int repeat = 0; repeat < 5; repeat++) for(int path = 0; path < 2; path++) {
+        // Restore BOTH mutable inputs before every sample, outside timestamps.
+        const int input = path == 0 ? 2 : 4;
+        const int output = path == 0 ? 3 : 5;
+        vk_helper::barrierCommandBuffer(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferCopy copy = {0, 0, bytes};
+        vkCmdCopyBuffer(cb, buffers[0]->buffer, buffers[input]->buffer, 1, &copy);
+        vkCmdCopyBuffer(cb, buffers[1]->buffer, buffers[output]->buffer, 1, &copy);
+        vk_helper::barrierCommandBuffer(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        const uint32_t query = 4 * repeat + 2 * path;
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, query);
+        if(path == 1) {
+          const auto writes = vector<WriteDescriptorSet>{
+            vk_helper::writeDescriptorSetBuffer(sets[2], 0, buffers[input]),
+            vk_helper::writeDescriptorSetBuffer(sets[2], 1, buffers[output])
+          };
+          result = vk_helper::updateDescriptorSets(device, writes);
+          const vk_shader::push::AddPointWiseParams params = {static_cast<uint32_t>(elements)};
+          vkcompute::dispatchPipeline(nullptr, device, &add, cb, sets[2], &params, sizeof(params),
+            static_cast<uint32_t>((elements + add.localSizeX * config.pointwise.ELTS_PER_THREAD - 1) /
+                                  (add.localSizeX * config.pointwise.ELTS_PER_THREAD)), 1, 1, "ADD_POINTWISE_FP32");
+          vk_helper::barrierCommandBufferForBuffer(cb, buffers[input]);
+        }
+        vkcompute::transformerRMSNorm(nullptr, device, pipelines[path], cb, sets[path],
+          buffers[input], buffers[output], buffers[6], buffers[7], buffers[8],
+          batchSize, channels, hwSize, hwSize, context.nnXLen * context.nnYLen, channels,
+          1e-6f, config.rmsNorm, &result, path == 0);
+        if(result != VK_SUCCESS) { error = "could not dispatch residual RMSNorm"; return false; }
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, resources.queryPool, query + 1);
+      }
+      result = vk_helper::endCommandBuffer(cb);
+      if(result == VK_SUCCESS) result = vkResetFences(device->device, 1, &resources.fence);
+      if(result == VK_SUCCESS) result = vk_helper::submitCommandBuffers(device, {cb}, resources.fence);
+      if(result == VK_SUCCESS) result = vkWaitForFences(device->device, 1, &resources.fence, VK_TRUE, UINT64_MAX);
+      uint64_t timestamps[20] = {};
+      if(result == VK_SUCCESS) result = vkGetQueryPoolResults(device->device, resources.queryPool, 0, 20,
+        sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+      if(result != VK_SUCCESS) { error = "could not execute/read residual RMSNorm measurement"; return false; }
+      for(int repeat = 0; repeat < 5; repeat++) for(int path = 0; path < 2; path++) {
+        const int query = 4 * repeat + 2 * path;
+        if(timestamps[query + 1] <= timestamps[query]) { error = "invalid residual RMSNorm timestamps"; return false; }
+        seconds[path] += (timestamps[query + 1] - timestamps[query]) * timestampPeriod * 1e-9;
+      }
+      vector<half_t> values(elements);
+      vector<vector<float>> outputs(4, vector<float>(elements));
+      for(int i = 0; i < 4; i++) {
+        vk_helper::copyDeviceBufferToHost(device, buffers[i + 2], bytes, values.data(), true, &result);
+        if(result != VK_SUCCESS) { error = "could not read residual RMSNorm outputs"; return false; }
+        for(size_t j = 0; j < elements; j++) outputs[i][j] = float(values[j]);
+      }
+      const double cpuError = VulkanTuner::computeErrorProp(cpuOutput, outputs[1]);
+      if(outputs[0] != cpuTrunk || outputs[2] != cpuTrunk || outputs[1] != outputs[3] ||
+         !isfinite(cpuError) || cpuError > 0.002) {
+        error = "residual RMSNorm trunk, baseline output, or CPU reference mismatch";
+        return false;
+      }
+      if(context.logger != nullptr) context.logger->write(
+        "Residual RMSNorm B=" + to_string(batchSize) + " S=" + to_string(hwSize) + " C=" + to_string(channels) +
+        " mask=" + to_string(maskPattern) + " fused_us=" + to_string(seconds[0] * 1e6 / 5) +
+        " add+norm_us=" + to_string(seconds[1] * 1e6 / 5) + " CPUError=" + to_string(cpuError) +
+        " trunk/output match=true; inputs restored outside timing"
+      );
+      return true;
+    }
 
    private:
     struct ReusableResources {
@@ -5525,8 +5804,11 @@ namespace {
         const bool logHgemmNhwcOnlyOnUpdate = Tuner::name() == "hgemmCooperativeMatrixNHWC";
         const bool logGenericHgemmReference =
           Tuner::name() == "hgemmCooperativeMatrix" && isReferenceCandidate;
+        const bool logAttentionReference =
+          Tuner::name() == "transformerScaleDotProductCooperativeMatrixNHWC" && isReferenceCandidate;
         if(logHgemmNhwcOnlyOnUpdate ? isBest :
-           (logGenericHgemmReference || (logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)))) {
+           (logGenericHgemmReference || logAttentionReference ||
+            (logSuccessfulResults && (!context.printOnlyOnImprovement || isBest)))) {
           logTuningResult(
             context, currentCandidateIndex, candidateCount, targets, candidate, Tuner::name(), callsPerSecond, errorProp,
             isBest
@@ -5723,6 +6005,51 @@ namespace {
     );
     if(measurements.referenceFailed || measurements.values.empty())
       return 0.0;
+    if(Tuner::name() == "transformerScaleDotProductCooperativeMatrixNHWC" && context.recheckAttentionFinalists) {
+      vector<TuningConfigMeasurement> ranked = measurements.values;
+      sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
+      vector<VulkanTuneParams> finalists = {currentConfig};
+      for(size_t i = 0; i < std::min(size_t(3), ranked.size()); i++)
+        if(ranked[i].score > 0.0)
+          finalists.push_back(ranked[i].config);
+      dedupCandidates(finalists);
+      TuningMeasurementPlan finalPlan = makeMeasurementPlan(Tuner::name(), context);
+      finalPlan.warmupRuns = 8;
+      finalPlan.totalRuns = 104;
+      finalPlan.workloadWeights = {1.0};
+      map<string, vector<double>> elapsed;
+      for(int round = 0; round < 3; round++) {
+        const TuningConfigMeasurements repeated = measureConfigs<Tuner>(
+          context, finalists, finalPlan, nullptr, false
+        );
+        for(const auto& measurement: repeated.values)
+          if(measurement.score > 0.0)
+            elapsed[describeTuningParams(Tuner::name(), measurement.config)].push_back(1.0 / measurement.callsPerSecond);
+      }
+      double bestSeconds = std::numeric_limits<double>::infinity();
+      for(const auto& candidate: finalists) {
+        const string description = describeTuningParams(Tuner::name(), candidate);
+        vector<double>& seconds = elapsed[description];
+        if(seconds.size() != 3)
+          continue;
+        sort(seconds.begin(), seconds.end());
+        const double medianSeconds = seconds[1];
+        if(context.logger != nullptr)
+          context.logger->write(
+            "NHWC attention finalist Calls/sec " + Global::doubleToString(1.0 / medianSeconds) + " " + description
+          );
+        if(medianSeconds < bestSeconds) {
+          bestSeconds = medianSeconds;
+          currentConfig = candidate;
+        }
+      }
+      if(!std::isfinite(bestSeconds))
+        throw StringError("NHWC attention tuning failed: no finalist passed all three remeasurements");
+      if(context.logger != nullptr)
+        context.logger->write("NHWC attention selected after 3 rounds of warmup8/timed96: " +
+                              describeTuningParams(Tuner::name(), currentConfig));
+      return 1.0 / bestSeconds;
+    }
     const TuningConfigMeasurement& best = *max_element(
       measurements.values.begin(), measurements.values.end(),
       [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; }
@@ -6096,6 +6423,78 @@ namespace {
   struct StopsOnReferenceImplFail<HgemmCooperativeMatrixTunerImpl> {
     static bool value(const VulkanTuneParams&) { return false; }
   };
+
+  void tuneTransformerHgemmNHWC(const TuningContext& context, VulkanTuneParams& config) {
+    config.transformerHgemmNHWC = config.hgemmCooperativeMatrixNHWC;
+    if(!usesGenericNHWC(config) || context.modelInfo.transformerProjections.empty())
+      return;
+    const auto& layout = config.hgemmCooperativeMatrixNHWC;
+    int spatialAlignment = layout.MWG;
+    if(config.vulkan.shouldUseHgemmCooperativeMatrixNCHW)
+      spatialAlignment = std::lcm(spatialAlignment, config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment());
+    if(config.vulkan.shouldUseTransformerDualGemmSwiGLU)
+      spatialAlignment = std::lcm(spatialAlignment, config.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
+    const int physicalM = vk_helper::roundUpToMultipleInt(context.nnXLen * context.nnYLen, spatialAlignment);
+    const int channelAlignment = std::lcm(layout.NWG, layout.KWG);
+    // This first profile preserves the current global strides and packed weights.
+    // Unaligned models retain the existing profile rather than changing padding.
+    for(const auto& projection: context.modelInfo.transformerProjections) {
+      if(config.vulkan.shouldUseTransformerDualGemmSwiGLU && projection.fusedFFNInput)
+        continue;
+      if(projection.inChannels % channelAlignment != 0 || projection.outChannels % channelAlignment != 0 ||
+         (projection.packedOutput && config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+          projection.outChannels % config.hgemmCooperativeMatrixNCHW.NWG != 0))
+        return;
+    }
+    TuningContext projectionContext = context;
+    projectionContext.transformerPhysicalLayout = &layout;
+    projectionContext.transformerPhysicalSpatialSize = physicalM;
+    projectionContext.transformerFusedFFN = config.vulkan.shouldUseTransformerDualGemmSwiGLU;
+    const auto cases = getTunerGemmTuneCases("hgemmCooperativeMatrixNHWC", projectionContext);
+    vector<VulkanTuneParams> candidates{config};
+    for(const auto& shape: context.cooperativeMatrixTuneShapes) {
+      // Preserve the existing accumulation precision in this selection experiment.
+      if(shape.accType != layout.accType)
+        continue;
+      for(int m: {32, 64, 128}) for(int n: {16, 32, 64}) for(int k: {16, 32, 64})
+        for(int sm: {1, 2}) for(int sn: {1, 2}) {
+          VulkanTuneParams candidate = config;
+          auto& p = candidate.hgemmCooperativeMatrixNHWC;
+          p.MWARP = shape.MSize; p.NWARP = shape.NSize; p.KDIM = shape.KSize;
+          p.subgroupSize = shape.subgroupSize;
+          p.MWG = m; p.NWG = n; p.KWG = k;
+          p.MWAVE = p.MWARP * sm; p.NWAVE = p.NWARP * sn;
+          p.SA = p.SB = 1; p.DB = 0;
+          if(!isValidCooperativeMatrixTuneParams(context, p) || physicalM % m != 0)
+            continue;
+          if(any_of(cases.begin(), cases.end(), [&](const GemmTuneCase& c) {
+            return c.inChannels % k != 0 || c.outChannels % n != 0;
+          }))
+            continue;
+          candidates.push_back(candidate);
+        }
+    }
+    if(context.logger != nullptr) {
+      context.logger->write("Transformer NHWC GEMM: fixed physical M=" + to_string(physicalM) +
+        ", B=" + to_string(context.batchSize) + ", independent profile; convolution unchanged");
+      for(const auto& c: cases)
+        context.logger->write("Transformer projection K=" + to_string(c.inChannels) + ", N=" +
+          to_string(c.outChannels) + ", dispatches/forward=" + to_string(static_cast<int>(c.weight)));
+    }
+    const auto measurements = measureConfigs<HgemmCooperativeMatrixNHWCTunerImpl>(
+      projectionContext, std::move(candidates), makeMeasurementPlan("hgemmCooperativeMatrixNHWC", projectionContext)
+    );
+    if(measurements.values.empty())
+      return;
+    const auto& best = *max_element(measurements.values.begin(), measurements.values.end(),
+      [](const TuningConfigMeasurement& a, const TuningConfigMeasurement& b) { return a.score < b.score; });
+    if(best.score > 0.0)
+      config.transformerHgemmNHWC = best.config.hgemmCooperativeMatrixNHWC;
+    if(context.logger != nullptr)
+      context.logger->write("Transformer NHWC GEMM selected " + describeTuningParams(
+        "hgemmCooperativeMatrixNHWC", best.config) + ", projection dispatch calls/sec=" +
+        Global::doubleToString(best.callsPerSecond));
+  }
 
   struct HgemmCooperativeMatrixNCHWTunerImpl {
     static string name() { return "hgemmCooperativeMatrixNCHW"; }
@@ -6675,6 +7074,23 @@ namespace {
       vector<VulkanTuneParams> configs = {current};
       if(context.device == nullptr || context.modelInfo.transformerHeadDim <= 0 || context.modelInfo.transformerVHeadDim <= 0)
         return configs;
+      vector<VulkanTuneParams> nativeConfigs;
+      if(NHWC && context.device->info.canUseRegisterAttentionNHWC &&
+         context.modelInfo.transformerHeadDim == 32 && context.modelInfo.transformerVHeadDim == 32) {
+        for(int qTiles: {2, 4, 8})
+          for(int kvStages: {2, 4, 8}) {
+            VulkanTuneParams candidate = current;
+            auto& p = params(candidate);
+            p.ATTN_BLOCK_Q = 16 * qTiles;
+            p.ATTN_BLOCK_KV = 16 * kvStages;
+            p.COOP_M_SIZE = p.COOP_N_SIZE = p.COOP_K_SIZE = p.COOP_PV_N_SIZE = 16;
+            p.COOP_SUBGROUP_SIZE = 32;
+            p.COOP_Q_TILES_PER_WORKGROUP = qTiles;
+            p.COOP_USE_NV2 = 1;
+            if(canUseRegisterAttentionNHWC(context.device->info, p, 32, 32))
+              nativeConfigs.push_back(candidate);
+          }
+      }
       for(const CooperativeMatrixTuneShape& shape: context.cooperativeMatrixTuneShapes) {
         if(shape.accType != 32 || shape.MSize > 256 || shape.NSize > 128 || shape.MSize > static_cast<int>(shape.subgroupSize))
           continue;
@@ -6694,6 +7110,7 @@ namespace {
                 continue;
               VulkanTuneParams candidate = current;
               TransformerCooperativeMatrixTuneParams& tuneParams = params(candidate);
+              tuneParams.COOP_USE_NV2 = 0;
               tuneParams.ATTN_BLOCK_Q = shape.MSize * qTiles;
               tuneParams.ATTN_BLOCK_KV = shape.NSize * kvStages;
               tuneParams.COOP_ACC_TYPE = shape.accType;
@@ -6708,6 +7125,7 @@ namespace {
           }
         }
       }
+      configs.insert(configs.end(), nativeConfigs.begin(), nativeConfigs.end());
       configs.erase(remove_if(configs.begin(), configs.end(), [](const VulkanTuneParams& config) { return !isValid(config); }), configs.end());
       return configs;
     }
@@ -6735,7 +7153,7 @@ namespace {
            config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute &&
            isValidCooperativeMatrixConfig(
              context.device->info, params,
-             context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim
+             context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim, NHWC
            );
   }
 
@@ -6748,6 +7166,34 @@ namespace {
   bool isValidTuningConfig<TransformerScaleDotProductCooperativeMatrixTuner<true>>(
     const TuningContext& context, const VulkanTuneParams& config
   ) { return isValidTransformerCooperativeConfig<true>(context, config); }
+
+  void validateTransformerAttentionMasks(const TuningContext& context, const VulkanTuneParams& config) {
+    if(!isValidTransformerCooperativeConfig<true>(context, config))
+      return;
+    using Tuner = TransformerScaleDotProductCooperativeMatrixTuner<true>;
+    vk_shader::ComputePipelines pipelines(context.device->device, context.device->info, nullptr, false);
+    vector<const Pipeline*> targets;
+    VkResult result = Tuner::create(context, config, pipelines, targets);
+    if(result != VK_SUCCESS || targets.empty())
+      throw StringError("Could not create NHWC attention mask-validation pipeline");
+    for(int pattern: {1, 2, 3}) {
+      TuningContext validation = context;
+      validation.attentionValidationMask = pattern;
+      vector<float> output, reference;
+      double rate = 0.0;
+      double errorProp = 0.0;
+      string error;
+      if(context.timer == nullptr || !context.timer->measure(targets, config, validation,
+           makeMeasurementPlan(Tuner::name(), validation), rate, output, errorProp, error, &reference))
+        throw StringError("NHWC attention mask validation failed: " + error);
+      errorProp = VulkanTuner::computeErrorProp(reference, output);
+      if(errorProp > VulkanTuner::COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE)
+        throw StringError("NHWC attention mask validation exceeded CPU error tolerance");
+      if(context.logger != nullptr)
+        context.logger->write("NHWC attention CPU mask check: pattern=" + to_string(pattern) +
+          " (1=all-zero, 2=non-prefix, 3=prefix), ErrorProp=" + Global::doubleToString(errorProp));
+    }
+  }
 
   template<bool NHWC>
   double tuneTransformerCooperativeMatrix(
@@ -6777,6 +7223,12 @@ namespace {
       : VulkanTuner::isFastEnough(
           callsPerSecond, scalarCallsPerSecond, VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
         );
+    if constexpr(NHWC) {
+      if(selected) {
+        validateTransformerAttentionMasks(context, config);
+        validateTransformerAttentionMasks(context, cooperativeConfig);
+      }
+    }
     if(isfinite(callsPerSecond) && callsPerSecond > 0.0)
       TransformerScaleDotProductCooperativeMatrixTuner<NHWC>::params(config) =
         TransformerScaleDotProductCooperativeMatrixTuner<NHWC>::params(cooperativeConfig);
@@ -6787,7 +7239,8 @@ namespace {
     if(context.logger != nullptr)
       context.logger->write(
         "Vulkan " + TransformerScaleDotProductCooperativeMatrixTuner<NHWC>::name() +
-        " comparison: scalar=" + Global::strprintf("%.6g", scalarCallsPerSecond) +
+          " comparison: scalar=" + (isfinite(scalarCallsPerSecond)
+            ? Global::strprintf("%.6g", scalarCallsPerSecond) : string("not_measured")) +
         " calls/s, cooperative=" + Global::strprintf("%.6g", callsPerSecond) +
         " calls/s, required_ratio=" +
         (NHWC ? "n/a" : Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO)) +
@@ -7241,6 +7694,12 @@ namespace {
     const int ffnSize = context.modelInfo.transformerFFNChannels;
     VulkanTuneParams legacyConfig = config;
     legacyConfig.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
+    const bool legacyNHWC = usesGenericNHWC(config);
+    legacyConfig.vulkan.shouldUseNHWC = legacyNHWC;
+    int productionSpatialAlignment = legacyNHWC ? config.hgemmCooperativeMatrixNHWC.MWG : 1;
+    if(config.vulkan.shouldUseHgemmCooperativeMatrixNCHW)
+      productionSpatialAlignment = std::lcm(productionSpatialAlignment, config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment());
+    const int productionHW = vk_helper::roundUpToMultipleInt(context.nnXLen * context.nnYLen, productionSpatialAlignment);
     const HGemmCooperativeMatrixNCHWTuneParams& nchwParams = config.hgemmCooperativeMatrixNCHW;
     bool legacyNCHW =
       config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
@@ -7264,6 +7723,10 @@ namespace {
       packedOCSize = static_cast<int>(roundedPackedOCSize);
       legacyNCHW = packedOCSize % nchwParams.NWG == 0;
     }
+    if(legacyNHWC) {
+      packedOCSize = vk_helper::roundUpToMultipleInt(packedOCSize, config.hgemmCooperativeMatrixNHWC.NWG);
+      legacyNCHW = false;
+    }
     if(packedOCSize < logicalPackedOCSize) {
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan transformerDualGemmSwiGLU tuning: packed FFN size overflow");
@@ -7275,7 +7738,21 @@ namespace {
     );
     VkResult result = VK_SUCCESS;
     Pipeline* legacyGemmPipeline = nullptr;
-    if(legacyNCHW) {
+    if(legacyNHWC) {
+      const auto& p = config.transformerHgemmNHWC;
+      const auto& gemmParams = p.isValid() && productionHW % p.MWG == 0 &&
+        cSize % p.KWG == 0 && packedOCSize % p.NWG == 0
+        ? p : config.hgemmCooperativeMatrixNHWC;
+      if(productionHW % gemmParams.MWG != 0 || cSize % gemmParams.KWG != 0 || packedOCSize % gemmParams.NWG != 0)
+        return false;
+      result = legacyPipelines.createHgemmCooperativeMatrixNHWC(legacyPipelines.hgemmCooperativeMatrixNHWC, gemmParams);
+      legacyGemmPipeline = &legacyPipelines.hgemmCooperativeMatrixNHWC;
+      if(context.logger != nullptr)
+        context.logger->write("Transformer FFN comparator: production NHWC packed GEMM + NHWC SwiGLU, B=" +
+          to_string(context.batchSize) + ", physical S=" + to_string(productionHW) + ", K=" +
+          to_string(cSize) + ", N=" + to_string(packedOCSize));
+    }
+    else if(legacyNCHW) {
       result = legacyPipelines.createHgemmCooperativeMatrixNCHW(
         legacyPipelines.hgemmCooperativeMatrixNCHW, nchwParams
       );
@@ -7319,7 +7796,8 @@ namespace {
     }
 
     const int logicalHW = std::max(1, context.nnXLen * context.nnYLen);
-    const int legacySpatialAlignment = legacyNCHW ? nchwParams.getRequiredSpatialAlignment() : 1;
+    const int legacySpatialAlignment = legacyNHWC ? productionSpatialAlignment :
+      (legacyNCHW ? nchwParams.getRequiredSpatialAlignment() : 1);
     const int maxCandidates = static_cast<int>(candidates.size());
     double bestFusedCallsPerSecond = 0.0;
     double conservativeLegacyCallsPerSecond = 0.0;
@@ -7342,6 +7820,8 @@ namespace {
     for(const VulkanTuneParams& candidateConfig: candidates) {
       candidateIndex++;
       const TransformerDualGemmSwiGLUTuneParams& params = candidateConfig.transformerDualGemmSwiGLU;
+      if(legacyNHWC && productionHW % params.getRequiredSpatialAlignment() != 0)
+        continue;
       vector<const Pipeline*> candidateTargets;
       result = TransformerDualGemmSwiGLUTuner::create(
         context, candidateConfig, candidatePipelines, candidateTargets
@@ -7356,7 +7836,7 @@ namespace {
       }
 
       const int combinedAlignment = std::lcm(legacySpatialAlignment, params.getRequiredSpatialAlignment());
-      const int hwSize = vk_helper::roundUpToMultipleInt(logicalHW, combinedAlignment);
+      const int hwSize = legacyNHWC ? productionHW : vk_helper::roundUpToMultipleInt(logicalHW, combinedAlignment);
       double fusedCallsPerSecond = 0.0;
       double legacyCallsPerSecond = 0.0;
       double errorProp = numeric_limits<double>::quiet_NaN();
@@ -7461,7 +7941,10 @@ void VulkanTuner::tune(
   Logger* logger,
   VulkanTuneParams& tunedConfig,
   bool printOnlyOnImprovement,
-  bool attentionOnly
+  bool attentionOnly,
+  bool transformerGemmOnly,
+  bool transformerFFNOnly,
+  bool transformerResidualOnly
 ) {
   const auto hostStart = std::chrono::steady_clock::now();
   if(device == nullptr)
@@ -7491,10 +7974,55 @@ void VulkanTuner::tune(
     );
   }
   if(attentionOnly) {
+    context.recheckAttentionFinalists = true;
     tunedConfig.vulkan.shouldUseFP16Storage = tunedConfig.vulkan.canUseFP16Storage;
     tunedConfig.vulkan.shouldUseFP16Compute = tunedConfig.vulkan.canUseFP16Compute;
-    const double scalarCallsPerSecond = runTuner<TransformerScaleDotProductTuner>(context, tunedConfig);
-    tuneTransformerCooperativeMatrix<true>(context, tunedConfig, scalarCallsPerSecond);
+    // NHWC requires cooperative attention; its CPU reference is checked by that tuner.
+    tuneTransformerCooperativeMatrix<true>(context, tunedConfig, numeric_limits<double>::quiet_NaN());
+    dummyThread.stopAndJoin();
+    return;
+  }
+  if(transformerGemmOnly) {
+    if(modelInfo.transformerProjections.empty() || !usesGenericNHWC(tunedConfig))
+      throw StringError("Transformer GEMM-only tuning requires a production NHWC Transformer configuration");
+    tuneTransformerHgemmNHWC(context, tunedConfig);
+    dummyThread.stopAndJoin();
+    return;
+  }
+  if(transformerFFNOnly) {
+    tuneTransformerDualGemmSwiGLU(context, tunedConfig);
+    dummyThread.stopAndJoin();
+    return;
+  }
+  if(transformerResidualOnly) {
+    if(!usesGenericNHWC(tunedConfig) || !tunedConfig.vulkan.shouldUseFP16Storage ||
+       !tunedConfig.vulkan.shouldUseFP16Compute || modelInfo.transformerProjections.empty())
+      throw StringError("Residual RMSNorm validation requires a production FP16 NHWC Transformer configuration");
+    const auto& layout = tunedConfig.hgemmCooperativeMatrixNHWC;
+    const int channelAlignment = std::lcm(4, std::lcm(layout.NWG, layout.KWG));
+    if(VulkanTuner::getTransformerFFNInputChannelsForTuning(modelInfo) % channelAlignment != 0)
+      throw StringError("Residual RMSNorm requires Transformer channels without NHWC channel padding");
+    ComputePipelines pipelines(device->device, device->info, logger);
+    VkResult result = pipelines.createTransformerRMSNorm(
+      pipelines.transformerResidualRmsNormNHWC, tunedConfig.rmsNorm, tunedConfig.vulkan, true, true);
+    if(result == VK_SUCCESS) result = pipelines.createTransformerRMSNorm(
+      pipelines.transformerRmsNormNHWC, tunedConfig.rmsNorm, tunedConfig.vulkan, true);
+    if(result == VK_SUCCESS) result = pipelines.createAddPointWise(
+      pipelines.addPointWise, tunedConfig.pointwise, tunedConfig.vulkan);
+    if(result != VK_SUCCESS) throw StringError("Could not create residual RMSNorm validation pipelines");
+    int alignment = tunedConfig.hgemmCooperativeMatrixNHWC.MWG;
+    if(tunedConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW)
+      alignment = std::lcm(alignment, tunedConfig.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment());
+    if(tunedConfig.vulkan.shouldUseTransformerDualGemmSwiGLU)
+      alignment = std::lcm(alignment, tunedConfig.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
+    const int physicalS = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, alignment);
+    string error;
+    for(int batch: {1, batchSize}) for(int spatial: {physicalS, std::max(1, physicalS - 1)})
+      for(int mask = 0; mask < 4; mask++)
+        if(!timer.measureTransformerResidualRMSNorm(tunedConfig, context,
+          pipelines.transformerResidualRmsNormNHWC, pipelines.transformerRmsNormNHWC, pipelines.addPointWise,
+          batch, spatial, mask, error))
+          throw StringError("Residual RMSNorm validation failed: " + error);
     dummyThread.stopAndJoin();
     return;
   }
@@ -7530,6 +8058,7 @@ void VulkanTuner::tune(
   if(!tunedConfig.vulkan.shouldUseFP16Compute)
     tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
   runNonGemmTuners(context, tunedConfig);
+  tuneTransformerHgemmNHWC(context, tunedConfig);
   tuneTransformerDualGemmSwiGLU(context, tunedConfig);
   tunedConfig.vulkan.shouldUseNHWC =
     modelInfo.transformerHeadDim > 0 &&
@@ -7583,7 +8112,8 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
        loaded.vulkan.canUseSubgroup != available.canUseSubgroup)
       throw IOError("Vulkan tuning capabilities changed for " + filename);
     if((loaded.vulkan.shouldUseCooperativeMatrix &&
-        !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNHWC)) ||
+        (!isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNHWC) ||
+          !isValidCooperativeMatrixConfig(deviceInfo, loaded.transformerHgemmNHWC))) ||
        (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         !isValidCooperativeMatrixConfig(deviceInfo, loaded.hgemmCooperativeMatrixNCHW)) ||
       (loaded.vulkan.shouldUseTransformerDualGemmSwiGLU &&
@@ -7596,7 +8126,7 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
       (loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC &&
         !isValidCooperativeMatrixConfig(
           deviceInfo, loaded.transformerCooperativeMatrixNHWC,
-          modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
+          modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim, true
         )))
       throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
     if(logger != nullptr)
@@ -7645,7 +8175,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
         throw IOError("Vulkan tuning capabilities changed for " + filename);
       }
        if((loaded.vulkan.shouldUseCooperativeMatrix &&
-           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNHWC)) ||
+           (!isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNHWC) ||
+            !isValidCooperativeMatrixConfig(device->info, loaded.transformerHgemmNHWC))) ||
          (loaded.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
           !isValidCooperativeMatrixConfig(device->info, loaded.hgemmCooperativeMatrixNCHW)) ||
          (loaded.vulkan.shouldUseTransformerDualGemmSwiGLU &&
@@ -7658,7 +8189,7 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
         (loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC &&
           !isValidCooperativeMatrixConfig(
             device->info, loaded.transformerCooperativeMatrixNHWC,
-            modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
+            modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim, true
           ))) {
         throw IOError("Vulkan cooperative-matrix configuration is no longer valid for " + filename);
       }

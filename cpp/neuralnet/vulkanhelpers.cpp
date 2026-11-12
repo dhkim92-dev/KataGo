@@ -254,7 +254,9 @@ VkInstance vk_helper::createVulkanInstance() {
   appInfo.applicationVersion = VK_MAKE_VERSION(1, 6, 4);
   appInfo.pEngineName = "Katago Vulkan Backend";
   appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-  appInfo.apiVersion = VK_API_VERSION_1_2;
+  uint32_t supportedInstanceVersion = VK_API_VERSION_1_2;
+  vkEnumerateInstanceVersion(&supportedInstanceVersion);
+  appInfo.apiVersion = std::min(supportedInstanceVersion, uint32_t(VK_API_VERSION_1_3));
   VkInstanceCreateInfo instanceCI = {};
   instanceCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
   instanceCI.pApplicationInfo = &appInfo;
@@ -307,6 +309,9 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     subgroupSizeProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
     VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperativeMatrixProperties = {};
     cooperativeMatrixProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    VkPhysicalDeviceCooperativeMatrix2PropertiesNV matrix2Properties = {};
+    matrix2Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_PROPERTIES_NV;
+    cooperativeMatrixProperties.pNext = &matrix2Properties;
     properties2.pNext = &subgroupProperties;
     subgroupProperties.pNext = &subgroupSizeProperties;
     subgroupSizeProperties.pNext = &cooperativeMatrixProperties;
@@ -315,6 +320,22 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     deviceInfo.subgroupProperties = subgroupProperties;
     deviceInfo.subgroupSizeProperties = subgroupSizeProperties;
     deviceInfo.cooopertavieMatrixProperties = cooperativeMatrixProperties;
+    deviceInfo.cooperativeMatrix2Properties = matrix2Properties;
+    auto flexibleProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV>(
+      vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV")
+    );
+    if(flexibleProperties != nullptr) {
+      uint32_t count = 0;
+      if(flexibleProperties(physicalDevice, &count, nullptr) == VK_SUCCESS) {
+        deviceInfo.flexibleMatrixProperties.resize(count);
+        for(auto& property: deviceInfo.flexibleMatrixProperties)
+          property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_FLEXIBLE_DIMENSIONS_PROPERTIES_NV;
+        if(flexibleProperties(physicalDevice, &count, deviceInfo.flexibleMatrixProperties.data()) != VK_SUCCESS)
+          deviceInfo.flexibleMatrixProperties.clear();
+        else
+          deviceInfo.flexibleMatrixProperties.resize(count);
+      }
+    }
     deviceInfo.deviceType = deviceInfo.properties.deviceType;
 
     // Get device name
@@ -335,6 +356,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features = {};
     VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperativeMatrix2Features = {};
     VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features = {};
     VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures = {};
     storage16BitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
@@ -349,12 +371,24 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     cooperativeMatrixFeatures.pNext = &maintenance4Features;
     subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
     maintenance4Features.pNext = &subgroupSizeControlFeatures;
+    cooperativeMatrix2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
+    subgroupSizeControlFeatures.pNext = &cooperativeMatrix2Features;
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
     deviceInfo.features = features2.features;
     deviceInfo.storage16BitFeatures = storage16BitFeatures;
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
     deviceInfo.vulkanMemoryModelFeatures = vulkanMemoryModelFeatures;
     deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
+    deviceInfo.cooperativeMatrix2Features = cooperativeMatrix2Features;
+    uint32_t supportedInstanceVersion = VK_API_VERSION_1_2;
+    vkEnumerateInstanceVersion(&supportedInstanceVersion);
+    deviceInfo.canUseRegisterAttentionNHWC =
+      supportedInstanceVersion >= VK_API_VERSION_1_3 && deviceInfo.properties.apiVersion >= VK_API_VERSION_1_3 &&
+      cooperativeMatrix2Features.cooperativeMatrixWorkgroupScope &&
+      cooperativeMatrix2Features.cooperativeMatrixFlexibleDimensions &&
+      cooperativeMatrix2Features.cooperativeMatrixReductions &&
+      cooperativeMatrix2Features.cooperativeMatrixConversions &&
+      cooperativeMatrix2Features.cooperativeMatrixPerElementOperations;
     deviceInfo.maintenance4Features = maintenance4Features;
     deviceInfo.subgroupSizeControlFeatures = subgroupSizeControlFeatures;
 
@@ -486,10 +520,15 @@ VulkanDevice* vk_helper::createVulkanDevice(
     }
   }
 
-  // The instance is created with VK_API_VERSION_1_2 above. A physical device
-  // advertising Vulkan 1.3 does not make promoted features core to this
-  // Vulkan 1.2 instance; use the extension path in that case.
+  // Keep the extension path for subgroup size control on the Vulkan 1.2 fallback.
   const bool subgroupSizeControlCore = false;
+  const bool enableRegisterAttentionNHWC = deviceInfo.canUseRegisterAttentionNHWC && std::any_of(
+    availableExtensions.begin(), availableExtensions.end(), [](const VkExtensionProperties& extension) {
+      return std::string(extension.extensionName) == VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME;
+    }
+  );
+  if(enableRegisterAttentionNHWC)
+    requiredExtensions.push_back(VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
   const bool subgroupSizeControlExtensionAvailable = std::any_of(
     availableExtensions.begin(), availableExtensions.end(), [](const VkExtensionProperties& extension) {
       return std::string(extension.extensionName) == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
@@ -606,6 +645,17 @@ VulkanDevice* vk_helper::createVulkanDevice(
     deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel;
 
   cmFeatures.pNext = &m4Features;
+  VkPhysicalDeviceCooperativeMatrix2FeaturesNV cm2Features = {};
+  cm2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
+  if(enableRegisterAttentionNHWC) {
+    cm2Features.cooperativeMatrixWorkgroupScope = VK_TRUE;
+    cm2Features.cooperativeMatrixFlexibleDimensions = VK_TRUE;
+    cm2Features.cooperativeMatrixReductions = VK_TRUE;
+    cm2Features.cooperativeMatrixConversions = VK_TRUE;
+    cm2Features.cooperativeMatrixPerElementOperations = VK_TRUE;
+    cmFeatures.pNext = &cm2Features;
+    cm2Features.pNext = &m4Features;
+  }
   m4Features.pNext = enableComputeFullSubgroups ? &subgroupSizeControlFeatures : nullptr;
   storage16BitFeatures.pNext = &f16Feat;
   f16Feat.pNext = &vulkanMemoryModelFeatures;
@@ -632,6 +682,7 @@ VulkanDevice* vk_helper::createVulkanDevice(
 
   VulkanDevice* vulkanDevice = new VulkanDevice();
   vulkanDevice->info = deviceInfo;
+  vulkanDevice->info.canUseRegisterAttentionNHWC = enableRegisterAttentionNHWC;
   vulkanDevice->info.subgroupSizeControlFeatures.computeFullSubgroups =
     enableComputeFullSubgroups ? VK_TRUE : VK_FALSE;
   vulkanDevice->device = device;

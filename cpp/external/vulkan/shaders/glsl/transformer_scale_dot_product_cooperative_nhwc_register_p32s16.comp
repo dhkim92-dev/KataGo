@@ -1,0 +1,157 @@
+#version 460
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_NV_cooperative_matrix2 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define PRECISION 32
+#define PRECISION_STORAGE 16
+#include "common.glsl"
+#include "transformer_rope.glsl"
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+layout(constant_id = 3) const int COOP_M_SIZE = 16;
+layout(constant_id = 4) const int COOP_N_SIZE = 16;
+layout(constant_id = 5) const int COOP_K_SIZE = 16;
+layout(constant_id = 6) const int ATTN_HEAD_DIM = 32;
+layout(constant_id = 7) const int ATTN_V_HEAD_DIM = 32;
+layout(constant_id = 8) const int COOP_Q_TILES_PER_WORKGROUP = 4;
+layout(constant_id = 9) const int COOP_PV_N_SIZE = 16;
+layout(constant_id = 10) const int USE_NHWC = 1;
+layout(constant_id = 11) const int COOP_KV_STAGES = 4;
+layout(constant_id = 12) const int COOP_USE_NV2 = 1;
+const int Q_ROWS = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
+const int KV_ROWS = COOP_N_SIZE * COOP_KV_STAGES;
+layout(set = 0, binding = 0) readonly buffer Query { f16vec4 Q4[]; };
+layout(set = 0, binding = 1) readonly buffer Key { f16vec4 K4[]; };
+layout(set = 0, binding = 2) readonly buffer Value { f16vec4 V4[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { float16_t outputData[]; };
+layout(set = 0, binding = 4) readonly buffer Mask { float16_t mask[]; };
+layout(set = 0, binding = 5) readonly buffer Cosine { float ropeCosTable[]; };
+layout(set = 0, binding = 6) readonly buffer Sine { float ropeSinTable[]; };
+layout(push_constant) uniform Params {
+  int seqLen, numHeads, numKVHeads;
+  float scale;
+  int qOffset, kOffset, vOffset, qBatchStride, kBatchStride, vBatchStride;
+  int qRowStride, kRowStride, vRowStride, outputBatchStride, outputRowStride;
+  int useRope, learnableRope, ropeNumPairs, ropeReserved;
+};
+struct QueryStorage { uvec4 alignment; float16_t values[Q_ROWS * 32]; };
+struct KeyStorage { uvec4 alignment; float16_t values[KV_ROWS * 32]; };
+struct ValueStorage { uvec4 alignment; float16_t values[KV_ROWS * 32]; };
+struct OutputStorage { uvec4 alignment; float values[Q_ROWS * 32]; };
+shared QueryStorage qs;
+shared KeyStorage ks;
+shared ValueStorage vs;
+shared OutputStorage os;
+#define SCORE coopmat<float, gl_ScopeWorkgroup, Q_ROWS, KV_ROWS, gl_MatrixUseAccumulator>
+#define OUTPUT coopmat<float, gl_ScopeWorkgroup, Q_ROWS, 32, gl_MatrixUseAccumulator>
+
+float maxRow(const in float a, const in float b) { return max(a, b); }
+float maximumState(const in uint r, const in uint c, const in float value, const in float previous) {
+  return max(value, previous);
+}
+float exponent(const in uint r, const in uint c, const in float value) { return exp2(value); }
+float inverse(const in uint r, const in uint c, const in float value) {
+  return value > 0.0 ? 1.0 / value : 0.0;
+}
+bool isLiveScore(uint row, uint column, uint qStart, uint kStart, uint batch) {
+  return qStart + row < uint(seqLen) && kStart + column < uint(seqLen) &&
+    mask[batch * uint(seqLen) + qStart + row] != float16_t(0) &&
+    mask[batch * uint(seqLen) + kStart + column] != float16_t(0);
+}
+float scaledScore(const in uint r, const in uint c, const in float value,
+                 const in uint qStart, const in uint kStart, const in uint batch) {
+  return isLiveScore(r, c, qStart, kStart, batch) ? value * (scale * 1.4426950408889634) : -1e30;
+}
+float maskedProbability(const in uint r, const in uint c, const in float value,
+                        const in uint qStart, const in uint kStart, const in uint batch) {
+  return isLiveScore(r, c, qStart, kStart, batch) ? value : 0.0;
+}
+f16vec4 rotate(f16vec4 value, int d, int pos, int head) {
+  if(useRope != 0) {
+    for(int i = 0; i < 2; i++) {
+      const int pair = d / 2 + i;
+      if(pair < min(ropeNumPairs, 16)) {
+        const int table = learnableRope != 0 ? (head * ropeNumPairs + pair) * seqLen + pos : pair * seqLen + pos;
+        float a = float(value[i * 2]), b = float(value[i * 2 + 1]);
+        applyTransformerRoPE(a, b, ropeCosTable[table], ropeSinTable[table]);
+        value[i * 2] = float16_t(a);
+        value[i * 2 + 1] = float16_t(b);
+      }
+    }
+  }
+  return value;
+}
+void main() {
+  const int tid = int(gl_LocalInvocationIndex);
+  const int qStart = int(gl_WorkGroupID.x) * Q_ROWS;
+  const int bh = int(gl_WorkGroupID.y), batch = bh / numHeads, head = bh % numHeads;
+  const int kvHead = head / (numHeads / numKVHeads);
+  for(int i = tid; i < Q_ROWS * 8; i += int(gl_WorkGroupSize.x)) {
+    const int row = i / 8, d = i % 8 * 4;
+    f16vec4 value = f16vec4(0.0);
+    if(qStart + row < seqLen)
+      value = rotate(Q4[(batch * qBatchStride + (qStart + row) * qRowStride + qOffset + head * 32 + d) / 4],
+        d, qStart + row, head * numKVHeads / numHeads);
+    for(int n = 0; n < 4; n++) qs.values[row * 32 + d + n] = value[n];
+  }
+  barrier();
+  coopmat<float16_t, gl_ScopeWorkgroup, Q_ROWS, 32, gl_MatrixUseA> queries;
+  coopMatLoad(queries, qs.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+  SCORE maxima = SCORE(-1e30), sums = SCORE(0.0);
+  OUTPUT outputValues = OUTPUT(0.0);
+  for(int start = 0; start < seqLen; start += KV_ROWS) {
+    for(int i = tid; i < KV_ROWS * 8; i += int(gl_WorkGroupSize.x)) {
+      const int row = i / 8, d = i % 8 * 4;
+      f16vec4 key = f16vec4(0.0), value = f16vec4(0.0);
+      if(start + row < seqLen) {
+        key = rotate(K4[(batch * kBatchStride + (start + row) * kRowStride + kOffset + kvHead * 32 + d) / 4],
+          d, start + row, kvHead);
+        value = V4[(batch * vBatchStride + (start + row) * vRowStride + vOffset + kvHead * 32 + d) / 4];
+      }
+      for(int n = 0; n < 4; n++) {
+        ks.values[row * 32 + d + n] = key[n];
+        vs.values[row * 32 + d + n] = value[n];
+      }
+    }
+    barrier();
+    coopmat<float16_t, gl_ScopeWorkgroup, 32, KV_ROWS, gl_MatrixUseB> keys;
+    coopMatLoad(keys, ks.values, 0, 32, gl_CooperativeMatrixLayoutColumnMajor);
+    SCORE scores = SCORE(0.0);
+    scores = coopMatMulAdd(queries, keys, scores);
+    coopMatPerElementNV(scores, scores, scaledScore, uint(qStart), uint(start), uint(batch));
+    SCORE maximum, previous = maxima, probabilities, oldWeight, rowSum;
+    coopMatReduceNV(maximum, scores, gl_CooperativeMatrixReduceRowNV, maxRow);
+    coopMatPerElementNV(maxima, maximum, maximumState, previous);
+    coopMatPerElementNV(probabilities, scores - maxima, exponent);
+    coopMatPerElementNV(probabilities, probabilities, maskedProbability, uint(qStart), uint(start), uint(batch));
+    coopMatPerElementNV(oldWeight, previous - maxima, exponent);
+    coopmat<float16_t, gl_ScopeWorkgroup, Q_ROWS, KV_ROWS, gl_MatrixUseA> weights =
+      coopmat<float16_t, gl_ScopeWorkgroup, Q_ROWS, KV_ROWS, gl_MatrixUseA>(probabilities);
+    // Match ggml's denominator: sum the rounded FP16 probability matrix by MMA.
+    coopmat<float16_t, gl_ScopeWorkgroup, KV_ROWS, KV_ROWS, gl_MatrixUseB> ones =
+      coopmat<float16_t, gl_ScopeWorkgroup, KV_ROWS, KV_ROWS, gl_MatrixUseB>(1.0);
+    rowSum = SCORE(0.0);
+    rowSum = coopMatMulAdd(weights, ones, rowSum);
+    sums = sums * oldWeight + rowSum;
+    coopmat<float16_t, gl_ScopeWorkgroup, KV_ROWS, 32, gl_MatrixUseB> values;
+    coopMatLoad(values, vs.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+    OUTPUT rowScale, pv = OUTPUT(0.0);
+    coopMatReduceNV(rowScale, oldWeight, gl_CooperativeMatrixReduceRowNV, maxRow);
+    pv = coopMatMulAdd(weights, values, pv);
+    outputValues = outputValues * rowScale + pv;
+    barrier();
+  }
+  OUTPUT normalization;
+  coopMatReduceNV(normalization, sums, gl_CooperativeMatrixReduceRowNV, maxRow);
+  coopMatPerElementNV(normalization, normalization, inverse);
+  outputValues *= normalization;
+  coopMatStore(outputValues, os.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+  barrier();
+  for(int i = tid; i < Q_ROWS * 32; i += int(gl_WorkGroupSize.x)) {
+    const int row = i / 32, d = i % 32;
+    if(qStart + row < seqLen)
+      outputData[batch * outputBatchStride + (qStart + row) * outputRowStride + head * 32 + d] = float16_t(os.values[i]);
+  }
+}

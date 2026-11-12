@@ -159,7 +159,8 @@ namespace vkcompute {
     int channelsPadded,
     float epsilon,
     const vk_shader::tune::TransformerRMSNormTuneParms& tuneParams,
-    VkResult* result
+    VkResult* result,
+    bool residualAdd = false
   );
 
   void transformerScaleDotProductCooperative(

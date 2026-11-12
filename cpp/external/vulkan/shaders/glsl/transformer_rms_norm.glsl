@@ -4,6 +4,10 @@
 */
 #include "common.glsl"
 
+#ifndef RESIDUAL_ADD
+#define RESIDUAL_ADD 0
+#endif
+
 layout(constant_id = 3) const int WG_C_SIZE = 64;
 layout(constant_id = 4) const int WG_XY_SIZE = 1;
 layout(constant_id = 5) const int C_PER_THREAD = 4;
@@ -17,11 +21,19 @@ layout(push_constant) uniform TransformerRMSNormParams {
     int channelsPadded;
 };
 
+#if RESIDUAL_ADD
+layout(set = 0, binding = 0) buffer input_buffer {
+#else
 layout(set = 0, binding = 0) buffer readonly input_buffer {
+#endif
     realstore d_input[];
 };
 
+#if RESIDUAL_ADD
+layout(set = 0, binding = 1) buffer output_buffer {
+#else
 layout(set = 0, binding = 1) buffer writeonly output_buffer {
+#endif
     realstore d_output[]; // NCHW
 };
 
@@ -105,7 +117,15 @@ void transformerRmsNormNHWC() {
         for (int dc = 0; dc < C_PER_THREAD; dc++) {
             int c = base + dc;
             if (c < cSize && xy < xySize) {
+#if RESIDUAL_ADD
+                // Match the separate add's storage rounding before RMSNorm.
+                const int index = (n*xySize + xy) * channelsPadded + c;
+                const realstore updated = realstore(LOAD(d_input, index) + LOAD(d_output, index));
+                d_input[index] = updated;
+                float val = float(updated) * maskVal;
+#else
                 float val = LOAD(d_input, (n*xySize + xy) * channelsPadded + c) * maskVal;
+#endif
                 acc += val * val;
             }
         }

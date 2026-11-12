@@ -36,6 +36,10 @@ struct VulkanDeviceInfo {
   VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures;
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
+  VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperativeMatrix2Features = {};
+  VkPhysicalDeviceCooperativeMatrix2PropertiesNV cooperativeMatrix2Properties = {};
+  std::vector<VkCooperativeMatrixFlexibleDimensionsPropertiesNV> flexibleMatrixProperties;
+  bool canUseRegisterAttentionNHWC = false;
   VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
   VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures;
 };

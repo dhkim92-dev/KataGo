@@ -440,7 +440,8 @@ void transformerRMSNorm(
   int channelsPadded,
   float epsilon,
   const vk_shader::tune::TransformerRMSNormTuneParms& tuneParams,
-  VkResult* result
+  VkResult* result,
+  bool residualAdd
 ) {
   assert(device != nullptr);
   assert(rmsNormPipeline != nullptr);
@@ -483,9 +484,11 @@ void transformerRMSNorm(
   dispatchPipeline(
     handle, device, rmsNormPipeline, cb, rmsNormDescriptorSet, &params, sizeof(params),
     workgroupCounts[0], workgroupCounts[1], workgroupCounts[2],
-    "TRANSFORMER_RMS_NORM"
+    residualAdd ? "TRANSFORMER_RESIDUAL_RMS_NORM" : "TRANSFORMER_RMS_NORM"
   );
   vk_helper::barrierCommandBufferForBuffer(cb, shaderOutput);
+  if(residualAdd)
+    vk_helper::barrierCommandBufferForBuffer(cb, shaderInput);
 }
 
 void transformerScaleDotProductCooperative(
@@ -1486,7 +1489,8 @@ void doTransformerDualGemmSwiGLU(
   const vk_shader::push::TransformerDualGemmSwiGLUPushParams pushParams = {
     cSize, hwSize, packedOCSize, ffnSize, inputChannelStride, outputChannelStride
   };
-  clearBufferForCompute(cb, nhwcOutput);
+  if(outputChannelStride != ffnSize)
+    clearBufferForCompute(cb, nhwcOutput);
   dispatchPipeline(
     handle, device, pipeline, cb, descriptorSet, &pushParams, sizeof(pushParams),
     static_cast<uint32_t>((hwSize + params.MWG - 1) / params.MWG),

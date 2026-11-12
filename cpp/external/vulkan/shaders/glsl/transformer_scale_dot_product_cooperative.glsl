@@ -4,6 +4,26 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : require
 
+#ifndef ATTENTION_QUERY_LANES
+#define ATTENTION_QUERY_LANES 1
+#endif
+#ifndef ATTENTION_KV_BLOCK_SOFTMAX
+#define ATTENTION_KV_BLOCK_SOFTMAX 0
+#endif
+#ifndef ATTENTION_PERSISTENT_OUTPUT
+#define ATTENTION_PERSISTENT_OUTPUT 0
+#endif
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+#define ATTENTION_EXP exp2
+#define ATTENTION_SCORE_SCALE softmaxScale
+#else
+#define ATTENTION_EXP exp
+#define ATTENTION_SCORE_SCALE scale
+#endif
+#if ATTENTION_QUERY_LANES == 2
+#extension GL_KHR_shader_subgroup_shuffle : require
+#endif
+
 #include "common.glsl"
 #include "transformer_rope.glsl"
 
@@ -35,7 +55,16 @@ const int V_HEAD_DIM_PAD = ((ATTN_V_HEAD_DIM + COOP_PV_N_SIZE - 1) / COOP_PV_N_S
 const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
 const int KV_STAGES = USE_NHWC == 1 ? COOP_KV_STAGES : 1;
 const int KV_BLOCK = COOP_N_SIZE * KV_STAGES;
+#if ATTENTION_KV_BLOCK_SOFTMAX == 1
+const int SOFTMAX_KV_STAGES = KV_STAGES;
+const int PV_TILE_WIDTH = COOP_PV_N_SIZE;
+#else
+const int SOFTMAX_KV_STAGES = 1;
+const int PV_TILE_WIDTH = V_HEAD_DIM_PAD;
+#endif
+const int SOFTMAX_KV_WIDTH = COOP_N_SIZE * SOFTMAX_KV_STAGES;
 const int Q_FRAGMENTS = HEAD_DIM_PAD / COOP_K_SIZE;
+const int OUTPUT_VALUES_PER_LANE = (ATTN_V_HEAD_DIM + ATTENTION_QUERY_LANES - 1) / ATTENTION_QUERY_LANES;
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
@@ -50,6 +79,12 @@ layout(set = 0, binding = 1) readonly buffer Key {
 layout(set = 0, binding = 2) readonly buffer Value {
   realstore V[];
 };
+
+#if defined(ATTENTION_VECTOR_LOADS)
+layout(set = 0, binding = 0) readonly buffer QueryVector { realstore4 Q4[]; };
+layout(set = 0, binding = 1) readonly buffer KeyVector { realstore4 K4[]; };
+layout(set = 0, binding = 2) readonly buffer ValueVector { realstore4 V4[]; };
+#endif
 
 layout(set = 0, binding = 3) writeonly buffer Output {
   realstore d_output[];
@@ -113,7 +148,7 @@ shared VTileStorage vTileStorage;
 #if ATTENTION_COOPERATIVE_ACC_TYPE == 16
 struct ScoreTileStorage {
   uvec4 alignment;
-  float16_t values[Q_BLOCK * COOP_N_SIZE];
+  float16_t values[Q_BLOCK * SOFTMAX_KV_WIDTH];
 };
 shared ScoreTileStorage scoreTileStorage;
 #define scoreTile scoreTileStorage.values
@@ -121,7 +156,7 @@ shared ScoreTileStorage scoreTileStorage;
 #else
 struct ScoreTileStorage {
   uvec4 alignment;
-  float values[Q_BLOCK * COOP_N_SIZE];
+  float values[Q_BLOCK * SOFTMAX_KV_WIDTH];
 };
 shared ScoreTileStorage scoreTileStorage;
 #define scoreTile scoreTileStorage.values
@@ -135,14 +170,14 @@ shared KeyMaskStorage keyMaskStorage;
 
 struct ProbabilityTileStorage {
   uvec4 alignment;
-  float16_t values[Q_BLOCK * COOP_N_SIZE];
+  float16_t values[Q_BLOCK * SOFTMAX_KV_WIDTH];
 };
 shared ProbabilityTileStorage probabilityTileStorage;
 #define probabilityTile probabilityTileStorage.values
 
 struct PvTileStorage {
   uvec4 alignment;
-  float values[Q_BLOCK * V_HEAD_DIM_PAD];
+  float values[Q_BLOCK * PV_TILE_WIDTH];
 };
 shared PvTileStorage pvTileStorage;
 #define pvTile pvTileStorage.values
@@ -150,6 +185,22 @@ shared PvTileStorage pvTileStorage;
 void loadQueryTile(int qBlockStart, int batchBase, int head) {
   const int localIdx = int(gl_LocalInvocationID.x);
   const int localSize = int(gl_WorkGroupSize.x);
+#if defined(ATTENTION_VECTOR_LOADS)
+  if(USE_NHWC == 1 && ATTN_HEAD_DIM % 4 == 0 &&
+     ((batchBase + qOffset + head * ATTN_HEAD_DIM) | qRowStride) % 4 == 0) {
+    for(int i = localIdx; i < HEAD_DIM_PAD / 4 * Q_BLOCK; i += localSize) {
+      const int d = i % (HEAD_DIM_PAD / 4) * 4;
+      const int q = i / (HEAD_DIM_PAD / 4);
+      const int qPos = qBlockStart + q;
+      const f16vec4 values = d < ATTN_HEAD_DIM && qPos < seqLen
+        ? f16vec4(Q4[(batchBase + qPos * qRowStride + qOffset + head * ATTN_HEAD_DIM + d) / 4])
+        : f16vec4(0.0);
+      for(int n = 0; n < 4; n++)
+        qTile[(d + n) * Q_BLOCK + q] = values[n];
+    }
+    return;
+  }
+#endif
   for(int i = localIdx; i < HEAD_DIM_PAD * Q_BLOCK; i += localSize) {
     const int d = USE_NHWC == 1 ? i % HEAD_DIM_PAD : i / Q_BLOCK;
     const int q = USE_NHWC == 1 ? i / HEAD_DIM_PAD : i % Q_BLOCK;
@@ -169,6 +220,21 @@ void loadQueryTile(int qBlockStart, int batchBase, int head) {
 void loadKeyTile(int kvStart, int batchIndex, int batchBase, int kvHead) {
   const int localIdx = int(gl_LocalInvocationID.x);
   const int localSize = int(gl_WorkGroupSize.x);
+#if defined(ATTENTION_VECTOR_LOADS)
+  if(USE_NHWC == 1 && ATTN_HEAD_DIM % 4 == 0 &&
+     ((batchBase + kOffset + kvHead * ATTN_HEAD_DIM) | kRowStride) % 4 == 0) {
+    for(int i = localIdx; i < HEAD_DIM_PAD / 4 * KV_BLOCK; i += localSize) {
+      const int d = i % (HEAD_DIM_PAD / 4) * 4;
+      const int k = i / (HEAD_DIM_PAD / 4);
+      const int kPos = kvStart + k;
+      const f16vec4 values = d < ATTN_HEAD_DIM && kPos < seqLen
+        ? f16vec4(K4[(batchBase + kPos * kRowStride + kOffset + kvHead * ATTN_HEAD_DIM + d) / 4])
+        : f16vec4(0.0);
+      for(int n = 0; n < 4; n++)
+        kTile[(d + n) * KV_BLOCK + k] = values[n];
+    }
+  } else
+#endif
   for(int i = localIdx; i < HEAD_DIM_PAD * KV_BLOCK; i += localSize) {
     const int d = USE_NHWC == 1 ? i % HEAD_DIM_PAD : i / KV_BLOCK;
     const int k = USE_NHWC == 1 ? i / HEAD_DIM_PAD : i % KV_BLOCK;
@@ -241,6 +307,23 @@ void applyKeyRope(int kvStart, int kvHead) {
 void loadValueTile(int kvStart, int batchBase, int kvHead) {
   const int localIdx = int(gl_LocalInvocationID.x);
   const int localSize = int(gl_WorkGroupSize.x);
+#if defined(ATTENTION_VECTOR_LOADS)
+  if(USE_NHWC == 1 && ATTN_V_HEAD_DIM % 4 == 0 &&
+     ((batchBase + vOffset + kvHead * ATTN_V_HEAD_DIM) | vRowStride) % 4 == 0) {
+    for(int i = localIdx; i < KV_PAD * KV_STAGES * V_HEAD_DIM_PAD / 4; i += localSize) {
+      const int k = i / (V_HEAD_DIM_PAD / 4);
+      const int d = i % (V_HEAD_DIM_PAD / 4) * 4;
+      const int fragmentK = k % KV_PAD;
+      const int kPos = kvStart + (k / KV_PAD) * COOP_N_SIZE + fragmentK;
+      const f16vec4 values = fragmentK < COOP_N_SIZE && kPos < seqLen && d < ATTN_V_HEAD_DIM
+        ? f16vec4(V4[(batchBase + kPos * vRowStride + vOffset + kvHead * ATTN_V_HEAD_DIM + d) / 4])
+        : f16vec4(0.0);
+      for(int n = 0; n < 4; n++)
+        vTile[i * 4 + n] = values[n];
+    }
+    return;
+  }
+#endif
   for(int i = localIdx; i < KV_PAD * KV_STAGES * V_HEAD_DIM_PAD; i += localSize) {
     const int k = i / V_HEAD_DIM_PAD;
     const int fragmentK = k % KV_PAD;
@@ -278,6 +361,8 @@ void runScaleDotProductCooperative() {
   const int localIdx = int(gl_LocalInvocationID.x);
   const int subgroupIdx = int(gl_SubgroupID);
   const int subgroupLocalIdx = int(gl_SubgroupInvocationID);
+  const int queryRow = subgroupLocalIdx / ATTENTION_QUERY_LANES;
+  const int queryLane = subgroupLocalIdx % ATTENTION_QUERY_LANES;
   const int qBase = subgroupIdx * COOP_M_SIZE;
   const int qBlockStart = int(gl_WorkGroupID.x) * Q_BLOCK;
   const int bh = int(gl_WorkGroupID.y);
@@ -287,21 +372,31 @@ void runScaleDotProductCooperative() {
   const int qBatchBase = batch * qBatchStride;
   const int kBatchBase = batch * kBatchStride;
   const int vBatchBase = batch * vBatchStride;
-  const int qPos = qBlockStart + qBase + subgroupLocalIdx;
+  const int qPos = qBlockStart + qBase + queryRow;
 
   float qMask = 0.0;
   float runningMax = -1e30;
   float runningSum = 0.0;
-  float acc[ATTN_V_HEAD_DIM];
-  for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+  const float softmaxScale = scale * 1.4426950408889634;
+#endif
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+  coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator>
+    outputFrags[V_HEAD_DIM_PAD / COOP_PV_N_SIZE];
+  for(int i = 0; i < V_HEAD_DIM_PAD / COOP_PV_N_SIZE; i++)
+    outputFrags[i] = coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator>(0.0);
+#else
+  float acc[OUTPUT_VALUES_PER_LANE];
+  for(int d = 0; d < OUTPUT_VALUES_PER_LANE; d++)
     acc[d] = 0.0;
+#endif
 
   loadQueryTile(qBlockStart, qBatchBase, head);
   barrier();
 
-  if(subgroupLocalIdx < COOP_M_SIZE && qPos < seqLen)
+  if(queryRow < COOP_M_SIZE && qPos < seqLen)
     qMask = LOAD(mask, batch * seqLen + qPos);
-  const bool qValid = subgroupLocalIdx < COOP_M_SIZE && qPos < seqLen && qMask != 0.0;
+  const bool qValid = queryRow < COOP_M_SIZE && qPos < seqLen && qMask != 0.0;
 
   if(useRope != 0)
     applyQueryRope(qBlockStart, head);
@@ -323,16 +418,20 @@ void runScaleDotProductCooperative() {
       applyKeyRope(kvBlockStart, kvHead);
     barrier();
 
-    for(int kvStage = 0; kvStage < KV_STAGES && kvBlockStart + kvStage * COOP_N_SIZE < seqLen; kvStage++) {
+    for(int kvStage = 0; kvStage < KV_STAGES && kvBlockStart + kvStage * COOP_N_SIZE < seqLen; kvStage += SOFTMAX_KV_STAGES) {
       const int keyBase = kvStage * COOP_N_SIZE;
       const int valueBase = kvStage * KV_PAD * V_HEAD_DIM_PAD;
-      scoreFrag = coopmat<coop_acc_dtype, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseAccumulator>(coop_acc_dtype(0.0));
-      for(int kOffset = 0; kOffset < HEAD_DIM_PAD; kOffset += COOP_K_SIZE) {
-        const int kFragIdx = kOffset / COOP_K_SIZE;
-        coopMatLoad(kFrag, kTile, kOffset * KV_BLOCK + keyBase, KV_BLOCK, gl_CooperativeMatrixLayoutRowMajor);
-        scoreFrag = coopMatMulAdd(qFrags[kFragIdx], kFrag, scoreFrag);
+      // Store every score fragment before updating the block's softmax state.
+      // Padded keys are computed as well; their keyMaskTile entries are zero.
+      for(int stage = 0; stage < SOFTMAX_KV_STAGES; stage++) {
+        scoreFrag = coopmat<coop_acc_dtype, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseAccumulator>(coop_acc_dtype(0.0));
+        for(int kOffset = 0; kOffset < HEAD_DIM_PAD; kOffset += COOP_K_SIZE) {
+          const int kFragIdx = kOffset / COOP_K_SIZE;
+          coopMatLoad(kFrag, kTile, kOffset * KV_BLOCK + keyBase + stage * COOP_N_SIZE, KV_BLOCK, gl_CooperativeMatrixLayoutRowMajor);
+          scoreFrag = coopMatMulAdd(qFrags[kFragIdx], kFrag, scoreFrag);
+        }
+        storeScoreTile(scoreFrag, stage * COOP_N_SIZE * Q_BLOCK + qBase);
       }
-      storeScoreTile(scoreFrag, qBase);
       subgroupBarrier();
 
       // Cooperative matrix operands are FP16 on the supported devices. Keep the
@@ -341,69 +440,133 @@ void runScaleDotProductCooperative() {
       // This is the same precision boundary used by the CUDA tensor-core flash
       // attention path, while avoiding the scalar k*d inner loop.
       float oldWeight = 1.0;
-      if(subgroupLocalIdx < COOP_M_SIZE) {
+      if(queryRow < COOP_M_SIZE) {
         float tileMax = -1e30;
         if(qValid) {
-          for(int k = 0; k < COOP_N_SIZE; k++) {
+          for(int k = queryLane; k < SOFTMAX_KV_WIDTH; k += ATTENTION_QUERY_LANES) {
             if(keyMaskTile[keyBase + k] != 0.0)
-              tileMax = max(tileMax, getScore(qBase, subgroupLocalIdx, k) * scale);
+              tileMax = max(tileMax, getScore(qBase, queryRow, k) * ATTENTION_SCORE_SCALE);
           }
         }
+#if ATTENTION_QUERY_LANES == 2
+        tileMax = max(tileMax, subgroupShuffle(tileMax, uint(subgroupLocalIdx ^ 1)));
+#endif
         const float newMax = max(runningMax, tileMax);
-        oldWeight = exp(runningMax - newMax);
+        oldWeight = ATTENTION_EXP(runningMax - newMax);
         if(qValid) {
           runningSum *= oldWeight;
           runningMax = newMax;
         }
-        for(int k = 0; k < COOP_N_SIZE; k++) {
+#if ATTENTION_QUERY_LANES == 2
+        float tileSum = 0.0;
+#endif
+        for(int k = queryLane; k < SOFTMAX_KV_WIDTH; k += ATTENTION_QUERY_LANES) {
           float weight = 0.0;
           if(qValid && keyMaskTile[keyBase + k] != 0.0)
-            weight = exp(getScore(qBase, subgroupLocalIdx, k) * scale - newMax);
+            weight = ATTENTION_EXP(getScore(qBase, queryRow, k) * ATTENTION_SCORE_SCALE - newMax);
+#if ATTENTION_QUERY_LANES == 2
+          tileSum += weight;
+#else
           if(qValid)
             runningSum += weight;
-          probabilityTile[k * Q_BLOCK + qBase + subgroupLocalIdx] = float16_t(weight);
+#endif
+          probabilityTile[k * Q_BLOCK + qBase + queryRow] = float16_t(weight);
         }
+#if ATTENTION_QUERY_LANES == 2
+        runningSum += tileSum + subgroupShuffle(tileSum, uint(subgroupLocalIdx ^ 1));
+#endif
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+        // Reuse the existing PV tile to broadcast a row scale without assuming
+        // how cooperative-matrix components are distributed across lanes.
+        if(queryLane == 0)
+          for(int n = 0; n < COOP_PV_N_SIZE; n++)
+            pvTile[n * Q_BLOCK + qBase + queryRow] = oldWeight;
+#endif
       }
 
       subgroupBarrier();
 
-      coopmat<float16_t, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseA> probabilityFrag;
-      coopMatLoad(
-        probabilityFrag, probabilityTile, qBase, Q_BLOCK,
-        gl_CooperativeMatrixLayoutColumnMajor
-      );
+      coopmat<float16_t, gl_ScopeSubgroup, COOP_M_SIZE, COOP_N_SIZE, gl_MatrixUseA> probabilityFrags[SOFTMAX_KV_STAGES];
+      for(int stage = 0; stage < SOFTMAX_KV_STAGES; stage++) {
+        coopMatLoad(
+          probabilityFrags[stage], probabilityTile, stage * COOP_N_SIZE * Q_BLOCK + qBase, Q_BLOCK,
+          gl_CooperativeMatrixLayoutColumnMajor
+        );
+      }
 
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+      coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator> rowScale;
+      coopMatLoad(rowScale, pvTile, qBase, Q_BLOCK, gl_CooperativeMatrixLayoutColumnMajor);
+      subgroupBarrier();
+#endif
       for(int valueStart = 0; valueStart < V_HEAD_DIM_PAD; valueStart += COOP_PV_N_SIZE) {
         coopmat<float16_t, gl_ScopeSubgroup, COOP_N_SIZE, COOP_PV_N_SIZE, gl_MatrixUseB> valueFrag;
         coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator> pvFrag;
         pvFrag = coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator>(0.0);
-        coopMatLoad(
-          valueFrag, vTile, valueBase + valueStart, V_HEAD_DIM_PAD,
-          gl_CooperativeMatrixLayoutRowMajor
-        );
-        pvFrag = coopMatMulAdd(probabilityFrag, valueFrag, pvFrag);
+        for(int stage = 0; stage < SOFTMAX_KV_STAGES; stage++) {
+          coopMatLoad(
+            valueFrag, vTile, valueBase + stage * KV_PAD * V_HEAD_DIM_PAD + valueStart, V_HEAD_DIM_PAD,
+            gl_CooperativeMatrixLayoutRowMajor
+          );
+          pvFrag = coopMatMulAdd(probabilityFrags[stage], valueFrag, pvFrag);
+        }
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+        const int outputTile = valueStart / COOP_PV_N_SIZE;
+        outputFrags[outputTile] = outputFrags[outputTile] * rowScale + pvFrag;
+#else
+#if ATTENTION_KV_BLOCK_SOFTMAX == 1
+        const int pvColumn = 0;
+#else
+        const int pvColumn = valueStart;
+#endif
         coopMatStore(
-          pvFrag, pvTile, valueStart * Q_BLOCK + qBase, Q_BLOCK,
+          pvFrag, pvTile, pvColumn * Q_BLOCK + qBase, Q_BLOCK,
           gl_CooperativeMatrixLayoutColumnMajor
         );
         subgroupBarrier();
 
-        if(subgroupLocalIdx < COOP_M_SIZE && qValid) {
+        if(queryRow < COOP_M_SIZE && qValid) {
           const int valueCount = min(COOP_PV_N_SIZE, ATTN_V_HEAD_DIM - valueStart);
-          for(int d = 0; d < valueCount; d++)
-            acc[valueStart + d] = acc[valueStart + d] * oldWeight +
-              pvTile[(valueStart + d) * Q_BLOCK + qBase + subgroupLocalIdx];
+          for(int d = queryLane; d < valueCount; d += ATTENTION_QUERY_LANES)
+            acc[(valueStart + d) / ATTENTION_QUERY_LANES] =
+              acc[(valueStart + d) / ATTENTION_QUERY_LANES] * oldWeight +
+              pvTile[(pvColumn + d) * Q_BLOCK + qBase + queryRow];
         }
         subgroupBarrier();
+#endif
       }
     }
     if(USE_NHWC == 1 && kvBlockStart + KV_BLOCK < seqLen)
       barrier();
   }
 
-  if(subgroupLocalIdx < COOP_M_SIZE && qPos < seqLen) {
+#if ATTENTION_PERSISTENT_OUTPUT == 1
+  if(queryRow < COOP_M_SIZE && queryLane == 0) {
+    const float invSum = qValid && runningSum > 0.0 ? 1.0 / runningSum : 0.0;
+    for(int n = 0; n < COOP_PV_N_SIZE; n++)
+      pvTile[n * Q_BLOCK + qBase + queryRow] = invSum;
+  }
+  subgroupBarrier();
+  coopmat<float, gl_ScopeSubgroup, COOP_M_SIZE, COOP_PV_N_SIZE, gl_MatrixUseAccumulator> rowNormalization;
+  coopMatLoad(rowNormalization, pvTile, qBase, Q_BLOCK, gl_CooperativeMatrixLayoutColumnMajor);
+  subgroupBarrier();
+  for(int valueStart = 0; valueStart < V_HEAD_DIM_PAD; valueStart += COOP_PV_N_SIZE) {
+    const int outputTile = valueStart / COOP_PV_N_SIZE;
+    outputFrags[outputTile] = outputFrags[outputTile] * rowNormalization;
+    coopMatStore(outputFrags[outputTile], pvTile, qBase, Q_BLOCK, gl_CooperativeMatrixLayoutColumnMajor);
+    subgroupBarrier();
+    if(queryRow < COOP_M_SIZE && qPos < seqLen) {
+      const int valueCount = min(COOP_PV_N_SIZE, ATTN_V_HEAD_DIM - valueStart);
+      for(int d = queryLane; d < valueCount; d += ATTENTION_QUERY_LANES)
+        STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + valueStart + d,
+          floatToReal(pvTile[d * Q_BLOCK + qBase + queryRow]));
+    }
+    subgroupBarrier();
+  }
+#else
+  if(queryRow < COOP_M_SIZE && qPos < seqLen) {
     if(qMask == 0.0) {
-      for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+      for(int d = queryLane; d < ATTN_V_HEAD_DIM; d += ATTENTION_QUERY_LANES)
         if(USE_NHWC == 1)
           STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + d, floatToReal(0.0));
         else
@@ -411,13 +574,14 @@ void runScaleDotProductCooperative() {
     }
     else {
       const float invSum = runningSum > 0.0 ? 1.0 / runningSum : 0.0;
-      for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+      for(int d = queryLane; d < ATTN_V_HEAD_DIM; d += ATTENTION_QUERY_LANES)
         if(USE_NHWC == 1)
-          STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + d, floatToReal(acc[d] * invSum));
+          STORE(d_output, batch * outputBatchStride + qPos * outputRowStride + head * ATTN_V_HEAD_DIM + d, floatToReal(acc[d / ATTENTION_QUERY_LANES] * invSum));
         else
-          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(acc[d] * invSum));
+          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(acc[d / ATTENTION_QUERY_LANES] * invSum));
     }
   }
+#endif
 }
 
 void transformerScaleDotProductCooperativeNCHW() {
