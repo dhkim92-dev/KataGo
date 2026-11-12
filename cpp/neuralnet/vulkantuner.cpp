@@ -1330,6 +1330,11 @@ namespace {
           static_cast<const NestedBottleneckResidualBlockDesc*>(block.second.get());
         findTransformerInfo(nested->blocks, modelInfo);
       }
+      else if(block.first == GLOBAL_POOLING_BLOCK_KIND) {
+        const auto* gpool = static_cast<const GlobalPoolingResidualBlockDesc*>(block.second.get());
+        modelInfo.gemmLayers.push_back({gpool->gpoolToBiasMul.inChannels,
+          gpool->gpoolToBiasMul.outChannels, 1.0, false, VulkanTuner::GemmTuneCase::Kind::Dense});
+      }
     }
   }
 }
@@ -1345,12 +1350,71 @@ VulkanTuner::ModelInfoForTuning VulkanTuner::ModelInfoForTuning::ofDesc(const Mo
   modelInfo.regularNumChannels = desc.trunk.regularNumChannels;
   modelInfo.gpoolNumChannels = desc.trunk.gpoolNumChannels;
   modelInfo.modelVersion = desc.modelVersion;
+  desc.iterConvLayers([&](const ConvLayerDesc& conv) {
+    if(conv.convXSize != conv.convYSize ||
+       (conv.convXSize != 1 && conv.convXSize != 3 && conv.convXSize != 5))
+      return;
+    const auto kind = conv.convXSize == 1 ? GemmTuneCase::Kind::Spatial :
+      conv.convXSize == 3 ? GemmTuneCase::Kind::Winograd3x3 : GemmTuneCase::Kind::Winograd5x5;
+    modelInfo.gemmLayers.push_back({conv.inChannels, conv.outChannels, 1.0, false, kind});
+  });
+  const auto addDense = [&](const MatMulLayerDesc& mul) {
+    if(mul.inChannels > 0 && mul.outChannels > 0)
+      modelInfo.gemmLayers.push_back({mul.inChannels, mul.outChannels, 1.0, false, GemmTuneCase::Kind::Dense});
+  };
+  addDense(desc.trunk.initialMatMul);
+  if(desc.trunk.metaEncoderVersion > 0) {
+    addDense(desc.trunk.sgfMetadataEncoder.mul1);
+    addDense(desc.trunk.sgfMetadataEncoder.mul2);
+    addDense(desc.trunk.sgfMetadataEncoder.mul3);
+  }
+  addDense(desc.policyHead.gpoolToBiasMul);
+  addDense(desc.policyHead.gpoolToPassMul);
+  addDense(desc.policyHead.gpoolToPassMul2);
+  addDense(desc.valueHead.v2Mul);
+  addDense(desc.valueHead.v3Mul);
+  addDense(desc.valueHead.sv3Mul);
   findTransformerInfo(desc.trunk.blocks, modelInfo);
   return modelInfo;
 }
 
 int VulkanTuner::getTransformerFFNInputChannelsForTuning(const ModelInfoForTuning& modelInfo) {
   return modelInfo.midNumChannels;
+}
+
+vector<VulkanTuner::GemmTuneCase> VulkanTuner::getGemmTuningCases(
+  const string& tunerName, const ModelInfoForTuning& modelInfo, const VulkanTuneParams& config
+) {
+  vector<GemmTuneCase> cases;
+  const auto addCase = [&](const GemmTuneCase& c) {
+    if(c.inChannels <= 0 || c.outChannels <= 0)
+      return;
+    auto existing = find_if(cases.begin(), cases.end(), [&](const GemmTuneCase& other) {
+      return c.inChannels == other.inChannels && c.outChannels == other.outChannels && c.kind == other.kind;
+    });
+    if(existing == cases.end()) cases.push_back(c);
+    else existing->weight += c.weight;
+  };
+  for(const auto& c: modelInfo.gemmLayers) {
+    const bool dense = c.kind == GemmTuneCase::Kind::Dense;
+    const bool spatial = c.kind == GemmTuneCase::Kind::Spatial;
+    const bool nchwCM = config.vulkan.shouldUseCooperativeMatrix &&
+      config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
+      config.hgemmCooperativeMatrixNCHW.isValid() &&
+      c.inChannels % config.hgemmCooperativeMatrixNCHW.KWG == 0 &&
+      c.outChannels % config.hgemmCooperativeMatrixNCHW.NWG == 0;
+    if((tunerName == "xgemmDirect" && (dense || (spatial && !config.vulkan.shouldUseNHWC && !nchwCM))) ||
+       ((tunerName == "xgemm" || tunerName == "xgemm16") && !dense && !spatial &&
+        !config.vulkan.shouldUseCooperativeMatrix) ||
+       (tunerName == "hgemmCooperativeMatrix" && !dense && !spatial) ||
+       (tunerName == "hgemmCooperativeMatrixNHWC" && !dense) ||
+       (tunerName == "hgemmCooperativeMatrixNCHW" && spatial))
+      addCase(c);
+  }
+  if(tunerName == "xgemmDirect" && !config.vulkan.shouldUseNHWC)
+    for(const auto& p: modelInfo.transformerProjections)
+      addCase({p.inChannels, p.outChannels, 1.0});
+  return cases;
 }
 
 string VulkanTuner::defaultDirectory(bool makeDir, const string& homeDataDirOverride) {
@@ -1503,7 +1567,6 @@ namespace {
     int nnYLen;
     const VulkanTuner::ModelInfoForTuning& modelInfo;
     bool full;
-    double nchwFallbackCallsPerSecond;
     vector<CooperativeMatrixTuneShape> cooperativeMatrixTuneShapes;
     Logger* logger;
     VulkanTimestampTimer* timer;
@@ -1513,10 +1576,12 @@ namespace {
     bool transformerFusedFFN = false;
     int attentionValidationMask = 0;
     bool recheckAttentionFinalists = false;
+    const VulkanTuneParams* selectedGemmConfig = nullptr;
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
-    return config.vulkan.canUseCooperativeMatrix &&
+    return config.vulkan.shouldUseNHWC &&
+           config.vulkan.canUseCooperativeMatrix &&
            config.vulkan.canUseFP16Storage &&
            config.vulkan.canUseFP16Compute &&
            config.vulkan.shouldUseFP16Storage &&
@@ -1600,12 +1665,7 @@ namespace {
     return Tuner::isValid(config);
   }
 
-  struct GemmTuneCase {
-    int inChannels;
-    int outChannels;
-    double weight;
-    bool padOutputForNCHW = false;
-  };
+  using VulkanTuner::GemmTuneCase;
 
   vector<GemmTuneCase> getGemmTuneCases(
     const TuningContext& context,
@@ -1677,6 +1737,8 @@ namespace {
       }
       return cases;
     }
+    if(context.selectedGemmConfig != nullptr && !context.modelInfo.gemmLayers.empty())
+      return VulkanTuner::getGemmTuningCases(tunerName, context.modelInfo, *context.selectedGemmConfig);
     const bool direct = tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW";
     const bool includeInputConvCase = tunerName != "hgemmCooperativeMatrix";
     return getGemmTuneCases(context, direct, !direct, includeInputConvCase);
@@ -1694,7 +1756,7 @@ namespace {
       return weights;
     }
     if(tunerName == "xgemmDirect" || tunerName == "hgemmCooperativeMatrixNCHW") {
-      vector<GemmTuneCase> cases = getGemmTuneCases(context, true, false);
+      vector<GemmTuneCase> cases = getTunerGemmTuneCases(tunerName, context);
       vector<double> weights;
       weights.reserve(cases.size());
       for(const GemmTuneCase& tuneCase: cases)
@@ -1735,22 +1797,6 @@ namespace {
       return workloadWeights.empty() ? 1.0 : workloadWeights[run % workloadWeights.size()];
     }
   };
-
-  pair<double,double> getNCHWEligibilityWeights(
-    const TuningMeasurementPlan& plan,
-    const HGemmCooperativeMatrixNCHWTuneParams& params
-  ) {
-    double eligibleWeight = 0.0;
-    double totalWeight = 0.0;
-    for(size_t i = 0; i < plan.gemmCases.size(); i++) {
-      const double weight = plan.weightForRun(i);
-      totalWeight += weight;
-      if(plan.gemmCases[i].inChannels % params.KWG == 0 &&
-         (plan.gemmCases[i].padOutputForNCHW || plan.gemmCases[i].outChannels % params.NWG == 0))
-        eligibleWeight += weight;
-    }
-    return {eligibleWeight, totalWeight};
-  }
 
   bool isTransformerAttentionTuner(const string& name);
 
@@ -2231,8 +2277,7 @@ namespace {
       // Keep multi-case GEMM measurements case-local. The shared multi-case
       // buffers use maximum dimensions, while these dispatches use each
       // case's own dimensions and strides.
-      if((plan.kernelName == "xgemm" || plan.kernelName == "xgemm16" ||
-          plan.kernelName == "hgemmCooperativeMatrixNHWC") && plan.gemmCases.size() > 1) {
+      if(plan.gemmCases.size() > 1) {
         readback.clear();
         double weightedSeconds = 0.0;
         double totalWeight = 0.0;
@@ -2251,11 +2296,30 @@ namespace {
           if(!measure(pipelines, config, context, casePlan, rate, output, errorProp, error, cpuReference))
             return false;
           readback.insert(readback.end(), output.begin(), output.end());
-          weightedSeconds += gemmCase.weight / rate;
-          totalWeight += gemmCase.weight;
+          const auto& nchw = config.hgemmCooperativeMatrixNCHW;
+          const bool eligible = plan.kernelName != "hgemmCooperativeMatrixNCHW" ||
+            (gemmCase.inChannels % nchw.KWG == 0 &&
+             (gemmCase.padOutputForNCHW || gemmCase.outChannels % nchw.NWG == 0));
+          if(eligible) {
+            weightedSeconds += gemmCase.weight / rate;
+            totalWeight += gemmCase.weight;
+          }
+        }
+        if(totalWeight <= 0.0) {
+          error = "no production layer is eligible for the selected cooperative tiles";
+          return false;
         }
         callsPerSecond = totalWeight / weightedSeconds;
         return true;
+      }
+      const bool denseGemm = !plan.gemmCases.empty() &&
+        plan.gemmCases.front().kind == GemmTuneCase::Kind::Dense;
+      if(plan.kernelName == "xgemmDirect" && pipelines.size() > 1) {
+        vector<const Pipeline*> selected;
+        for(const Pipeline* pipeline: pipelines)
+          if((pipeline->name.find("xgemm_direct_batched_tt") == 0) == denseGemm)
+            selected.push_back(pipeline);
+        return measure(selected, config, context, plan, callsPerSecond, readback, errorProp, error, cpuReference);
       }
 
       uint32_t descriptorCount = 0;
@@ -2285,7 +2349,9 @@ namespace {
         return params.KWG > 0 ? std::lcm(params.NWG, params.KWG) : params.NWG;
       };
       int nhwcSpatialAlignment = 1;
-      if(useNHWC) {
+      const bool cooperativePadding = config.vulkan.shouldUseCooperativeMatrix &&
+        config.vulkan.shouldUseFP16Storage && config.vulkan.shouldUseFP16Compute;
+      if(useNHWC || cooperativePadding) {
         const auto addNhwcSpatialAlignment = [&](const auto& params) {
           if(params.MWG > 0)
             nhwcSpatialAlignment = std::lcm(nhwcSpatialAlignment, params.MWG);
@@ -2293,6 +2359,12 @@ namespace {
         addNhwcSpatialAlignment(context.transformerPhysicalLayout != nullptr
           ? *context.transformerPhysicalLayout : config.hgemmCooperativeMatrixNHWC);
       }
+      if(config.vulkan.shouldUseHgemmCooperativeMatrixNCHW || plan.kernelName == "hgemmCooperativeMatrixNCHW")
+        nhwcSpatialAlignment = std::lcm(nhwcSpatialAlignment,
+          config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment());
+      if(config.vulkan.shouldUseTransformerDualGemmSwiGLU)
+        nhwcSpatialAlignment = std::lcm(nhwcSpatialAlignment,
+          config.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
       int nhwcChannelAlignment = 1;
       if(useNHWC) {
         nhwcChannelAlignment = std::lcm(
@@ -2309,24 +2381,8 @@ namespace {
         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         config.hgemmCooperativeMatrixNCHW.isValid();
       const bool usePaddedNCHWXY =
-        plan.kernelName == "hgemmCooperativeMatrixNCHW" || useNCHWCooperativeMatrix;
-      const bool usePaddedGpoolXY =
-        plan.kernelName == "gPool" &&
-        config.vulkan.canUseFP16Storage &&
-        config.vulkan.canUseFP16Compute &&
-        config.vulkan.shouldUseFP16Storage &&
-        config.vulkan.shouldUseFP16Compute &&
-        config.vulkan.canUseCooperativeMatrix &&
-        config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-        config.hgemmCooperativeMatrixNCHW.isValid();
-      const size_t xySize = useNHWC
-        ? nhwcSpatialSize
-        : (usePaddedNCHWXY || usePaddedGpoolXY
-          ? vk_helper::roundUpToMultiple(
-            logicalXYSize,
-            static_cast<size_t>(config.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment())
-          )
-          : logicalXYSize);
+        plan.kernelName == "hgemmCooperativeMatrixNCHW" || useNCHWCooperativeMatrix || cooperativePadding;
+      const size_t xySize = useNHWC || usePaddedNCHWXY ? nhwcSpatialSize : logicalXYSize;
       const bool addChannelBiasesUsingFP16Storage =
         config.vulkan.canUseFP16Storage &&
         config.vulkan.canUseFP16Compute &&
@@ -2344,14 +2400,7 @@ namespace {
             xySize, static_cast<size_t>(std::max(16, config.hgemmCooperativeMatrixNCHW.MWARP))
           )
         : xySize;
-      const bool addChannelBiasesUseNHWC =
-        config.vulkan.canUseCooperativeMatrix &&
-        config.vulkan.canUseFP16Storage &&
-        config.vulkan.canUseFP16Compute &&
-        config.vulkan.shouldUseFP16Storage &&
-        config.vulkan.shouldUseFP16Compute &&
-        (config.vulkan.shouldUseCooperativeMatrix ||
-         config.vulkan.shouldUseHgemmCooperativeMatrixNCHW);
+      const bool addChannelBiasesUseNHWC = useNHWC;
       const size_t addChannelBiasesSpatialSize = addChannelBiasesUseNHWC
         ? nhwcSpatialSize : addChannelBiasesXYSize;
       const size_t addChannelBiasesChannels = static_cast<size_t>(
@@ -2364,11 +2413,14 @@ namespace {
         config.vulkan.shouldUseFP16Compute ? config.xgemm16 : config.xgemm;
       const bool cooperativeForPadding = (nhwcCooperative || nhwcWinograd)
         && activeNhwcParams.isValid();
-      const int activeMPaddingMult = cooperativeForPadding
+      const bool genericWinograd = !useNHWC && config.vulkan.shouldUseCooperativeMatrix &&
+        (plan.kernelName.find("InputTransform") != string::npos ||
+         plan.kernelName.find("OutputTransform") != string::npos);
+      const int activeMPaddingMult = genericWinograd ? config.hgemmCooperativeMatrix.MWG : cooperativeForPadding
         ? activeNhwcParams.MWG : xgemmParams.MWG;
-      const int activeNPaddingMult = cooperativeForPadding
+      const int activeNPaddingMult = genericWinograd ? config.hgemmCooperativeMatrix.NWG : cooperativeForPadding
         ? activeNhwcParams.NWG : xgemmParams.NWG;
-      const int activeKPaddingMult = cooperativeForPadding
+      const int activeKPaddingMult = genericWinograd ? config.hgemmCooperativeMatrix.KWG : cooperativeForPadding
         ? activeNhwcParams.KWG : xgemmParams.KWG;
       const size_t maxChannels = static_cast<size_t>(std::max({
         1, context.modelInfo.numInputChannels, context.modelInfo.trunkNumChannels, context.modelInfo.midNumChannels,
@@ -2387,19 +2439,25 @@ namespace {
         context.modelInfo.gpoolNumChannels
       }));
       const bool isGemm = !plan.gemmCases.empty();
+      const bool winogradGemm = isGemm &&
+        (plan.gemmCases.front().kind == GemmTuneCase::Kind::Winograd3x3 ||
+         plan.gemmCases.front().kind == GemmTuneCase::Kind::Winograd5x5);
       const bool directGemm = plan.kernelName == "xgemmDirect" || plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const bool cooperative =
         plan.kernelName == "hgemmCooperativeMatrix" ||
         plan.kernelName == "hgemmCooperativeMatrixNHWC" ||
         plan.kernelName == "hgemmCooperativeMatrixNCHW";
       const ConvTuneParams& transformConvParams =
-        plan.kernelName.find("5x5") != string::npos ? config.conv5x5 : config.conv3x3;
+        plan.kernelName.find("5x5") != string::npos ||
+        (winogradGemm && plan.gemmCases.front().kind == GemmTuneCase::Kind::Winograd5x5)
+          ? config.conv5x5 : config.conv3x3;
       const int tilesX = (context.nnXLen + transformConvParams.outTileXSize - 1) / transformConvParams.outTileXSize;
       const int tilesY = (context.nnYLen + transformConvParams.outTileYSize - 1) / transformConvParams.outTileYSize;
       const size_t transformTiles = batchSize * static_cast<size_t>(tilesX) * static_cast<size_t>(tilesY);
-      const int logicalM = nhwcCooperative
+      const int logicalM = denseGemm ? static_cast<int>(batchSize) : winogradGemm
+        ? static_cast<int>(batchSize) * tilesX * tilesY : nhwcCooperative
         ? (context.transformerPhysicalLayout != nullptr ? context.transformerPhysicalSpatialSize : static_cast<int>(logicalXYSize))
-        : directGemm ? static_cast<int>(logicalXYSize) : static_cast<int>(batchSize) * tilesX * tilesY;
+        : directGemm ? static_cast<int>(xySize) : static_cast<int>(batchSize) * tilesX * tilesY;
       const int logicalN = isGemm ? std::max(1, std::accumulate(
         plan.gemmCases.begin(), plan.gemmCases.end(), 0,
         [](int maximum, const GemmTuneCase& gemmCase) { return std::max(maximum, gemmCase.outChannels); }
@@ -2410,7 +2468,8 @@ namespace {
           return std::max(maximum, gemmCase.inChannels);
         }
       )) : static_cast<int>(maxChannels);
-      const int gemmBatch = nhwcCooperative || directGemm
+      const int gemmBatch = denseGemm ? 1 : winogradGemm
+        ? transformConvParams.inTileXSize * transformConvParams.inTileYSize : nhwcCooperative || directGemm
         ? static_cast<int>(batchSize)
         : config.conv3x3.inTileXSize * config.conv3x3.inTileYSize;
       struct GemmDimensions {
@@ -2448,6 +2507,11 @@ namespace {
           dimensions.gemmK = vk_helper::roundUpToMultipleInt(
             dimensions.logicalK, cooperative ? (nhwcCooperative ? activeNhwcParams.KWG : config.hgemmCooperativeMatrix.KWG) : xgemmParams.KWG
           );
+          if(nhwcCooperative && context.transformerPhysicalLayout == nullptr) {
+            const int alignment = std::lcm(activeNhwcParams.NWG, activeNhwcParams.KWG);
+            dimensions.gemmN = vk_helper::roundUpToMultipleInt(dimensions.logicalN, alignment);
+            dimensions.gemmK = vk_helper::roundUpToMultipleInt(dimensions.logicalK, alignment);
+          }
         }
         return dimensions;
       };
@@ -2537,6 +2601,8 @@ namespace {
       };
       const auto halfBinding = [&](const Pipeline* pipeline, uint32_t binding) {
         const string& name = pipeline->name;
+        if(name.find("xgemm_direct_batched_tt") == 0)
+          return false;
         if(name.find("hgemm_cooperative_matrix") == 0)
           return true;
         if(name.find("fp32") != string::npos)
@@ -2649,12 +2715,14 @@ namespace {
             if(isGemm && binding < 2) {
               const int width = binding == 0 ? gemmM : gemmN;
               const int logicalWidth = binding == 0 ? logicalM : logicalN;
-              const int batches = ((directGemm && binding == 1) ||
-                (nhwcCooperative && (binding == 1 || context.transformerPhysicalLayout == nullptr)) ? 1 : gemmBatch);
+              const int batches = (binding == 1 && (directGemm || (nhwcCooperative && !winogradGemm)))
+                ? 1 : gemmBatch;
               for(int n = 0; n < batches; n++)
                 for(int k = 0; k < logicalK; k++)
                   for(int x = 0; x < logicalWidth; x++)
-                    data[nhwcCooperative && binding == 0
+                    data[denseGemm
+                      ? x * gemmK + k
+                      : nhwcCooperative && binding == 0
                       ? (static_cast<size_t>(n) * width + x) * gemmK + k
                       : (static_cast<size_t>(n) * gemmK + k) * width + x] =
                       static_cast<float>(rand.nextDouble() - 0.5) / sqrtf(static_cast<float>(logicalK));
@@ -2885,18 +2953,19 @@ namespace {
             const auto appendValue = [&](int x, int y) {
               double sum = 0.0;
               for(int k = 0; k < dimensions.logicalK; k++)
-                sum += static_cast<double>(gemmInput[nhwcCooperative
+                sum += static_cast<double>(gemmInput[denseGemm ? x * dimensions.gemmK + k : nhwcCooperative
                   ? (static_cast<size_t>(n) * dimensions.gemmM + x) * dimensions.gemmK + k
                   : (static_cast<size_t>(n) * dimensions.gemmK + k) * dimensions.gemmM + x
                 ]) * gemmFilter[
-                  (static_cast<size_t>((directGemm || nhwcCooperative) ? 0 : n) * dimensions.gemmK + k) * dimensions.gemmN + y
+                  denseGemm ? y * dimensions.gemmK + k :
+                  (static_cast<size_t>((directGemm || (nhwcCooperative && !winogradGemm)) ? 0 : n) * dimensions.gemmK + k) * dimensions.gemmN + y
                 ];
               float resultValue = static_cast<float>(sum);
               if(gemmOutputIsHalf)
                 resultValue = half_float::half_cast<float>(half_float::half_cast<half_t>(resultValue));
               cpuReference->push_back(resultValue);
             };
-            if(nhwcCooperative) {
+            if(nhwcCooperative || denseGemm) {
               for(int x = 0; x < dimensions.logicalM; x++)
                 for(int y = 0; y < dimensions.logicalN; y++)
                   appendValue(x, y);
@@ -3358,7 +3427,7 @@ namespace {
         else if(pipeline->name.find("hgemm_cooperative_matrix_nhwc_") == 0) {
           vk_shader::push::HGemmCooperativeMatrixNHWCParams params = {
             runGemmM, runGemmN, runGemmK, runGemmK, runGemmN,
-            runGemmM * runGemmK, 0, runGemmM * runGemmN
+            runGemmM * runGemmK, winogradGemm ? runGemmK * runGemmN : 0, runGemmM * runGemmN
           };
           push(params);
           dispatch(runGemmM / activeNhwcParams.MWG, runGemmN / activeNhwcParams.NWG, gemmBatch);
@@ -3377,6 +3446,15 @@ namespace {
           };
           push(params);
           dispatch(runGemmM / xgemmParams.MWG, runGemmN / xgemmParams.NWG, gemmBatch);
+        }
+        else if(pipeline->name.find("xgemm_direct_batched_tt") == 0) {
+          vk_shader::push::BatchedXgemmDirectFp32Params params{};
+          params.kSizeM = runGemmM; params.kSizeN = runGemmN; params.kSizeK = runGemmK;
+          params.aLead = runGemmK; params.bLead = runGemmK; params.cLead = runGemmN;
+          params.cTranspose = 1;
+          push(params);
+          dispatch((runGemmM + config.xgemmDirect.WGD - 1) / config.xgemmDirect.WGD,
+                   (runGemmN + config.xgemmDirect.WGD - 1) / config.xgemmDirect.WGD, 1);
         }
         else if(pipeline->name.find("xgemm_strided_batched") == 0) {
           vk_shader::push::XgemmStridedBatchedFp32Params params = {
@@ -4083,13 +4161,6 @@ namespace {
       for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
         const size_t planRun = plan.warmupRuns + timedRepeat;
         double weight = plan.weightForRun(planRun);
-        if(plan.kernelName == "hgemmCooperativeMatrixNCHW" && !plan.gemmCases.empty()) {
-          const GemmTuneCase& gemmCase = plan.gemmCases[planRun % plan.gemmCases.size()];
-          if(gemmCase.inChannels % config.hgemmCooperativeMatrixNCHW.KWG != 0 ||
-             (!gemmCase.padOutputForNCHW &&
-              gemmCase.outChannels % config.hgemmCooperativeMatrixNCHW.NWG != 0))
-            weight = 0.0;
-        }
         for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
           const size_t queryIndex = (timedRepeat * timedPipelineCount + timedPipeline) * 2;
           const uint64_t start = timestamps[queryIndex];
@@ -4143,7 +4214,7 @@ namespace {
             error = "could not read GEMM validation output: " + vk_helper::vkErrorToString(result);
             return false;
           }
-          if(nhwcCooperative) {
+          if(nhwcCooperative || denseGemm) {
             for(int n = 0; n < gemmBatch; n++)
               for(int x = 0; x < dimensions.logicalM; x++)
                 for(int y = 0; y < dimensions.logicalN; y++)
@@ -4425,7 +4496,7 @@ namespace {
           return false;
         }
         if(isGemm) {
-          if(nhwcCooperative) {
+          if(nhwcCooperative || denseGemm) {
             for(int n = 0; n < gemmBatch; n++)
               for(int x = 0; x < logicalM; x++)
                 for(int y = 0; y < logicalN; y++)
@@ -5756,17 +5827,6 @@ namespace {
           }
           continue;
         }
-        if(Tuner::name() == "hgemmCooperativeMatrixNCHW") {
-          const auto weights = getNCHWEligibilityWeights(plan, candidate.hgemmCooperativeMatrixNCHW);
-          const double eligibleWeight = weights.first;
-          const double totalWeight = weights.second;
-          const double fallbackCallsPerSecond = context.nchwFallbackCallsPerSecond;
-          if(eligibleWeight > 0.0 && totalWeight > eligibleWeight &&
-             isfinite(fallbackCallsPerSecond) && fallbackCallsPerSecond > 0.0) {
-            callsPerSecond = totalWeight /
-              (eligibleWeight / callsPerSecond + (totalWeight - eligibleWeight) / fallbackCallsPerSecond);
-          }
-        }
         if(!isfinite(callsPerSecond) || callsPerSecond <= 0.0) {
           if(isReferenceCandidate) {
             logTuningFailure(
@@ -6065,6 +6125,20 @@ namespace {
 
   template<typename Tuner>
   double runTuner(const TuningContext& context, VulkanTuneParams& currentConfig) {
+    if(Tuner::name().find("gemm") != string::npos) {
+      const auto cases = getTunerGemmTuneCases(Tuner::name(), context);
+      if(cases.empty()) {
+        if(context.logger != nullptr)
+          context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": no production workloads");
+        return 0.0;
+      }
+      if(context.logger != nullptr)
+        for(const auto& c: cases)
+          context.logger->write("Vulkan " + Tuner::name() + " workload: K=" + to_string(c.inChannels) +
+            ", N=" + to_string(c.outChannels) + ", " +
+            (c.kind == GemmTuneCase::Kind::Dense ? "Dense M=" + to_string(context.batchSize) : "spatial/Winograd") +
+            ", dispatches/forward=" + Global::doubleToString(c.weight));
+    }
     return testAllConfigs<Tuner>(context, currentConfig);
   }
 
@@ -6127,9 +6201,17 @@ namespace {
       configs.insert(configs.begin(), slightlyTunedConfig);
       return configs;
     }
-    static VkResult create(const TuningContext&, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
-      VkResult result = pipelines.createXgemmStridedBatched(pipelines.xgemmStridedBatchedFp32, config.xgemmDirect, config.vulkan);
-      if(result == VK_SUCCESS) {
+    static VkResult create(const TuningContext& context, const VulkanTuneParams& config, vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets) {
+      const auto cases = getTunerGemmTuneCases(name(), context);
+      VkResult result = VK_SUCCESS;
+      if(any_of(cases.begin(), cases.end(), [](const GemmTuneCase& c) { return c.kind == GemmTuneCase::Kind::Dense; })) {
+        result = pipelines.createXgemmDirectBatchedTT(pipelines.xgemmDirectBatchedTT, config.xgemmDirect, config.vulkan);
+        if(result != VK_SUCCESS) return result;
+        targets.push_back(&pipelines.xgemmDirectBatchedTT);
+      }
+      if(any_of(cases.begin(), cases.end(), [](const GemmTuneCase& c) { return c.kind != GemmTuneCase::Kind::Dense; })) {
+        result = pipelines.createXgemmStridedBatched(pipelines.xgemmStridedBatchedFp32, config.xgemmDirect, config.vulkan);
+        if(result != VK_SUCCESS) return result;
         targets.push_back(&pipelines.xgemmStridedBatchedFp32);
       }
       return result;
@@ -7317,7 +7399,7 @@ namespace {
 
   void runNonGemmTuners(const TuningContext& context, VulkanTuneParams& config) {
     VulkanTuneParams nchwConfig = config;
-    nchwConfig.vulkan.shouldUseCooperativeMatrix = false;
+    nchwConfig.vulkan.shouldUseNHWC = false;
     runTuner<Conv3x3InputTuner>(context, nchwConfig);
     runTuner<Conv3x3OutputTuner>(context, nchwConfig);
     config.conv3x3.inputTransformLocalXSize = nchwConfig.conv3x3.inputTransformLocalXSize;
@@ -7329,6 +7411,7 @@ namespace {
     if(config.vulkan.canUseCooperativeMatrix && config.vulkan.canUseFP16Storage &&
        config.vulkan.canUseFP16Compute && config.hgemmCooperativeMatrixNHWC.isValid()) {
       VulkanTuneParams nhwcConfig = config;
+      nhwcConfig.vulkan.shouldUseNHWC = true;
       nhwcConfig.vulkan.shouldUseCooperativeMatrix = true;
       nhwcConfig.vulkan.shouldUseFP16Storage = true;
       nhwcConfig.vulkan.shouldUseFP16Compute = true;
@@ -7465,109 +7548,59 @@ namespace {
     return true;
   }
 
-  void tuneCooperativeMatrices(
+  bool tuneCooperativeMatrices(
     const TuningContext& context,
     VulkanTuneParams& config,
-    double xgemmDirectBaselineCallsPerSecond,
-    double xgemmBaselineCallsPerSecond,
     bool canUseHgemmCooperativeMatrix,
     bool canUseNCHW
   ) {
-    if((!canUseHgemmCooperativeMatrix && !canUseNCHW) || !config.vulkan.canUseFP16Storage ||
-       !config.vulkan.canUseFP16Compute) {
-      if(context.logger != nullptr)
-        context.logger->write(
-          "Skipping Vulkan cooperative matrix tuning: capability or FP16 prerequisite unavailable, "
-          "shouldUseCooperativeMatrix=false, shouldUseHgemmCooperativeMatrixNCHW=false"
-        );
-      return;
-    }
+    if(!canUseHgemmCooperativeMatrix || !config.vulkan.canUseFP16Storage ||
+       !config.vulkan.canUseFP16Compute)
+      return false;
 
     VulkanTuneParams cooperativeConfig = config;
     cooperativeConfig.vulkan.shouldUseFP16Storage = true;
     cooperativeConfig.vulkan.shouldUseFP16Compute = true;
-    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = false;
-
-    const double hgemmCallsPerSecond = canUseHgemmCooperativeMatrix
-      ? runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig)
-      : 0.0;
-    const bool useHgemm = canUseHgemmCooperativeMatrix && VulkanTuner::isFastEnough(
-      hgemmCallsPerSecond, xgemmBaselineCallsPerSecond,
-      VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
-    );
-    if(isfinite(hgemmCallsPerSecond) && hgemmCallsPerSecond > 0.0 &&
-       cooperativeConfig.hgemmCooperativeMatrix.isValid()) {
-      config.hgemmCooperativeMatrix = cooperativeConfig.hgemmCooperativeMatrix;
-    }
-    if(useHgemm) {
-      config.vulkan.shouldUseCooperativeMatrix = true;
-      config.vulkan.shouldUseFP16Compute = true;
-    }
-    if(context.logger != nullptr) {
-      context.logger->write(
-        "Vulkan hgemmCooperativeMatrix baseline comparison: xgemm=" +
-        Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
-        " calls/s, hgemmCooperativeMatrix=" + Global::strprintf("%.6g", hgemmCallsPerSecond) +
-        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO) +
-        ", selected=" + (useHgemm ? "true" : "false")
-      );
-    }
-
-    cooperativeConfig = config;
-    cooperativeConfig.vulkan.shouldUseFP16Storage = true;
-    cooperativeConfig.vulkan.shouldUseFP16Compute = true;
     cooperativeConfig.vulkan.shouldUseCooperativeMatrix = true;
-    cooperativeConfig.vulkan.shouldUseNHWC =
-      context.modelInfo.transformerHeadDim > 0 &&
-      context.modelInfo.transformerVHeadDim > 0 &&
-      cooperativeConfig.vulkan.shouldUseCooperativeMatrix;
-    const double hgemmNHWCCallsPerSecond = canUseHgemmCooperativeMatrix
-      ? runTuner<HgemmCooperativeMatrixNHWCTunerImpl>(context, cooperativeConfig)
-      : 0.0;
-    const bool useHgemmNHWC = canUseHgemmCooperativeMatrix && cooperativeConfig.hgemmCooperativeMatrixNHWC.isValid();
-    if(useHgemmNHWC) {
-      config.hgemmCooperativeMatrixNHWC = cooperativeConfig.hgemmCooperativeMatrixNHWC;
-      config.vulkan.shouldUseCooperativeMatrix = true;
-      config.vulkan.shouldUseFP16Compute = true;
+    const bool transformer = context.modelInfo.transformerHeadDim > 0 &&
+      context.modelInfo.transformerVHeadDim > 0;
+    cooperativeConfig.vulkan.shouldUseNHWC = transformer;
+    if(transformer) {
+      const double rate = runTuner<HgemmCooperativeMatrixNHWCTunerImpl>(context, cooperativeConfig);
+      if(!isfinite(rate) || rate <= 0.0) {
+        if(context.logger != nullptr)
+          context.logger->write("NHWC cooperative GEMM validation failed; tuning scalar fallback workloads");
+        return false;
+      }
     }
-    if(context.logger != nullptr) {
-      context.logger->write(
-        "Vulkan hgemmCooperativeMatrixNHWC baseline comparison: xgemm=" +
-        Global::strprintf("%.6g", xgemmBaselineCallsPerSecond) +
-        " calls/s, hgemmCooperativeMatrixNHWC=" + Global::strprintf("%.6g", hgemmNHWCCallsPerSecond) +
-        " calls/s, ConvLayer test path=" + (useHgemmNHWC ? "enabled" : "disabled")
-      );
+    else {
+      const bool hasWinograd = !getTunerGemmTuneCases("hgemmCooperativeMatrix", context).empty();
+      if(hasWinograd) {
+        const double rate = runTuner<HgemmCooperativeMatrixTunerImpl>(context, cooperativeConfig);
+        if(!isfinite(rate) || rate <= 0.0) {
+          if(context.logger != nullptr)
+            context.logger->write("Winograd cooperative GEMM validation failed; tuning scalar fallback workloads");
+          return false;
+        }
+      }
+      bool useNCHW = false;
+      if(canUseNCHW && !getTunerGemmTuneCases("hgemmCooperativeMatrixNCHW", context).empty()) {
+        const double rate = runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(context, cooperativeConfig);
+        const auto cases = getTunerGemmTuneCases("hgemmCooperativeMatrixNCHW", context);
+        const auto& p = cooperativeConfig.hgemmCooperativeMatrixNCHW;
+        useNCHW = isfinite(rate) && rate > 0.0 && any_of(cases.begin(), cases.end(), [&](const GemmTuneCase& c) {
+          return c.inChannels % p.KWG == 0 && c.outChannels % p.NWG == 0;
+        });
+      }
+      if(!hasWinograd && !useNCHW)
+        return false;
+      cooperativeConfig.vulkan.shouldUseHgemmCooperativeMatrixNCHW = useNCHW;
     }
-
-    cooperativeConfig = config;
-    cooperativeConfig.vulkan.shouldUseFP16Storage = true;
-    cooperativeConfig.vulkan.shouldUseFP16Compute = true;
-    cooperativeConfig.vulkan.shouldUseCooperativeMatrix = false;
-    TuningContext nchwContext = context;
-    nchwContext.nchwFallbackCallsPerSecond = xgemmDirectBaselineCallsPerSecond;
-    const double hgemmNCHWCallsPerSecond = canUseNCHW
-      ? runTuner<HgemmCooperativeMatrixNCHWTunerImpl>(nchwContext, cooperativeConfig)
-      : 0.0;
-    const bool useHgemmNCHW = canUseNCHW && VulkanTuner::isFastEnough(
-      hgemmNCHWCallsPerSecond, xgemmDirectBaselineCallsPerSecond,
-      VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
-    );
-    if(useHgemmNCHW) {
-      config.hgemmCooperativeMatrixNCHW = cooperativeConfig.hgemmCooperativeMatrixNCHW;
-      config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
-      config.vulkan.shouldUseFP16Compute = true;
-    }
-    if(config.vulkan.shouldUseCooperativeMatrix || config.vulkan.shouldUseHgemmCooperativeMatrixNCHW)
-      config.vulkan.shouldUseFP16Storage = true;
-    if(context.logger != nullptr) {
-      context.logger->write(
-        "Vulkan hgemmCooperativeMatrixNCHW baseline comparison: xgemmDirect=" +
-        Global::strprintf("%.6g", xgemmDirectBaselineCallsPerSecond) +
-        " calls/s, hgemmCooperativeMatrixNCHW=" + Global::strprintf("%.6g", hgemmNCHWCallsPerSecond) +
-        " calls/s, required_ratio=" + Global::strprintf("%.2f", VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO) +
-        ", selected=" + (useHgemmNCHW ? "true" : "false")
-      );
-    }
+    config = cooperativeConfig;
+    if(context.logger != nullptr)
+      context.logger->write(string("Selected validated cooperative GEMM without a scalar throughput gate: ") +
+        (transformer ? "NHWC" : "NCHW/Winograd"));
+    return true;
   }
 
   struct TransformerDualGemmSwiGLUTuner {
@@ -7962,7 +7995,7 @@ void VulkanTuner::tune(
   VulkanDummyThread dummyThread(device, logger);
   dummyThread.start();
   TuningContext context{
-    device, batchSize, nnXLen, nnYLen, modelInfo, full, 0.0,
+    device, batchSize, nnXLen, nnYLen, modelInfo, full,
     getCooperativeMatrixTuneShapes(device), logger, &timer, printOnlyOnImprovement
   };
   if(logger != nullptr) {
@@ -8047,16 +8080,30 @@ void VulkanTuner::tune(
   tunedConfig.vulkan.shouldUseTransformerCooperativeMatrixNCHW = false;
   tunedConfig.vulkan.shouldUseTransformerCooperativeMatrixNHWC = false;
   tunedConfig.vulkan.shouldUseSubgroup = false;
-  const double xgemmDirectCallsPerSecond = runTuner<XgemmDirectTuner>(context, tunedConfig);
-  const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
-  tunedConfig.xgemm16 = tunedConfig.xgemm;
-  tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
-  tuneCooperativeMatrices(
-    context, tunedConfig, xgemmDirectCallsPerSecond, xgemmCallsPerSecond,
-    canUseHgemmCooperativeMatrix, canUseHgemmCooperativeMatrixNCHW
-  );
-  if(!tunedConfig.vulkan.shouldUseFP16Compute)
-    tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
+  if(canUseHgemmCooperativeMatrix) {
+    // Unused CM pipelines are also built by createPipelines. Seed their
+    // fragment types from a supported property even when only one layout is tuned.
+    const auto& supported = tunedConfig.hgemmCooperativeMatrix;
+    auto& nhwc = tunedConfig.hgemmCooperativeMatrixNHWC;
+    nhwc.MWARP = supported.MWARP; nhwc.NWARP = supported.NWARP; nhwc.KDIM = supported.KDIM;
+    nhwc.subgroupSize = supported.subgroupSize; nhwc.accType = supported.accType;
+    nhwc.MWG = nhwc.MWAVE = nhwc.MWARP;
+    nhwc.NWG = nhwc.NWAVE = nhwc.NWARP; nhwc.KWG = nhwc.KDIM;
+    nhwc.SA = nhwc.SB = 1; nhwc.DB = 0; nhwc.VWK = nhwc.VWN = 1;
+    tunedConfig.transformerHgemmNHWC = nhwc;
+  }
+  context.selectedGemmConfig = &tunedConfig;
+  tuneCooperativeMatrices(context, tunedConfig, canUseHgemmCooperativeMatrix, canUseHgemmCooperativeMatrixNCHW);
+  runTuner<XgemmDirectTuner>(context, tunedConfig);
+  if(!getTunerGemmTuneCases("xgemm", context).empty()) {
+    const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
+    tunedConfig.xgemm16 = tunedConfig.xgemm;
+    tuneXgemm16(context, tunedConfig, xgemmCallsPerSecond);
+    if(!tunedConfig.vulkan.shouldUseFP16Compute)
+      tuneXgemmStorage(context, tunedConfig, xgemmCallsPerSecond);
+  }
+  else if(logger != nullptr)
+    logger->write("Skipping xgemm/xgemm16 tuning: all model Winograd GEMMs use cooperative matrix");
   runNonGemmTuners(context, tunedConfig);
   tuneTransformerHgemmNHWC(context, tunedConfig);
   tuneTransformerDualGemmSwiGLU(context, tunedConfig);

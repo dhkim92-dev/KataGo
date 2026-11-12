@@ -4,13 +4,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <limits>
+#include <sstream>
 
 #include "../core/fileutils.h"
 #include "../core/makedir.h"
 #include "../external/half-2.2.0/include/half.hpp"
 #include "../neuralnet/vulkantuner.h"
+#include "../neuralnet/vulkanbackend.h"
 
 using namespace std;
 
@@ -151,7 +154,112 @@ namespace {
 
 void Tests::runVulkanTunerPersistenceTests() {
   cout << "Running Vulkan tuner persistence tests" << endl;
-  testAssert(VulkanTuner::TUNER_VERSION == 23);
+#ifdef VK_BENCHMARK
+  {
+    // CPU-only checks: grouping must retain equal shader names in different layers.
+    ComputeHandleInternal::BenchmarkInfos infos;
+    infos[{"Layer A", "HGEMM"}] = {2, 2000000};
+    infos[{"Layer A", "BIAS"}] = {1, 1000000};
+    infos[{"Layer B,\"q\"", "HGEMM"}] = {4, 4000000};
+    infos[{"Zero", "EMPTY"}] = {0, 0};
+    ostringstream csv;
+    ComputeHandleInternal::writeVulkanBenchmarkCSV(csv, infos, 1000);
+    const string expected =
+      "layer,pipeline,average_ms,calls_per_sec,calls_per_visit,total_ms,calls,execution_percent,layer_total_ms,layer_execution_percent,execution_percent_within_layer\n"
+      "\"Layer B,\"\"q\"\"\",\"HGEMM\",1.000000,1000.000000,0.004000,4.000000,4,57.142857,4.000000,57.142857,100.000000\n"
+      "\"Layer A\",\"HGEMM\",1.000000,1000.000000,0.002000,2.000000,2,28.571429,3.000000,42.857143,66.666667\n"
+      "\"Layer A\",\"BIAS\",1.000000,1000.000000,0.001000,1.000000,1,14.285714,3.000000,42.857143,33.333333\n"
+      "\"Zero\",\"EMPTY\",0.000000,0.000000,0.000000,0.000000,0,0.000000,0.000000,0.000000,0.000000\n";
+    testAssert(csv.str() == expected);
+    string layer;
+    {
+      VulkanBenchmarkLayerScope trunk(&layer, "Trunk");
+      testAssert(layer == "Trunk");
+      {
+        VulkanBenchmarkLayerScope projection(&layer, "QKV");
+        testAssert(layer == "Trunk/QKV");
+      }
+      testAssert(layer == "Trunk");
+      VulkanBenchmarkLayerScope disabled(nullptr, "Disabled");
+      testAssert(layer == "Trunk");
+    }
+    testAssert(layer.empty());
+    cout << "Vulkan layer/shader benchmark CSV tests passed" << endl;
+  }
+#endif
+  testAssert(VulkanTuner::TUNER_VERSION == 36);
+  {
+    using Case = VulkanTuner::GemmTuneCase;
+    using Kind = Case::Kind;
+    VulkanTuner::ModelInfoForTuning info;
+    // tf2-b10c384 Dense shapes, including non-tile-aligned inputs and final heads.
+    info.gemmLayers = {
+      {19, 384, 1.0, false, Kind::Dense}, {144, 48, 1.0, false, Kind::Dense},
+      {144, 48, 1.0, false, Kind::Dense}, {48, 2, 1.0, false, Kind::Dense},
+      {288, 96, 1.0, false, Kind::Dense}, {96, 3, 1.0, false, Kind::Dense},
+      {96, 6, 1.0, false, Kind::Dense},
+      {192, 48, 1.0}, {48, 2, 1.0},
+      {22, 384, 1.0, false, Kind::Winograd3x3},
+      {384, 384, 1.0, false, Kind::Winograd5x5}
+    };
+    info.transformerProjections = {{192, 576, true}, {192, 192, false}};
+    VulkanTuneParams config;
+    config.vulkan.shouldUseFP16Storage = true;
+    config.vulkan.shouldUseFP16Compute = true;
+    config.vulkan.shouldUseCooperativeMatrix = true;
+    config.vulkan.shouldUseNHWC = true;
+    const auto dense = VulkanTuner::getGemmTuningCases("xgemmDirect", info, config);
+    testAssert(dense.size() == 6);
+    testAssert(dense[0].inChannels == 19 && dense[0].outChannels == 384);
+    testAssert(dense[1].weight == 2.0);
+    testAssert(all_of(dense.begin(), dense.end(), [](const Case& c) { return c.kind == Kind::Dense; }));
+    ModelDesc desc;
+    MatMulLayerDesc* denseDescs[] = {
+      &desc.trunk.initialMatMul, &desc.policyHead.gpoolToBiasMul, &desc.policyHead.gpoolToPassMul,
+      &desc.policyHead.gpoolToPassMul2, &desc.valueHead.v2Mul, &desc.valueHead.v3Mul, &desc.valueHead.sv3Mul
+    };
+    for(size_t i = 0; i < 7; i++) {
+      denseDescs[i]->inChannels = info.gemmLayers[i].inChannels;
+      denseDescs[i]->outChannels = info.gemmLayers[i].outChannels;
+    }
+    desc.trunk.initialConv.convXSize = desc.trunk.initialConv.convYSize = 3;
+    desc.trunk.initialConv.inChannels = 22;
+    desc.trunk.initialConv.outChannels = 384;
+    const auto extracted = VulkanTuner::ModelInfoForTuning::ofDesc(desc);
+    const auto extractedDense = VulkanTuner::getGemmTuningCases("xgemmDirect", extracted, config);
+    testAssert(extracted.gemmLayers.size() == 8 && extractedDense.size() == dense.size());
+    for(size_t i = 0; i < dense.size(); i++) {
+      testAssert(extractedDense[i].inChannels == dense[i].inChannels);
+      testAssert(extractedDense[i].outChannels == dense[i].outChannels);
+      testAssert(extractedDense[i].weight == dense[i].weight);
+    }
+    testAssert(VulkanTuner::getGemmTuningCases("xgemm", info, config).empty());
+    testAssert(VulkanTuner::getGemmTuningCases("xgemm16", info, config).empty());
+    testAssert(VulkanTuner::getGemmTuningCases("hgemmCooperativeMatrixNHWC", info, config).size() == 4);
+
+    // NCHW CM eligibility uses its own selected tiles, not the generic Winograd tiles.
+    info.transformerProjections.clear();
+    config.vulkan.shouldUseNHWC = false;
+    config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = true;
+    config.hgemmCooperativeMatrix.NWG = 64;
+    config.hgemmCooperativeMatrixNCHW.NWG = 16;
+    config.hgemmCooperativeMatrixNCHW.KWG = 16;
+    const auto fallback = VulkanTuner::getGemmTuningCases("xgemmDirect", info, config);
+    testAssert(fallback.size() == 7);
+    testAssert(fallback.back().inChannels == 48 && fallback.back().outChannels == 2);
+    testAssert(fallback.back().kind == Kind::Spatial);
+    testAssert(VulkanTuner::getGemmTuningCases("hgemmCooperativeMatrixNCHW", info, config).size() == 2);
+    const auto winograd = VulkanTuner::getGemmTuningCases("hgemmCooperativeMatrix", info, config);
+    testAssert(winograd.size() == 2 && winograd[1].kind == Kind::Winograd5x5);
+    config.vulkan.shouldUseHgemmCooperativeMatrixNCHW = false;
+    testAssert(VulkanTuner::getGemmTuningCases("xgemmDirect", info, config).size() == 8);
+
+    config.vulkan.shouldUseCooperativeMatrix = false;
+    const auto fp32 = VulkanTuner::getGemmTuningCases("xgemm", info, config);
+    const auto fp16 = VulkanTuner::getGemmTuningCases("xgemm16", info, config);
+    testAssert(fp32.size() == 2 && fp16.size() == 2);
+    testAssert(fp32[0].kind == Kind::Winograd3x3 && fp32[1].kind == Kind::Winograd5x5);
+  }
   testAssert(VulkanTuner::TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO == 1.10);
   testAssert(VulkanTuner::TRANSFORMER_DUAL_GEMM_ERROR_TOLERANCE == 0.002);
   VulkanTuner::ModelInfoForTuning dualModelInfo;
@@ -225,16 +333,14 @@ void Tests::runVulkanTunerPersistenceTests() {
   for(double threshold: {
     VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO,
     VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO,
-    VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO,
-    VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO
+    VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO
   }) {
     testAssert(VulkanTuner::isFastEnough(100.0 * threshold, 100.0, threshold));
     testAssert(!VulkanTuner::isFastEnough(100.0 * threshold - 0.001, 100.0, threshold));
   }
-  testAssert(VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO == 1.20);
+  testAssert(VulkanTuner::FP16_COMPUTE_MIN_THROUGHPUT_RATIO == 0.85);
   testAssert(VulkanTuner::FP16_STORAGE_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO == 1.10);
-  testAssert(VulkanTuner::COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO == 1.20);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO == 0.90);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR == 3);
   testAssert(VulkanTuner::COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT == 2);
@@ -249,10 +355,16 @@ void Tests::runVulkanTunerPersistenceTests() {
   const string filename = "tests/scratch/vulkantuner-roundtrip.txt";
   const string defaultsFilename = "tests/scratch/vulkantuner-defaults.txt";
   FileUtils::tryRemoveFile(defaultsFilename);
+  VulkanTuneParams separateProjectionProfile;
+  separateProjectionProfile.transformerHgemmNHWC.NWG = 64;
+  testAssert(separateProjectionProfile != VulkanTuneParams());
+  VulkanTuneParams::save("tests/scratch/vulkantuner-transformer-profile.txt", separateProjectionProfile);
+  testAssert(VulkanTuneParams::load("tests/scratch/vulkantuner-transformer-profile.txt") == separateProjectionProfile);
   VulkanTuneParams defaults;
   VulkanDeviceInfo deviceInfo = {};
   deviceInfo.storage16BitFeatures.storageBuffer16BitAccess = VK_TRUE;
   deviceInfo.shaderFloat16Int8Features.shaderFloat16 = VK_TRUE;
+  deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel = VK_TRUE;
   deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix = VK_TRUE;
   deviceInfo.cooperativeMatrixPropertiesFn = fakeCooperativeMatrixProperties;
   deviceInfo.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -268,6 +380,9 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(hardwareParams.canUseFP16Compute);
   testAssert(hardwareParams.canUseCooperativeMatrix);
   testAssert(hardwareParams.canUseSubgroup);
+  VulkanDeviceInfo noVulkanMemoryModelDeviceInfo = deviceInfo;
+  noVulkanMemoryModelDeviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel = VK_FALSE;
+  testAssert(!VulkanTuner::getHardwareParams(noVulkanMemoryModelDeviceInfo).canUseCooperativeMatrix);
   VulkanDeviceInfo incompleteSubgroupDeviceInfo = deviceInfo;
   incompleteSubgroupDeviceInfo.subgroupSizeControlFeatures.computeFullSubgroups = VK_FALSE;
   testAssert(!VulkanTuner::getHardwareParams(incompleteSubgroupDeviceInfo).canUseCooperativeMatrix);
@@ -335,6 +450,55 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(isValidCooperativeMatrixConfig(
     accumulatorMemoryLimitedDeviceInfo, float32AccumulatorNCHWParams
   ));
+  TransformerCooperativeMatrixTuneParams attentionParams;
+  attentionParams.ATTN_BLOCK_KV = 64;
+  testAssert(attentionParams.isValid());
+  VulkanDeviceInfo attentionMemoryLimitedDeviceInfo = float32AccumulatorDevice.info;
+  attentionMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 24415;
+  testAssert(!isValidCooperativeMatrixConfig(attentionMemoryLimitedDeviceInfo, attentionParams, 64, 64));
+  attentionMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 24416;
+  testAssert(isValidCooperativeMatrixConfig(attentionMemoryLimitedDeviceInfo, attentionParams, 64, 64));
+  attentionParams.ATTN_BLOCK_KV = 8;
+  testAssert(!attentionParams.isValid());
+  attentionParams.ATTN_BLOCK_KV = 48;
+  testAssert(!attentionParams.isValid());
+  testAssert(offsetof(vk_shader::spec::ScaleDotProductCooperativeSpec, COOP_USE_NV2) == 12 * sizeof(uint32_t));
+  testAssert(sizeof(vk_shader::spec::ScaleDotProductCooperativeSpec) == 13 * sizeof(uint32_t));
+  TransformerCooperativeMatrixTuneParams nv2Attention;
+  nv2Attention.ATTN_BLOCK_Q = 32;
+  nv2Attention.ATTN_BLOCK_KV = 64;
+  nv2Attention.COOP_Q_TILES_PER_WORKGROUP = 2;
+  VulkanDeviceInfo nv2DeviceInfo = float32AccumulatorDevice.info;
+  nv2DeviceInfo.canUseRegisterAttentionNHWC = true;
+  nv2DeviceInfo.cooperativeMatrix2Properties.cooperativeMatrixWorkgroupScopeMaxWorkgroupSize = 128;
+  nv2DeviceInfo.cooperativeMatrix2Properties.cooperativeMatrixFlexibleDimensionsMaxDimension = 1024;
+  nv2DeviceInfo.cooperativeMatrix2Properties.cooperativeMatrixWorkgroupScopeReservedSharedMemory = 8192;
+  VkCooperativeMatrixFlexibleDimensionsPropertiesNV nv2Property = {};
+  nv2Property.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_FLEXIBLE_DIMENSIONS_PROPERTIES_NV;
+  nv2Property.MGranularity = 32;
+  nv2Property.NGranularity = 16;
+  nv2Property.KGranularity = 16;
+  nv2Property.AType = nv2Property.BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+  nv2Property.CType = nv2Property.ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+  nv2Property.scope = VK_SCOPE_WORKGROUP_KHR;
+  nv2Property.workgroupInvocations = 128;
+  nv2DeviceInfo.flexibleMatrixProperties = {nv2Property};
+  nv2DeviceInfo.properties.limits.maxComputeWorkGroupSize[0] = 128;
+  nv2DeviceInfo.properties.limits.maxComputeWorkGroupInvocations = 128;
+  testAssert(!canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2Attention, 32, 32));
+  nv2Attention.COOP_USE_NV2 = 1;
+  testAssert(canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2Attention, 32, 32));
+  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22591;
+  testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
+  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22592;
+  testAssert(isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
+  testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, false));
+  nv2DeviceInfo.properties.limits.maxComputeWorkGroupInvocations = 127;
+  testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
+  nv2DeviceInfo.flexibleMatrixProperties[0].workgroupInvocations = 64;
+  testAssert(!canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2Attention, 32, 32));
+  nv2Attention.COOP_USE_NV2 = 2;
+  testAssert(!nv2Attention.isValid());
   TransformerDualGemmSwiGLUTuneParams dualGemmFloat32Params;
   dualGemmFloat32Params.accType = 32;
   VulkanDeviceInfo dualGemmMemoryLimitedDeviceInfo = float32AccumulatorDevice.info;
@@ -601,10 +765,11 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[5] == "vulkan.shouldUseFP16Storage=0");
   testAssert(defaultLines[6] == "vulkan.shouldUseFP16Compute=0");
   testAssert(defaultLines[7] == "vulkan.shouldUseCooperativeMatrix=0");
-  testAssert(defaultLines[8] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
-  testAssert(defaultLines[9] == "vulkan.shouldUseSubgroup=0");
-  testAssert(defaultLines[10] == "vulkan.shouldUseTransformerDualGemmSwiGLU=0");
-  testAssert(defaultLines.size() == 123);
+  testAssert(defaultLines[8] == "vulkan.shouldUseNHWC=0");
+  testAssert(defaultLines[9] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
+  testAssert(defaultLines[10] == "vulkan.shouldUseSubgroup=0");
+  testAssert(defaultLines[11] == "vulkan.shouldUseTransformerDualGemmSwiGLU=0");
+  testAssert(defaultLines.size() == 176);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -633,6 +798,21 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("spatialRMSNorm.APPLY_ELTS_PER_THREAD=") < lineIndex("transformerDualGemmSwiGLU.MWG="));
   testAssert(lineIndex("transformerDualGemmSwiGLU.VWM=") < lineIndex("transformerDualGemmSwiGLU.SB="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
+  string legacyAttentionText;
+  for(const string& line: defaultLines)
+    if(line.find(".COOP_USE_NV2=") == string::npos)
+      legacyAttentionText += line + "\n";
+  const string legacyAttentionFilename = "tests/scratch/vulkantuner-legacy-attention.txt";
+  writeText(legacyAttentionFilename, legacyAttentionText);
+  testAssert(VulkanTuneParams::load(legacyAttentionFilename) == defaults);
+  VulkanTuneParams nv2Roundtrip = defaults;
+  nv2Roundtrip.transformerCooperativeMatrixNHWC.COOP_USE_NV2 = 1;
+  testAssert(!(nv2Roundtrip == defaults));
+  const string nv2RoundtripFilename = "tests/scratch/vulkantuner-nv2-attention.txt";
+  VulkanTuneParams::save(nv2RoundtripFilename, nv2Roundtrip);
+  testAssert(VulkanTuneParams::load(nv2RoundtripFilename) == nv2Roundtrip);
+  nv2Roundtrip.transformerCooperativeMatrixNCHW.COOP_USE_NV2 = 1;
+  testAssert(!nv2Roundtrip.isValid());
   const string staleDefaultsFilename = "tests/scratch/vulkantuner-stale-defaults.txt";
   VulkanTuneParams staleDefaults = defaults;
   staleDefaults.vulkan.canUseFP16Storage = false;

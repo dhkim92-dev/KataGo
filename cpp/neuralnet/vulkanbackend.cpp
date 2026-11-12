@@ -1124,13 +1124,14 @@ struct ConvLayer {
     }
 
     if(convXSize == 1 && convYSize == 1) {
-      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrix;
+      const auto& hgemmParams = handle_->tuneParams.hgemmCooperativeMatrixNCHW;
       usingHgemmCooperativeMatrixNCHW =
         handle_->usingFP16Storage &&
         handle_->tuneParams.vulkan.canUseCooperativeMatrix &&
         handle_->tuneParams.vulkan.shouldUseFP16Storage &&
         handle_->tuneParams.vulkan.shouldUseFP16Compute &&
         handle_->tuneParams.vulkan.shouldUseCooperativeMatrix &&
+        handle_->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
         hgemmParams.isValid() &&
         inChannels % hgemmParams.KWG == 0 &&
         outChannels % hgemmParams.NWG == 0;

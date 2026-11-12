@@ -23,7 +23,6 @@ namespace VulkanTuner {
   constexpr double FP16_STORAGE_MIN_THROUGHPUT_RATIO = 1.20;
   constexpr double COOPERATIVE_MATRIX_MIN_THROUGHPUT_RATIO = 1.10;
   constexpr double COOPERATIVE_MATRIX_ROPE_ERROR_TOLERANCE = 0.001;
-  constexpr double COOPERATIVE_MATRIX_1X1_MIN_THROUGHPUT_RATIO = 1.20;
   constexpr double TRANSFORMER_DUAL_GEMM_MIN_THROUGHPUT_RATIO = 1.10;
   constexpr double TRANSFORMER_DUAL_GEMM_ERROR_TOLERANCE = 0.002;
   constexpr double COOPERATIVE_MATRIX_SHAPE_SCORE_RATIO = 0.90;
@@ -52,6 +51,15 @@ namespace VulkanTuner {
   bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
 
+  struct GemmTuneCase {
+    enum class Kind { Spatial, Dense, Winograd3x3, Winograd5x5 };
+    int inChannels;
+    int outChannels;
+    double weight;
+    bool padOutputForNCHW = false;
+    Kind kind = Kind::Spatial;
+  };
+
   struct ModelInfoForTuning {
     struct TransformerProjection {
       int inChannels;
@@ -60,6 +68,7 @@ namespace VulkanTuner {
       bool fusedFFNInput = false;
     };
     std::vector<TransformerProjection> transformerProjections;
+    std::vector<GemmTuneCase> gemmLayers;
     int numInputChannels = 0;
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;
@@ -83,6 +92,8 @@ namespace VulkanTuner {
   };
 
   int getTransformerFFNInputChannelsForTuning(const ModelInfoForTuning& modelInfo);
+  std::vector<GemmTuneCase> getGemmTuningCases(
+    const std::string& tunerName, const ModelInfoForTuning& modelInfo, const VulkanTuneParams& config);
 
   struct HgemmCooperativeMatrixNCHWTuner {
     static bool selectCooperativeMatrixProperties(
