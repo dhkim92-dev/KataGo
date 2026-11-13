@@ -2801,9 +2801,9 @@ struct TransformerRMSNormLayer {
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] create zeroBeta buf", res);
     descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline->descriptorSetLayout, &res);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate descriptor set.", res);
-    if(handle->pipelines->transformerRmsNormNHWC.pipeline != VK_NULL_HANDLE) {
+    if(handle->pipelines->transformerPreNormNHWC.pipeline != VK_NULL_HANDLE) {
       nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->transformerRmsNormNHWC.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->transformerPreNormNHWC.descriptorSetLayout, &res
       );
       CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NHWC descriptor set", res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
@@ -2862,7 +2862,7 @@ struct TransformerRMSNormLayer {
       handle,
       handle->vulkanDevice,
       consumeResidual ? &handle->pipelines->transformerResidualRmsNormNHWC :
-        useNHWC ? &handle->pipelines->transformerRmsNormNHWC : pipeline,
+        useNHWC ? &handle->pipelines->transformerPreNormNHWC : pipeline,
       cb,
       useNHWC ? nhwcDescriptorSet : descriptorSet,
       pipelineInput,
@@ -2877,7 +2877,7 @@ struct TransformerRMSNormLayer {
       handle->nnXLen * handle->nnYLen,
       channelsPadded,
       epsilon,
-      handle->tuneParams.rmsNorm,
+      useNHWC ? handle->tuneParams.transformerPreNorm : handle->tuneParams.rmsNorm,
       &res,
       consumeResidual
     );
@@ -3604,6 +3604,7 @@ struct TransformerFFNBlock {
   VkDescriptorSet pointwiseDS;
   VkDescriptorSet swigluDS;
   bool usingTransformerDualGemmSwiGLU;
+  VulkanBuffer* fusedFilter;
   VkDescriptorSet transformerDualGemmSwiGLUDS;
   VkDescriptorSet nchwToNhwcDS;
   VkDescriptorSet nhwcToNchwDS;
@@ -3631,6 +3632,7 @@ struct TransformerFFNBlock {
     pointwiseDS(VK_NULL_HANDLE),
     swigluDS(VK_NULL_HANDLE),
     usingTransformerDualGemmSwiGLU(false),
+    fusedFilter(nullptr),
     transformerDualGemmSwiGLUDS(VK_NULL_HANDLE),
     nchwToNhwcDS(VK_NULL_HANDLE),
     nhwcToNchwDS(VK_NULL_HANDLE)
@@ -3671,6 +3673,10 @@ struct TransformerFFNBlock {
       CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate nhwcToNchwDS", res);
     }
     if(usingTransformerDualGemmSwiGLU) {
+      const auto weights = VulkanTuner::packTransformerDualGemmSwiGLUFilterForNHWC(
+        desc->linear1.weights, desc->linearGate.weights, numChannels, ffnChannels);
+      fusedFilter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, true, &res);
+      CHECK_VK_MSG("Create fused NHWC FFN weights", res);
       transformerDualGemmSwiGLUDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         handle->pipelines->transformerDualGemmSwiGLU.descriptorSetLayout,
@@ -3681,6 +3687,7 @@ struct TransformerFFNBlock {
   }
 
    ~TransformerFFNBlock() {
+    vk_helper::releaseVulkanBuffer(handle->vulkanDevice, fusedFilter);
     delete preLN;
     delete linear1AndGate;
     delete linear2;
@@ -3731,7 +3738,7 @@ struct TransformerFFNBlock {
         handle,
         handle->vulkanDevice, handle->tuneParams, &handle->pipelines->transformerDualGemmSwiGLU,
         cb, transformerDualGemmSwiGLUDS,
-        trunkScratch, linear1AndGate->filter, ffnOutBuf.buf,
+        trunkScratch, fusedFilter, ffnOutBuf.buf,
         batchSize, paddedNNXYLen, handle->nnXLen * handle->nnYLen,
         ffnChannels, numChannels, packedOutChannels,
         handle->getNHWCChannelsPadded(numChannels, true),

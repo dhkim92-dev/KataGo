@@ -352,6 +352,12 @@ namespace vk_shader {
   const unsigned char* spirv_extract_channel0_p16s16 = _binary_extract_channel0_p16s16_start;
   size_t spirv_extract_channel0_p16s16_size = _binary_extract_channel0_p16s16_size;
 
+  const unsigned char* spirv_transformer_rms_norm_subgroup_p16s16 = _binary_transformer_rms_norm_subgroup_p16s16_start;
+  size_t spirv_transformer_rms_norm_subgroup_p16s16_size = _binary_transformer_rms_norm_subgroup_p16s16_size;
+
+  const unsigned char* spirv_transformer_residual_rms_norm_subgroup_p16s16 = _binary_transformer_residual_rms_norm_subgroup_p16s16_start;
+  size_t spirv_transformer_residual_rms_norm_subgroup_p16s16_size = _binary_transformer_residual_rms_norm_subgroup_p16s16_size;
+
   // transformer_rms_norm_fp32
   const unsigned char* spirv_transformer_rms_norm_fp32 = _binary_transformer_rms_norm_fp32_start;
   size_t spirv_transformer_rms_norm_fp32_size = _binary_transformer_rms_norm_fp32_size;
@@ -564,6 +570,8 @@ namespace vk_shader {
       {spirv_transformer_apply_rope_fp32, spirv_transformer_apply_rope_fp32_size, &shaderModule_transformer_apply_rope_fp32},
       {spirv_transformer_apply_rope_p16s16, spirv_transformer_apply_rope_p16s16_size, &shaderModule_transformer_apply_rope_p16s16},
       {spirv_transformer_apply_rope_p32s16, spirv_transformer_apply_rope_p32s16_size, &shaderModule_transformer_apply_rope_p32s16},
+      {spirv_transformer_rms_norm_subgroup_p16s16, spirv_transformer_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_rms_norm_subgroup_p16s16},
+      {spirv_transformer_residual_rms_norm_subgroup_p16s16, spirv_transformer_residual_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_residual_rms_norm_subgroup_p16s16},
       {spirv_transformer_rms_norm_fp32, spirv_transformer_rms_norm_fp32_size, &shaderModule_transformer_rms_norm_fp32},
       {spirv_transformer_rms_norm_p16s16, spirv_transformer_rms_norm_p16s16_size, &shaderModule_transformer_rms_norm_p16s16},
       {spirv_transformer_residual_rms_norm_p16s16, spirv_transformer_residual_rms_norm_p16s16_size, &shaderModule_transformer_residual_rms_norm_p16s16},
@@ -615,6 +623,11 @@ namespace vk_shader {
     for(const ShaderSource& shader: shaders)
       shaderModuleFields.push_back(shader.module);
     for(const ShaderSource& shader: shaders) {
+      if((shader.module == &shaderModule_transformer_rms_norm_subgroup_p16s16 ||
+          shader.module == &shaderModule_transformer_residual_rms_norm_subgroup_p16s16) &&
+         !canUseTransformerRMSNormSubgroup(deviceInfo, TransformerRMSNormTuneParms{
+           static_cast<int>(deviceInfo.subgroupProperties.subgroupSize), 1, 4, 2}))
+        continue;
       if(shader.module == &shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16 &&
          !deviceInfo.canUseRegisterAttentionNHWC)
         continue;
@@ -830,8 +843,9 @@ namespace vk_shader {
     if((result = createTransformerRMSNorm(transformerRmsNorm, tuneParams.rmsNorm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if(buildNHWCPipelines) {
       if((result = createTransformerRMSNorm(transformerRmsNormNHWC, tuneParams.rmsNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
+      if((result = createTransformerRMSNorm(transformerPreNormNHWC, tuneParams.transformerPreNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
       if(tuneParams.vulkan.shouldUseFP16Storage && tuneParams.vulkan.shouldUseFP16Compute &&
-         (result = createTransformerRMSNorm(transformerResidualRmsNormNHWC, tuneParams.rmsNorm, tuneParams.vulkan, true, true)) != VK_SUCCESS) return result;
+         (result = createTransformerRMSNorm(transformerResidualRmsNormNHWC, tuneParams.transformerPreNorm, tuneParams.vulkan, true, true)) != VK_SUCCESS) return result;
     }
     if((result = createTransformerApplyRoPE(transformerApplyRoPE, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     if(buildNHWCPipelines) {
@@ -936,6 +950,7 @@ namespace vk_shader {
 
     destroyPipeline(transformerRmsNorm);
     destroyPipeline(transformerRmsNormNHWC);
+    destroyPipeline(transformerPreNormNHWC);
     destroyPipeline(transformerResidualRmsNormNHWC);
     destroyPipeline(transformerApplyRoPE);
     destroyPipeline(transformerApplyRoPENHWC);
@@ -1475,18 +1490,8 @@ namespace vk_shader {
        tuneParams.VWM != 1 || tuneParams.VWN != 1)
       return VK_ERROR_INITIALIZATION_FAILED;
 
-    const uint64_t accumulatorTileBytes =
-      2ull * static_cast<uint64_t>(tuneParams.MWG) * tuneParams.NWG *
-      (tuneParams.accType == 32 ? sizeof(float) : sizeof(uint16_t));
-    const uint64_t sharedFilterBytes = tuneParams.SB == 1
-      ? 2ull * static_cast<uint64_t>(tuneParams.KWG) * tuneParams.NWG * sizeof(uint16_t)
-      : 0;
-    const uint64_t sharedAlignmentBytes = 16ull * (2 + 2 * tuneParams.SB);
-    if(accumulatorTileBytes + sharedFilterBytes + sharedAlignmentBytes >
-       deviceInfo.properties.limits.maxComputeSharedMemorySize)
-      return VK_ERROR_INITIALIZATION_FAILED;
-
-    HGemmCooperativeMatrixNCHWSpec spec;
+    TransformerDualGemmSwiGLUSpec spec;
+    spec.STAGES = tuneParams.STAGES;
     spec.localSizeX = static_cast<uint32_t>(tuneParams.MWAVE / tuneParams.MWARP) * tuneParams.subgroupSize;
     spec.localSizeY = static_cast<uint32_t>(tuneParams.NWAVE / tuneParams.NWARP);
     spec.localSizeZ = 1;
@@ -1804,6 +1809,11 @@ namespace vk_shader {
 
   VkResult ComputePipelines::createTransformerRMSNorm(Pipeline& pipeline, const TransformerRMSNormTuneParms& tuneParams, const VulkanParams& vulkanParams, bool useNHWC, bool residualAdd) {
     auto spec = TransformerRMSNormSpec();
+    const bool subgroup = useNHWC && tuneParams.MODE == 2 &&
+      vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute &&
+      vulkanParams.shouldUseFP16Storage && vulkanParams.shouldUseFP16Compute &&
+      canUseTransformerRMSNormSubgroup(deviceInfo, tuneParams);
+    spec.MODE = useNHWC && tuneParams.MODE == 1 ? 1 : subgroup ? 2 : 0;
     spec.localSizeX = tuneParams.WG_C_SIZE * tuneParams.WG_XY_SIZE;
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
@@ -1813,6 +1823,11 @@ namespace vk_shader {
     spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     const std::string suffix = useNHWC ? "_nhwc" : "";
+    if(subgroup)
+      return createPipeline(residualAdd ? "transformer_residual_rms_norm_subgroup_p16s16_nhwc" : "transformer_rms_norm_subgroup_p16s16_nhwc",
+        residualAdd ? shaderModule_transformer_residual_rms_norm_subgroup_p16s16 : shaderModule_transformer_rms_norm_subgroup_p16s16,
+        5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
+        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT);
     if(residualAdd) {
       if(!useNHWC || !vulkanParams.canUseFP16Storage || !vulkanParams.canUseFP16Compute ||
          !vulkanParams.shouldUseFP16Storage || !vulkanParams.shouldUseFP16Compute)
@@ -1876,7 +1891,7 @@ namespace vk_shader {
       return VK_ERROR_FEATURE_NOT_PRESENT;
 
     ScaleDotProductCooperativeSpec spec;
-    spec.localSizeX = tuneParams.COOP_SUBGROUP_SIZE * tuneParams.COOP_Q_TILES_PER_WORKGROUP;
+    spec.localSizeX = tuneParams.getLocalSizeX();
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
     spec.COOP_M_SIZE = tuneParams.COOP_M_SIZE;
@@ -1889,12 +1904,11 @@ namespace vk_shader {
     spec.USE_NHWC = useNHWC ? 1u : 0u;
     spec.COOP_KV_STAGES = useNHWC ? tuneParams.ATTN_BLOCK_KV / tuneParams.COOP_N_SIZE : 1;
     spec.COOP_USE_NV2 = tuneParams.COOP_USE_NV2;
-    if(useNHWC && canUseRegisterAttentionNHWC(deviceInfo, tuneParams, qHeadDim, vHeadDim))
-      spec.localSizeX = 128;
     SpecializationData specData(spec);
     const std::string suffix = useNHWC ? "_nhwc" : "";
 
-    if(useNHWC && canUseRegisterAttentionNHWC(deviceInfo, tuneParams, qHeadDim, vHeadDim)) {
+    // Eligibility was checked above; this is a compiled shader choice, not a SPIR-V runtime branch.
+    if(tuneParams.COOP_USE_NV2 == 1) {
       return createPipeline(
         "transformer_scale_dot_product_cooperative_nhwc_register_p32s16",
         shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16,

@@ -1,3 +1,9 @@
+#ifndef ATTENTION_USE_NV2
+#define ATTENTION_USE_NV2 0
+#endif
+#if ATTENTION_USE_NV2 == 1
+#extension GL_NV_cooperative_matrix2 : require
+#endif
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -20,7 +26,7 @@
 #define ATTENTION_EXP exp
 #define ATTENTION_SCORE_SCALE scale
 #endif
-#if ATTENTION_QUERY_LANES == 2
+#if ATTENTION_QUERY_LANES == 2 && ATTENTION_USE_NV2 == 0
 #extension GL_KHR_shader_subgroup_shuffle : require
 #endif
 
@@ -42,17 +48,35 @@
 layout(constant_id = 3) const int COOP_M_SIZE = 16;
 layout(constant_id = 4) const int COOP_N_SIZE = 16;
 layout(constant_id = 5) const int COOP_K_SIZE = 16;
+#if ATTENTION_USE_NV2 == 1
+layout(constant_id = 6) const int ATTN_HEAD_DIM = 32;
+layout(constant_id = 7) const int ATTN_V_HEAD_DIM = 32;
+layout(constant_id = 8) const int COOP_Q_TILES_PER_WORKGROUP = 4;
+#else
 layout(constant_id = 6) const int ATTN_HEAD_DIM = 64;
 layout(constant_id = 7) const int ATTN_V_HEAD_DIM = 64;
 layout(constant_id = 8) const int COOP_Q_TILES_PER_WORKGROUP = 1;
+#endif
 layout(constant_id = 9) const int COOP_PV_N_SIZE = 16;
+#if ATTENTION_USE_NV2 == 1
+layout(constant_id = 10) const int USE_NHWC = 1;
+layout(constant_id = 11) const int COOP_KV_STAGES = 4;
+#else
 layout(constant_id = 10) const int USE_NHWC = 0;
 layout(constant_id = 11) const int COOP_KV_STAGES = 1;
+#endif
+// ID12 mirrors the host/cache choice; only ATTENTION_USE_NV2 selects extension code at compile time.
+layout(constant_id = 12) const int COOP_USE_NV2 = ATTENTION_USE_NV2;
 
+const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
+#if ATTENTION_USE_NV2 == 1
+const int KV_BLOCK = COOP_N_SIZE * COOP_KV_STAGES;
+#define ATTENTION_QUERY_HEAD_DIM 32
+#define ATTENTION_VALUE_HEAD_DIM 32
+#else
 const int HEAD_DIM_PAD = ((ATTN_HEAD_DIM + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
 const int KV_PAD = ((COOP_N_SIZE + COOP_K_SIZE - 1) / COOP_K_SIZE) * COOP_K_SIZE;
 const int V_HEAD_DIM_PAD = ((ATTN_V_HEAD_DIM + COOP_PV_N_SIZE - 1) / COOP_PV_N_SIZE) * COOP_PV_N_SIZE;
-const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
 const int KV_STAGES = USE_NHWC == 1 ? COOP_KV_STAGES : 1;
 const int KV_BLOCK = COOP_N_SIZE * KV_STAGES;
 #if ATTENTION_KV_BLOCK_SOFTMAX == 1
@@ -65,9 +89,13 @@ const int PV_TILE_WIDTH = V_HEAD_DIM_PAD;
 const int SOFTMAX_KV_WIDTH = COOP_N_SIZE * SOFTMAX_KV_STAGES;
 const int Q_FRAGMENTS = HEAD_DIM_PAD / COOP_K_SIZE;
 const int OUTPUT_VALUES_PER_LANE = (ATTN_V_HEAD_DIM + ATTENTION_QUERY_LANES - 1) / ATTENTION_QUERY_LANES;
+#define ATTENTION_QUERY_HEAD_DIM ATTN_HEAD_DIM
+#define ATTENTION_VALUE_HEAD_DIM ATTN_V_HEAD_DIM
+#endif
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
+#if ATTENTION_USE_NV2 == 0
 layout(set = 0, binding = 0) readonly buffer Query {
   realstore Q[];
 };
@@ -79,6 +107,7 @@ layout(set = 0, binding = 1) readonly buffer Key {
 layout(set = 0, binding = 2) readonly buffer Value {
   realstore V[];
 };
+#endif
 
 #if defined(ATTENTION_VECTOR_LOADS)
 layout(set = 0, binding = 0) readonly buffer QueryVector { realstore4 Q4[]; };
@@ -123,6 +152,141 @@ layout(push_constant) uniform ScaleDotProductAttentionParams {
   int ropeNumPairs;
   int ropeReserved;
 };
+
+// Both feature variants use the same packed tensor and RoPE address contract.
+// Expressions avoid temporary pointer-parameter copies in NV matrix callback compilation.
+#define attentionNhwcInputIndex(batchBase, pos, offset, rowStride, head, dim, headDim) \
+  ((batchBase) + (pos) * (rowStride) + (offset) + (head) * (headDim) + (dim))
+#define attentionRopeIndex(pos, head, pair) \
+  (learnableRope != 0 ? ((head) * ropeNumPairs + (pair)) * seqLen + (pos) : (pair) * seqLen + (pos))
+#if defined(ATTENTION_VECTOR_LOADS)
+#define loadAttentionQuery4(batchBase, pos, head, dim) \
+  f16vec4(Q4[attentionNhwcInputIndex(batchBase, pos, qOffset, qRowStride, head, dim, ATTENTION_QUERY_HEAD_DIM) / 4])
+#define loadAttentionKey4(batchBase, pos, head, dim) \
+  f16vec4(K4[attentionNhwcInputIndex(batchBase, pos, kOffset, kRowStride, head, dim, ATTENTION_QUERY_HEAD_DIM) / 4])
+#define loadAttentionValue4(batchBase, pos, head, dim) \
+  f16vec4(V4[attentionNhwcInputIndex(batchBase, pos, vOffset, vRowStride, head, dim, ATTENTION_VALUE_HEAD_DIM) / 4])
+#endif
+
+#if ATTENTION_USE_NV2 == 1
+struct QueryStorage { uvec4 alignment; float16_t values[Q_BLOCK * 32]; };
+struct KeyStorage { uvec4 alignment; float16_t values[KV_BLOCK * 32]; };
+struct ValueStorage { uvec4 alignment; float16_t values[KV_BLOCK * 32]; };
+struct OutputStorage { uvec4 alignment; float values[Q_BLOCK * 32]; };
+shared QueryStorage qs;
+shared KeyStorage ks;
+shared ValueStorage vs;
+shared OutputStorage os;
+shared uint queryMask[Q_BLOCK];
+shared uint keyMask[KV_BLOCK];
+#define SCORE coopmat<float, gl_ScopeWorkgroup, Q_BLOCK, KV_BLOCK, gl_MatrixUseAccumulator>
+#define OUTPUT coopmat<float, gl_ScopeWorkgroup, Q_BLOCK, 32, gl_MatrixUseAccumulator>
+
+float maxRow(const in float a, const in float b) { return max(a, b); }
+float maximumState(const in uint r, const in uint c, const in float value, const in float previous) {
+  return max(value, previous);
+}
+float exponent(const in uint r, const in uint c, const in float value) { return exp2(value); }
+float inverse(const in uint r, const in uint c, const in float value) {
+  return value > 0.0 ? 1.0 / value : 0.0;
+}
+float scaledScore(const in uint r, const in uint c, const in float value) {
+  // The finite running maximum keeps all-masked rows out of inf - inf.
+  return keyMask[c] != 0 ? value * (scale * 1.4426950408889634) : uintBitsToFloat(0xff800000u);
+}
+f16vec4 rotate(f16vec4 value, int d, int pos, int head) {
+  if(useRope != 0) {
+    for(int i = 0; i < 2; i++) {
+      const int pair = d / 2 + i;
+      if(pair < min(ropeNumPairs, 16)) {
+        const int table = attentionRopeIndex(pos, head, pair);
+        float a = float(value[i * 2]), b = float(value[i * 2 + 1]);
+        applyTransformerRoPE(a, b, ropeCosTable[table], ropeSinTable[table]);
+        value[i * 2] = float16_t(a);
+        value[i * 2 + 1] = float16_t(b);
+      }
+    }
+  }
+  return value;
+}
+void runScaleDotProductCooperative() {
+  const int tid = int(gl_LocalInvocationIndex);
+  const int qStart = int(gl_WorkGroupID.x) * Q_BLOCK;
+  const int bh = int(gl_WorkGroupID.y), batch = bh / numHeads, head = bh % numHeads;
+  const int kvHead = head / (numHeads / numKVHeads);
+  for(int row = tid; row < Q_BLOCK; row += int(gl_WorkGroupSize.x))
+    queryMask[row] = qStart + row < seqLen && mask[batch * seqLen + qStart + row] != float16_t(0) ? 1u : 0u;
+  for(int i = tid; i < Q_BLOCK * 8; i += int(gl_WorkGroupSize.x)) {
+    const int row = i / 8, d = i % 8 * 4;
+    f16vec4 value = f16vec4(0.0);
+    if(qStart + row < seqLen)
+      value = rotate(loadAttentionQuery4(batch * qBatchStride, qStart + row, head, d),
+        d, qStart + row, head * numKVHeads / numHeads);
+    for(int n = 0; n < 4; n++) qs.values[row * 32 + d + n] = value[n];
+  }
+  barrier();
+  coopmat<float16_t, gl_ScopeWorkgroup, Q_BLOCK, 32, gl_MatrixUseA> queries;
+  coopMatLoad(queries, qs.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+  SCORE maxima = SCORE(-1e30), sums = SCORE(0.0);
+  OUTPUT outputValues = OUTPUT(0.0);
+  for(int start = 0; start < seqLen; start += KV_BLOCK) {
+    for(int row = tid; row < KV_BLOCK; row += int(gl_WorkGroupSize.x))
+      keyMask[row] = start + row < seqLen && mask[batch * seqLen + start + row] != float16_t(0) ? 1u : 0u;
+    for(int i = tid; i < KV_BLOCK * 8; i += int(gl_WorkGroupSize.x)) {
+      const int row = i / 8, d = i % 8 * 4;
+      f16vec4 key = f16vec4(0.0), value = f16vec4(0.0);
+      if(start + row < seqLen) {
+        key = rotate(loadAttentionKey4(batch * kBatchStride, start + row, kvHead, d),
+          d, start + row, kvHead);
+        value = loadAttentionValue4(batch * vBatchStride, start + row, kvHead, d);
+      }
+      for(int n = 0; n < 4; n++) {
+        ks.values[row * 32 + d + n] = key[n];
+        vs.values[row * 32 + d + n] = value[n];
+      }
+    }
+    barrier();
+    coopmat<float16_t, gl_ScopeWorkgroup, 32, KV_BLOCK, gl_MatrixUseB> keys;
+    coopMatLoad(keys, ks.values, 0, 32, gl_CooperativeMatrixLayoutColumnMajor);
+    SCORE scores = SCORE(0.0);
+    scores = coopMatMulAdd(queries, keys, scores);
+    coopMatPerElementNV(scores, scores, scaledScore);
+    SCORE maximum, previous = maxima, probabilities, oldWeight, rowSum;
+    coopMatReduceNV(maximum, scores, gl_CooperativeMatrixReduceRowNV, maxRow);
+    coopMatPerElementNV(maxima, maximum, maximumState, previous);
+    coopMatPerElementNV(probabilities, scores - maxima, exponent);
+    coopMatPerElementNV(oldWeight, previous - maxima, exponent);
+    coopmat<float16_t, gl_ScopeWorkgroup, Q_BLOCK, KV_BLOCK, gl_MatrixUseA> weights =
+      coopmat<float16_t, gl_ScopeWorkgroup, Q_BLOCK, KV_BLOCK, gl_MatrixUseA>(probabilities);
+    // Match ggml's denominator: sum the rounded FP16 probability matrix by MMA.
+    coopmat<float16_t, gl_ScopeWorkgroup, KV_BLOCK, KV_BLOCK, gl_MatrixUseB> ones =
+      coopmat<float16_t, gl_ScopeWorkgroup, KV_BLOCK, KV_BLOCK, gl_MatrixUseB>(1.0);
+    rowSum = SCORE(0.0);
+    rowSum = coopMatMulAdd(weights, ones, rowSum);
+    sums = sums * oldWeight + rowSum;
+    coopmat<float16_t, gl_ScopeWorkgroup, KV_BLOCK, 32, gl_MatrixUseB> values;
+    coopMatLoad(values, vs.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+    OUTPUT rowScale, pv = OUTPUT(0.0);
+    coopMatReduceNV(rowScale, oldWeight, gl_CooperativeMatrixReduceRowNV, maxRow);
+    pv = coopMatMulAdd(weights, values, pv);
+    outputValues = outputValues * rowScale + pv;
+    barrier();
+  }
+  OUTPUT normalization;
+  coopMatReduceNV(normalization, sums, gl_CooperativeMatrixReduceRowNV, maxRow);
+  coopMatPerElementNV(normalization, normalization, inverse);
+  outputValues *= normalization;
+  coopMatStore(outputValues, os.values, 0, 32, gl_CooperativeMatrixLayoutRowMajor);
+  barrier();
+  for(int i = tid; i < Q_BLOCK * 32; i += int(gl_WorkGroupSize.x)) {
+    const int row = i / 32, d = i % 32;
+    if(qStart + row < seqLen)
+      d_output[batch * outputBatchStride + (qStart + row) * outputRowStride + head * 32 + d] =
+        queryMask[row] != 0 ? float16_t(os.values[i]) : float16_t(0);
+  }
+}
+
+#else
 
 struct QTileStorage {
   uvec4 alignment;
@@ -193,7 +357,7 @@ void loadQueryTile(int qBlockStart, int batchBase, int head) {
       const int q = i / (HEAD_DIM_PAD / 4);
       const int qPos = qBlockStart + q;
       const f16vec4 values = d < ATTN_HEAD_DIM && qPos < seqLen
-        ? f16vec4(Q4[(batchBase + qPos * qRowStride + qOffset + head * ATTN_HEAD_DIM + d) / 4])
+        ? loadAttentionQuery4(batchBase, qPos, head, d)
         : f16vec4(0.0);
       for(int n = 0; n < 4; n++)
         qTile[(d + n) * Q_BLOCK + q] = values[n];
@@ -228,7 +392,7 @@ void loadKeyTile(int kvStart, int batchIndex, int batchBase, int kvHead) {
       const int k = i / (HEAD_DIM_PAD / 4);
       const int kPos = kvStart + k;
       const f16vec4 values = d < ATTN_HEAD_DIM && kPos < seqLen
-        ? f16vec4(K4[(batchBase + kPos * kRowStride + kOffset + kvHead * ATTN_HEAD_DIM + d) / 4])
+        ? loadAttentionKey4(batchBase, kPos, kvHead, d)
         : f16vec4(0.0);
       for(int n = 0; n < 4; n++)
         kTile[(d + n) * KV_BLOCK + k] = values[n];
@@ -269,9 +433,7 @@ void applyQueryRope(int qBlockStart, int head) {
   for(int pairIdx = 0; pairIdx < pairCount; pairIdx++) {
     const int d0 = pairIdx * 2;
     const int d1 = d0 + 1;
-    const int tableIdx = learnableRope != 0
-      ? (ropeTableHead * ropeNumPairs + pairIdx) * seqLen + qPos
-      : pairIdx * seqLen + qPos;
+    const int tableIdx = attentionRopeIndex(qPos, ropeTableHead, pairIdx);
     float q0 = float(qTile[d0 * Q_BLOCK + qInBlock]);
     float q1 = float(qTile[d1 * Q_BLOCK + qInBlock]);
     applyTransformerRoPE(q0, q1, ropeCosTable[tableIdx], ropeSinTable[tableIdx]);
@@ -292,9 +454,7 @@ void applyKeyRope(int kvStart, int kvHead) {
     if(globalKPos < seqLen) {
       const int d0 = pairIdx * 2;
       const int d1 = d0 + 1;
-      const int tableIdx = learnableRope != 0
-        ? (ropeTableHead * ropeNumPairs + pairIdx) * seqLen + globalKPos
-        : pairIdx * seqLen + globalKPos;
+      const int tableIdx = attentionRopeIndex(globalKPos, ropeTableHead, pairIdx);
       float k0 = float(kTile[d0 * KV_BLOCK + tileKPos]);
       float k1 = float(kTile[d1 * KV_BLOCK + tileKPos]);
       applyTransformerRoPE(k0, k1, ropeCosTable[tableIdx], ropeSinTable[tableIdx]);
@@ -316,7 +476,7 @@ void loadValueTile(int kvStart, int batchBase, int kvHead) {
       const int fragmentK = k % KV_PAD;
       const int kPos = kvStart + (k / KV_PAD) * COOP_N_SIZE + fragmentK;
       const f16vec4 values = fragmentK < COOP_N_SIZE && kPos < seqLen && d < ATTN_V_HEAD_DIM
-        ? f16vec4(V4[(batchBase + kPos * vRowStride + vOffset + kvHead * ATTN_V_HEAD_DIM + d) / 4])
+        ? loadAttentionValue4(batchBase, kPos, kvHead, d)
         : f16vec4(0.0);
       for(int n = 0; n < 4; n++)
         vTile[i * 4 + n] = values[n];
@@ -584,6 +744,8 @@ void runScaleDotProductCooperative() {
 #endif
 }
 
+#endif
+
 void transformerScaleDotProductCooperativeNCHW() {
   runScaleDotProductCooperative();
 }
@@ -593,8 +755,12 @@ void transformerScaleDotProductCooperativeNHWC() {
 }
 
 void main() {
+#if ATTENTION_USE_NV2 == 1
+  runScaleDotProductCooperative();
+#else
   if(USE_NHWC == 1)
     transformerScaleDotProductCooperativeNHWC();
   else
     transformerScaleDotProductCooperativeNCHW();
+#endif
 }

@@ -368,6 +368,10 @@ extern "C" {
   extern const size_t _binary_extract_channel0_p16s16_size;
 
   // transformer_rms_norm_fp32
+  extern const unsigned char _binary_transformer_rms_norm_subgroup_p16s16_start[];
+  extern const size_t _binary_transformer_rms_norm_subgroup_p16s16_size;
+  extern const unsigned char _binary_transformer_residual_rms_norm_subgroup_p16s16_start[];
+  extern const size_t _binary_transformer_residual_rms_norm_subgroup_p16s16_size;
   extern const unsigned char _binary_transformer_rms_norm_fp32_start[];
   extern const unsigned char* _binary_transformer_rms_norm_fp32_end;
   extern const size_t _binary_transformer_rms_norm_fp32_size;
@@ -1042,6 +1046,21 @@ struct LocalDimHash {
       int NWAVE = 16;
     };
 
+    struct TransformerDualGemmSwiGLUSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 8;
+      int KSize = 16;
+      int MWG = 128;
+      int NWG = 64;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 16;
+      int STAGES = 1;
+    };
+
     struct TransformerRMSNormSpec {
       uint32_t localSizeX;
       uint32_t localSizeY;
@@ -1050,6 +1069,7 @@ struct LocalDimHash {
       int WG_XY_SIZE = 1;
       int C_PER_THREAD = 4;
       uint32_t useNHWC = 0;
+      int MODE = 0;
     };
 
     struct TransformerApplyRoPESpec {
@@ -1608,13 +1628,15 @@ struct LocalDimHash {
 
     /** Runtime tuning parameters for the fused transformer dual-GEMM SwiGLU path. */
     struct TransformerDualGemmSwiGLUTuneParams : HGemmCooperativeMatrixNCHWTuneParams {
+      int STAGES = 1;
       TransformerDualGemmSwiGLUTuneParams() {
         VWM = 1;
         VWN = 1;
       }
 
       bool isValid() const {
-        return HGemmCooperativeMatrixNCHWTuneParams::isValid() && VWM == 1 && VWN == 1;
+        return HGemmCooperativeMatrixNCHWTuneParams::isValid() && VWM == 1 && VWN == 1 &&
+          KDIM % 4 == 0 && KWG % 4 == 0 && (STAGES == 1 || STAGES == 2);
       }
 
       int getRequiredSpatialAlignment() const;
@@ -1658,6 +1680,7 @@ struct LocalDimHash {
       int COOP_USE_NV2=0;
 
       bool isValid() const;
+      uint32_t getLocalSizeX() const;
     };
 
     bool canUseRegisterAttentionNHWC(
@@ -1676,9 +1699,12 @@ struct LocalDimHash {
       int WG_C_SIZE = 64;
       int WG_XY_SIZE = 1;
       int C_PER_THREAD = 4;
+      int MODE = 0; // 0: legacy, 1: cached shared reduction, 2: cached subgroup reduction
 
       bool isValid() const;
     };
+
+    bool canUseTransformerRMSNormSubgroup(const VulkanDeviceInfo& deviceInfo, const TransformerRMSNormTuneParms& params);
 
     struct TransformerSpatialRmsNormTuneParams {
       int TILE_SIZE = 32;
@@ -1727,6 +1753,7 @@ struct LocalDimHash {
       TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNCHW;
       TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNHWC;
       TransformerRMSNormTuneParms rmsNorm;
+      TransformerRMSNormTuneParms transformerPreNorm;
       TransformerSpatialRmsNormTuneParams spatialRMSNorm;
 
       bool isValid() const;
@@ -1890,6 +1917,8 @@ struct LocalDimHash {
     VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_apply_rope_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_apply_rope_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_subgroup_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_residual_rms_norm_subgroup_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_rms_norm_fp32 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_rms_norm_p16s16 = VK_NULL_HANDLE;
     VkShaderModule shaderModule_transformer_residual_rms_norm_p16s16 = VK_NULL_HANDLE;
@@ -2024,6 +2053,7 @@ struct LocalDimHash {
 
     Pipeline transformerRmsNorm;
     Pipeline transformerRmsNormNHWC;
+    Pipeline transformerPreNormNHWC;
     Pipeline transformerResidualRmsNormNHWC;
     Pipeline transformerApplyRoPE;
     Pipeline transformerApplyRoPENHWC;

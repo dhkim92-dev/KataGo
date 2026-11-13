@@ -2,6 +2,12 @@
 * Vulkan ported transformer RMSNorm kernel.
 * Based on openclkernels.cpp, transformerRMSNorm kernel function
 */
+#ifndef RMSNORM_SUBGROUP
+#define RMSNORM_SUBGROUP 0
+#endif
+#if RMSNORM_SUBGROUP
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
 #include "common.glsl"
 
 #ifndef RESIDUAL_ADD
@@ -12,6 +18,7 @@ layout(constant_id = 3) const int WG_C_SIZE = 64;
 layout(constant_id = 4) const int WG_XY_SIZE = 1;
 layout(constant_id = 5) const int C_PER_THREAD = 4;
 layout(constant_id = 6) const int USE_NHWC = 0;
+layout(constant_id = 7) const int MODE = 0;
 
 layout(push_constant) uniform TransformerRMSNormParams {
     int nSize;
@@ -153,9 +160,65 @@ void transformerRmsNormNHWC() {
     }
 }
 
+// Cached NHWC path: adjacent lanes own adjacent channels and retain the
+// unmasked, storage-rounded values through the FP32 reduction and epilogue.
+void transformerRmsNormCachedNHWC() {
+#if RMSNORM_SUBGROUP
+    const int lane = int(gl_SubgroupInvocationID);
+    const int row = int(gl_SubgroupID);
+#else
+    const int lane = int(gl_LocalInvocationIndex) % WG_C_SIZE;
+    const int row = int(gl_LocalInvocationIndex) / WG_C_SIZE;
+#endif
+    const int xy = int(gl_WorkGroupID.x) * WG_XY_SIZE + row;
+    const int n = int(gl_WorkGroupID.y);
+    const float m = xy < xySize ? LOAD(mask, n * xySize + xy) : 0.0f;
+    float values[C_PER_THREAD];
+    float sum = 0.0f;
+    for(int i = 0; i < C_PER_THREAD; i++) {
+        const int c = lane + i * WG_C_SIZE;
+        float value = 0.0f;
+        if(c < cSize && xy < xySize) {
+            const int index = (n * xySize + xy) * channelsPadded + c;
+#if RESIDUAL_ADD
+            const realstore updated = realstore(LOAD(d_input, index) + LOAD(d_output, index));
+            d_input[index] = updated;
+            value = float(updated);
+#else
+            value = LOAD(d_input, index);
+#endif
+        }
+        values[i] = value;
+        const float masked = value * m;
+        sum += masked * masked;
+    }
+#if RMSNORM_SUBGROUP
+    sum = subgroupAdd(sum);
+#else
+    const int offset = row * WG_C_SIZE + lane;
+    partials[offset] = sum;
+    for(int span = WG_C_SIZE / 2; span > 0; span /= 2) {
+        barrier();
+        if(lane < span) partials[offset] += partials[offset + span];
+    }
+    barrier();
+    sum = partials[row * WG_C_SIZE];
+#endif
+    const float rms = inversesqrt(sum / float(cSize) + eps);
+    for(int i = 0; i < C_PER_THREAD; i++) {
+        const int c = lane + i * WG_C_SIZE;
+        if(c < cSize && xy < xySize) {
+            const float result = (values[i] * rms * weight[c] + beta[c]) * m;
+            STORE(d_output, (n * xySize + xy) * channelsPadded + c, floatToReal(result));
+        }
+    }
+}
+
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 void main() {
-    if (USE_NHWC == 1)
+    if (USE_NHWC == 1 && MODE != 0 && cSize <= WG_C_SIZE * C_PER_THREAD)
+        transformerRmsNormCachedNHWC();
+    else if (USE_NHWC == 1)
         transformerRmsNormNHWC();
     else
         transformerRmsNormNCHW();

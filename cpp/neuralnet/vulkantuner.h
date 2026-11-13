@@ -13,7 +13,7 @@ using namespace vk_shader;
 using namespace vk_shader::tune;
 
 namespace VulkanTuner {
-  constexpr int TUNER_VERSION = 36;
+  constexpr int TUNER_VERSION = 38;
   constexpr int DEFAULT_BATCH_SIZE = 4;
 
   // Minimum candidate/baseline throughput ratios used to enable optional Vulkan paths.
@@ -29,6 +29,7 @@ namespace VulkanTuner {
   constexpr std::size_t COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR = 3;
   constexpr std::size_t COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT = 2;
 
+  bool isTransformerGemmUpgrade(const std::vector<double>& referenceSeconds, const std::vector<double>& candidateSeconds);
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   std::vector<float> computeTransformerDualGemmSwiGLUReference(
     const std::vector<float>& input,
@@ -39,6 +40,8 @@ namespace VulkanTuner {
     int packedOCSize,
     int ffnSize
   );
+  std::vector<float> packTransformerDualGemmSwiGLUFilterForNHWC(
+    const std::vector<float>& mainWeights, const std::vector<float>& gateWeights, int cSize, int ffnSize);
   std::vector<float> packTransformerDualGemmSwiGLUFilter(
     const std::vector<float>& mainWeights,
     const std::vector<float>& gateWeights,
@@ -83,6 +86,9 @@ namespace VulkanTuner {
     int transformerNumHeads = 0;
     int transformerNumKVHeads = 0;
     int transformerFFNChannels = 0;
+    int transformerPlainNormCount = 0;
+    int transformerFusedNormCount = 0;
+    bool transformerUniformNormChannels = true;
     bool transformerUseRope = false;
     bool transformerLearnableRope = false;
     float transformerRopeTheta = 0.0f;
@@ -122,7 +128,8 @@ namespace VulkanTuner {
     bool attentionOnly = false,
     bool transformerGemmOnly = false,
     bool transformerFFNOnly = false,
-    bool transformerResidualOnly = false);
+    bool transformerResidualOnly = false,
+    bool transformerPreNormOnly = false);
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
   std::string

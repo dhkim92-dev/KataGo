@@ -187,7 +187,7 @@ void Tests::runVulkanTunerPersistenceTests() {
     cout << "Vulkan layer/shader benchmark CSV tests passed" << endl;
   }
 #endif
-  testAssert(VulkanTuner::TUNER_VERSION == 36);
+  testAssert(VulkanTuner::TUNER_VERSION == 38);
   {
     using Case = VulkanTuner::GemmTuneCase;
     using Kind = Case::Kind;
@@ -271,6 +271,10 @@ void Tests::runVulkanTunerPersistenceTests() {
     {2.0f, -1.0f}, {0.5f, 3.0f}, dualInputChannels, 1, 4
   );
   testAssert(packedDualFilter == vector<float>({2.0f, 0.5f, 0.0f, 0.0f, -1.0f, 3.0f, 0.0f, 0.0f}));
+  testAssert(VulkanTuner::packTransformerDualGemmSwiGLUFilterForNHWC(
+    {1,2,3,4,5,6}, {7,8,9,10,11,12}, 3, 2) == vector<float>({1,3,5,2,4,6,7,9,11,8,10,12}));
+  testAssert(sizeof(vk_shader::spec::TransformerDualGemmSwiGLUSpec) == 12 * sizeof(uint32_t));
+  testAssert(offsetof(vk_shader::spec::TransformerDualGemmSwiGLUSpec, STAGES) == 11 * sizeof(uint32_t));
   const vector<float> dualReference = VulkanTuner::computeTransformerDualGemmSwiGLUReference(
     {1.0f, 2.0f, 3.0f, 4.0f}, packedDualFilter, 1, 2, dualInputChannels, 4, 1
   );
@@ -292,6 +296,15 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(VulkanTuner::computeErrorProp({1.0f}, {nan}) == 1.0);
   testAssert(VulkanTuner::computeErrorProp({inf}, {inf}) == 1.0);
   testAssert(VulkanTuner::computeErrorProp({1.0f}, {-inf}) == 1.0);
+
+  // A lucky short sample or an incomplete finalist cannot replace the incumbent.
+  const vector<double> incumbentTimes(6, 100.0);
+  testAssert(!VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {99,99,99,99,99,99}));
+  testAssert(!VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {90,90,90,90,101,101}));
+  testAssert(VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {95,95,95,95,95,101}));
+  testAssert(!VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {95,95,95,95,95}));
+  testAssert(!VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {95,95,95,95,95,nan}));
+  testAssert(!VulkanTuner::isTransformerGemmUpgrade(incumbentTimes, {95,95,95,95,95,0}));
 
   // Every rounded value differs, but FP16 rounding is a small numerical error.
   const vector<float> reference = {1.0003f, -2.0007f, 0.10003f};
@@ -486,13 +499,27 @@ void Tests::runVulkanTunerPersistenceTests() {
   nv2DeviceInfo.properties.limits.maxComputeWorkGroupSize[0] = 128;
   nv2DeviceInfo.properties.limits.maxComputeWorkGroupInvocations = 128;
   testAssert(!canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2Attention, 32, 32));
+  testAssert(nv2Attention.getLocalSizeX() == 64);
   nv2Attention.COOP_USE_NV2 = 1;
+  testAssert(nv2Attention.getLocalSizeX() == 128);
   testAssert(canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2Attention, 32, 32));
-  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22591;
+  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22975;
   testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
-  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22592;
+  nv2DeviceInfo.properties.limits.maxComputeSharedMemorySize = 22976;
   testAssert(isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
   testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, false));
+  TransformerCooperativeMatrixTuneParams nv2WrongPv = nv2Attention;
+  nv2WrongPv.COOP_PV_N_SIZE = 8;
+  testAssert(!canUseRegisterAttentionNHWC(nv2DeviceInfo, nv2WrongPv, 32, 32));
+  testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2WrongPv, 32, 32, true));
+  VulkanDeviceInfo khrOnlyAttentionDevice = nv2DeviceInfo;
+  khrOnlyAttentionDevice.canUseRegisterAttentionNHWC = false;
+  khrOnlyAttentionDevice.flexibleMatrixProperties.clear();
+  testAssert(!isValidCooperativeMatrixConfig(khrOnlyAttentionDevice, nv2Attention, 32, 32, true));
+  TransformerCooperativeMatrixTuneParams khrAttention = nv2Attention;
+  khrAttention.COOP_USE_NV2 = 0;
+  testAssert(isValidCooperativeMatrixConfig(khrOnlyAttentionDevice, khrAttention, 32, 32, true));
+  testAssert(khrAttention.getLocalSizeX() == 64);
   nv2DeviceInfo.properties.limits.maxComputeWorkGroupInvocations = 127;
   testAssert(!isValidCooperativeMatrixConfig(nv2DeviceInfo, nv2Attention, 32, 32, true));
   nv2DeviceInfo.flexibleMatrixProperties[0].workgroupInvocations = 64;
@@ -502,15 +529,22 @@ void Tests::runVulkanTunerPersistenceTests() {
   TransformerDualGemmSwiGLUTuneParams dualGemmFloat32Params;
   dualGemmFloat32Params.accType = 32;
   VulkanDeviceInfo dualGemmMemoryLimitedDeviceInfo = float32AccumulatorDevice.info;
-  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 2079;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 527;
   testAssert(!isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
-  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 2080;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 528;
   testAssert(isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
   dualGemmFloat32Params.SB = 1;
-  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3135;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 1583;
   testAssert(!isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
-  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3136;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 1584;
   testAssert(isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmFloat32Params.STAGES = 2;
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3119;
+  testAssert(!isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmMemoryLimitedDeviceInfo.properties.limits.maxComputeSharedMemorySize = 3120;
+  testAssert(isValidCooperativeMatrixConfig(dualGemmMemoryLimitedDeviceInfo, dualGemmFloat32Params));
+  dualGemmFloat32Params.STAGES = 3;
+  testAssert(!dualGemmFloat32Params.isValid());
   VulkanDevice incompletePropertyDevice = {};
   incompletePropertyDevice.info = deviceInfo;
   incompletePropertyDevice.info.cooperativeMatrixPropertiesFn = fakeIncompleteCooperativeMatrixProperties;
@@ -769,7 +803,7 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(defaultLines[9] == "vulkan.shouldUseHgemmCooperativeMatrixNCHW=0");
   testAssert(defaultLines[10] == "vulkan.shouldUseSubgroup=0");
   testAssert(defaultLines[11] == "vulkan.shouldUseTransformerDualGemmSwiGLU=0");
-  testAssert(defaultLines.size() == 176);
+  testAssert(defaultLines.size() == 181);
   const auto lineIndex = [&](const string& prefix) {
     for(size_t i = 0; i < defaultLines.size(); i++) {
       if(defaultLines[i].find(prefix) == 0)
@@ -798,6 +832,56 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(lineIndex("spatialRMSNorm.APPLY_ELTS_PER_THREAD=") < lineIndex("transformerDualGemmSwiGLU.MWG="));
   testAssert(lineIndex("transformerDualGemmSwiGLU.VWM=") < lineIndex("transformerDualGemmSwiGLU.SB="));
   testAssert(VulkanTuneParams::load(defaultsFilename) == defaults);
+  testAssert(sizeof(vk_shader::spec::TransformerRMSNormSpec) == 8 * sizeof(uint32_t));
+  testAssert(offsetof(vk_shader::spec::TransformerRMSNormSpec, MODE) == 7 * sizeof(uint32_t));
+  VulkanDeviceInfo scalarDevice = {};
+  TransformerRMSNormTuneParms subgroupNorm{32,4,8,2};
+  testAssert(!canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  scalarDevice.subgroupProperties.subgroupSize = 32;
+  scalarDevice.subgroupSizeProperties.maxComputeWorkgroupSubgroups = 32;
+  scalarDevice.properties.limits.maxComputeWorkGroupSize[0] = 1024;
+  scalarDevice.properties.limits.maxComputeWorkGroupInvocations = 1024;
+  scalarDevice.properties.limits.maxComputeSharedMemorySize = 32768;
+  scalarDevice.subgroupProperties.supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+  scalarDevice.subgroupProperties.supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
+  scalarDevice.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  // No cooperative-matrix/TensorCore capability is needed for FP32 subgroup sums.
+  testAssert(scalarDevice.cooperativeMatrixFeatures.cooperativeMatrix == VK_FALSE);
+  testAssert(canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  scalarDevice.subgroupProperties.subgroupSize = 64;
+  testAssert(!canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  subgroupNorm.WG_C_SIZE = 64;
+  testAssert(canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  scalarDevice.subgroupSizeProperties.maxComputeWorkgroupSubgroups = 2;
+  testAssert(!canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  scalarDevice.subgroupSizeProperties.maxComputeWorkgroupSubgroups = 32;
+  scalarDevice.subgroupSizeControlFeatures.computeFullSubgroups = VK_FALSE;
+  testAssert(!canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  scalarDevice.subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
+  scalarDevice.subgroupProperties.supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+  testAssert(!canUseTransformerRMSNormSubgroup(scalarDevice, subgroupNorm));
+  string legacyPreNorm;
+  for(const string& line: defaultLines)
+    if(line.find("transformerPreNorm.") != 0)
+      legacyPreNorm += line.find("VERSION=") == 0 ? "VERSION=37\n" : line + "\n";
+  writeText("tests/scratch/vulkantuner-legacy-prenorm.txt", legacyPreNorm);
+  testAssert(VulkanTuneParams::load("tests/scratch/vulkantuner-legacy-prenorm.txt") == defaults);
+  VulkanTuneParams cachedNorm = defaults;
+  cachedNorm.transformerPreNorm = {32,4,8,2};
+  VulkanTuneParams::save("tests/scratch/vulkantuner-cached-prenorm.txt", cachedNorm);
+  testAssert(VulkanTuneParams::load("tests/scratch/vulkantuner-cached-prenorm.txt") == cachedNorm);
+  testAssert(cachedNorm != defaults);
+  string legacyFFNText;
+  for(const string& line: defaultLines)
+    if(line.find("transformerDualGemmSwiGLU.STAGES=") != 0 && line.find("transformerPreNorm.") != 0)
+      legacyFFNText += line.find("VERSION=") == 0 ? "VERSION=36\n" : line + "\n";
+  writeText("tests/scratch/vulkantuner-legacy-ffn.txt", legacyFFNText);
+  testAssert(VulkanTuneParams::load("tests/scratch/vulkantuner-legacy-ffn.txt") == defaults);
+  VulkanTuneParams twoStageFFN = defaults;
+  twoStageFFN.transformerDualGemmSwiGLU.STAGES = 2;
+  testAssert(twoStageFFN != defaults);
+  VulkanTuneParams::save("tests/scratch/vulkantuner-two-stage-ffn.txt", twoStageFFN);
+  testAssert(VulkanTuneParams::load("tests/scratch/vulkantuner-two-stage-ffn.txt") == twoStageFFN);
   string legacyAttentionText;
   for(const string& line: defaultLines)
     if(line.find(".COOP_USE_NV2=") == string::npos)

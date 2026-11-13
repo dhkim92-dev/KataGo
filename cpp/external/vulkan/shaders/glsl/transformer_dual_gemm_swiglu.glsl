@@ -9,55 +9,37 @@
 #endif
 #if ACC_TYPE == 16
 #define acc_dtype float16_t
-#elif ACC_TYPE == 32
-#define acc_dtype float
 #else
-#error "ACC_TYPE must be 16 or 32"
+#define acc_dtype float
 #endif
-
-// Only scalar external addressing is supported initially. The matrix fragments
-// still use the device-selected cooperative dimensions below.
 #ifndef SB
-#define SB 0
+#define SB 1
 #endif
-
-#define GroupId0() (int(gl_WorkGroupID.x))
-#define GroupId1() (int(gl_WorkGroupID.y))
-#define GroupId2() (int(gl_WorkGroupID.z))
-#define LocalId0() (int(gl_LocalInvocationID.x))
-#define LocalId1() (int(gl_LocalInvocationID.y))
-#define LocalId2() (int(gl_LocalInvocationID.z))
-#define LocalSize0() (int(gl_WorkGroupSize.x))
-#define LocalSize1() (int(gl_WorkGroupSize.y))
-#define LocalSize2() (int(gl_WorkGroupSize.z))
 
 layout(constant_id = 3) const int MSize = 16;
-layout(constant_id = 4) const int NSize = 16;
+layout(constant_id = 4) const int NSize = 8;
 layout(constant_id = 5) const int KSize = 16;
-layout(constant_id = 6) const int MWG = 32;
-layout(constant_id = 7) const int NWG = 32;
+layout(constant_id = 6) const int MWG = 128;
+layout(constant_id = 7) const int NWG = 64;
 layout(constant_id = 8) const int KWG = 32;
 layout(constant_id = 9) const int MWAVE = 32;
-layout(constant_id = 10) const int NWAVE = 32;
+layout(constant_id = 10) const int NWAVE = 16;
+layout(constant_id = 11) const int STAGES = 1;
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 #define MWI (MWG / MWAVE)
 #define NWI (NWG / NWAVE)
+#define THREADS int(gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z)
+#define A_COUNT (MWG * KWG / 4)
+#define B_COUNT (NWG * KWG / 4)
+#define A_PREFETCH ((A_COUNT + THREADS - 1) / THREADS)
+#define B_PREFETCH ((B_COUNT + THREADS - 1) / THREADS)
 
-// A is [HW, K] row-major NHWC staging data. Each K row of the packed filter is
-// [main F, gate F, padding], with packedOCSize as its physical stride. C is
-// [HW, F] row-major NHWC staging data.
-layout(set = 0, binding = 0) readonly buffer Input {
-  float16_t d_input[];
-};
-
-layout(set = 0, binding = 1) readonly buffer PackedFilter {
-  float16_t d_filter[];
-};
-
-layout(set = 0, binding = 2) writeonly buffer Output {
-  float16_t d_output[];
-};
-
+// Activations remain NHWC. Fused-only weights are [main F,K][gate F,K],
+// transposed once during model initialization; each vector follows K.
+layout(set = 0, binding = 0) readonly buffer Input { f16vec4 d_input[]; };
+layout(set = 0, binding = 1) readonly buffer PackedFilter { f16vec4 d_filter[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float16_t d_output[]; };
 layout(push_constant) uniform TransformerDualGemmSwiGLUParams {
   int cSize;
   int hwSize;
@@ -67,182 +49,145 @@ layout(push_constant) uniform TransformerDualGemmSwiGLUParams {
   int outputChannelStride;
 };
 
+struct ATileStorage { uvec4 alignment; f16vec4 values[STAGES * A_COUNT]; };
+shared ATileStorage aTile;
 #if SB == 1
-// Keep the cooperative pointee 16-byte aligned. Both packed B regions are
-// staged so each input fragment can be reused by the two matrix products.
-struct BTileStorage {
-  uvec4 alignment;
-  float16_t values[KWG * NWG];
-};
-shared BTileStorage mainBTileStorage;
-shared BTileStorage gateBTileStorage;
+struct BTileStorage { uvec4 alignment; f16vec4 values[STAGES * B_COUNT]; };
+shared BTileStorage mainBTile;
+shared BTileStorage gateBTile;
 #endif
 
-// Cooperative stores use scalar element offsets and strides. The explicit
-// scalar epilogue reads the two stored tiles without assuming fragment layout.
-struct CTileStorage {
-  uvec4 alignment;
-  acc_dtype values[MWG * NWG];
-};
-shared CTileStorage mainCTileStorage;
-shared CTileStorage gateCTileStorage;
-
-layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
-
-#if SB == 1
-void loadBTiles(int kBase, int groupNBase) {
-  const int tid = LocalId0() + LocalSize0() * (LocalId1() + LocalSize1() * LocalId2());
-  const int numThreads = LocalSize0() * LocalSize1() * LocalSize2();
-  const int tileElementCount = KWG * NWG;
-  for(int tileElement = tid; tileElement < tileElementCount; tileElement += numThreads) {
-    const int k = tileElement / NWG;
-    const int n = tileElement - k * NWG;
-    const int filterRow = (kBase + k) * packedOCSize;
-    mainBTileStorage.values[tileElement] = d_filter[filterRow + groupNBase + n];
-    gateBTileStorage.values[tileElement] = d_filter[filterRow + ffnSize + groupNBase + n];
-  }
-  barrier();
+f16vec4 readA(int index, int kBase, int mBase, int batchBase) {
+  int row = index / (KWG / 4);
+  int k = index % (KWG / 4);
+  return mBase + row < hwSize
+    ? d_input[(batchBase + (mBase + row) * inputChannelStride + kBase) / 4 + k]
+    : f16vec4(0.0);
 }
+f16vec4 readB(int index, int kBase, int nBase, int gate) {
+  int n = index / (KWG / 4);
+  int k = index % (KWG / 4);
+  return d_filter[((gate * ffnSize + nBase + n) * cSize + kBase) / 4 + k];
+}
+void stageTile(int kBase, int stage, int mBase, int nBase, int batchBase) {
+  int tid = int(gl_LocalInvocationIndex);
+  for(int i = tid; i < A_COUNT; i += THREADS)
+    aTile.values[stage * A_COUNT + i] = readA(i, kBase, mBase, batchBase);
+#if SB == 1
+  for(int i = tid; i < B_COUNT; i += THREADS) {
+    mainBTile.values[stage * B_COUNT + i] = readB(i, kBase, nBase, 0);
+    gateBTile.values[stage * B_COUNT + i] = readB(i, kBase, nBase, 1);
+  }
 #endif
+}
 
 void main() {
-  const int groupM = GroupId0();
-  const int groupN = GroupId1();
-  const int batch = GroupId2();
-
-  const int subgroupCountM = MWAVE / MSize;
-  const int subgroupLinear = int(gl_SubgroupID);
-  const int subgroupM = subgroupLinear % subgroupCountM;
-  const int subgroupN = subgroupLinear / subgroupCountM;
+  int mBase = int(gl_WorkGroupID.x) * MWG;
+  int nBase = int(gl_WorkGroupID.y) * NWG;
+  int inputBase = int(gl_WorkGroupID.z) * hwSize * inputChannelStride;
+  int outputBase = int(gl_WorkGroupID.z) * hwSize * outputChannelStride;
+  int subgroupM = int(gl_SubgroupID) % (MWAVE / MSize);
+  int subgroupN = int(gl_SubgroupID) / (MWAVE / MSize);
+  int tid = int(gl_LocalInvocationIndex);
 
   coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> matA[MWI];
   coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> matB;
   coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> mainAcc[NWI][MWI];
   coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> gateAcc[NWI][MWI];
-
-  for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
-    for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
-      mainAcc[bWaveId][aWaveId] = coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0.0));
-      gateAcc[bWaveId][aWaveId] = coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0.0));
-    }
+  for(int n = 0; n < NWI; n++) for(int m = 0; m < MWI; m++) {
+    mainAcc[n][m] = coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0));
+    gateAcc[n][m] = coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0));
   }
 
-  const int groupMBase = groupM * MWG;
-  const int groupNBase = groupN * NWG;
-  const int batchInputBase = batch * hwSize * inputChannelStride;
-  const int batchOutputBase = batch * hwSize * outputChannelStride;
-
-  // K and the selected K tile dimensions are aligned by the host eligibility
-  // check. The external input and output are NHWC staging tensors, so each
-  // position contains a contiguous, four-element-aligned channel row.
-  for(int kBase = 0; kBase < cSize; kBase += KWG) {
+  f16vec4 nextA[A_PREFETCH];
 #if SB == 1
-    loadBTiles(kBase, groupNBase);
+  f16vec4 nextMain[B_PREFETCH];
+  f16vec4 nextGate[B_PREFETCH];
 #endif
-    for(int kOffset = 0; kOffset < KWG; kOffset += KSize) {
-      for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
-        const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
-        const bool aFragmentInBounds = groupMBase + aLocalOffset < hwSize;
-        const int aGlobalOffset =
-          batchInputBase + (groupMBase + aLocalOffset) * inputChannelStride + kBase + kOffset;
-        if(aFragmentInBounds) {
-          coopMatLoad(
-            matA[aWaveId], d_input,
-            aGlobalOffset,
-            inputChannelStride,
-            gl_CooperativeMatrixLayoutRowMajor
-          );
-        }
-      }
-
-      for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
-        const int bLocalOffset = bWaveId * NWAVE + subgroupN * NSize;
-#if SB == 1
-        coopMatLoad(
-          matB, mainBTileStorage.values,
-          kOffset * NWG + bLocalOffset,
-          NWG,
-          gl_CooperativeMatrixLayoutRowMajor
-        );
-#else
-        coopMatLoad(
-          matB, d_filter,
-          (kBase + kOffset) * packedOCSize + groupNBase + bLocalOffset,
-          packedOCSize,
-          gl_CooperativeMatrixLayoutRowMajor
-        );
-#endif
-        for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
-          const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
-          if(groupMBase + aLocalOffset < hwSize)
-            mainAcc[bWaveId][aWaveId] = coopMatMulAdd(matA[aWaveId], matB, mainAcc[bWaveId][aWaveId]);
-        }
-
-#if SB == 1
-        coopMatLoad(
-          matB, gateBTileStorage.values,
-          kOffset * NWG + bLocalOffset,
-          NWG,
-          gl_CooperativeMatrixLayoutRowMajor
-        );
-#else
-        coopMatLoad(
-          matB, d_filter,
-          (kBase + kOffset) * packedOCSize + ffnSize + groupNBase + bLocalOffset,
-          packedOCSize,
-          gl_CooperativeMatrixLayoutRowMajor
-        );
-#endif
-        for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
-          const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
-          if(groupMBase + aLocalOffset < hwSize)
-            gateAcc[bWaveId][aWaveId] = coopMatMulAdd(matA[aWaveId], matB, gateAcc[bWaveId][aWaveId]);
-        }
-      }
-    }
-#if SB == 1
-    // The next K tile overwrites both shared B tiles. Wait until every
-    // subgroup has finished cooperatively loading the current tile.
+  if(STAGES == 2) {
+    stageTile(0, 0, mBase, nBase, inputBase);
     barrier();
-#endif
   }
-
-  for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
-    const int bLocalOffset = bWaveId * NWAVE + subgroupN * NSize;
-    for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
-      const int aLocalOffset = aWaveId * MWAVE + subgroupM * MSize;
-      if(groupMBase + aLocalOffset < hwSize) {
-        coopMatStore(
-          mainAcc[bWaveId][aWaveId], mainCTileStorage.values,
-          bLocalOffset * MWG + aLocalOffset,
-          MWG,
-          gl_CooperativeMatrixLayoutColumnMajor
-        );
-        coopMatStore(
-          gateAcc[bWaveId][aWaveId], gateCTileStorage.values,
-          bLocalOffset * MWG + aLocalOffset,
-          MWG,
-          gl_CooperativeMatrixLayoutColumnMajor
-        );
+  for(int kBase = 0; kBase < cSize; kBase += KWG) {
+    int stage = STAGES == 2 ? (kBase / KWG) & 1 : 0;
+    bool hasNext = kBase + KWG < cSize;
+    if(STAGES == 1) {
+      stageTile(kBase, 0, mBase, nBase, inputBase);
+      barrier();
+    }
+    else if(hasNext) {
+      // Loads are independent of the current MMA. Registers retain the next
+      // tile until its alternate shared buffer is published below.
+      for(int j = 0; j < A_PREFETCH; j++) {
+        int i = tid + j * THREADS;
+        if(i < A_COUNT) nextA[j] = readA(i, kBase + KWG, mBase, inputBase);
+      }
+#if SB == 1
+      for(int j = 0; j < B_PREFETCH; j++) {
+        int i = tid + j * THREADS;
+        if(i < B_COUNT) {
+          nextMain[j] = readB(i, kBase + KWG, nBase, 0);
+          nextGate[j] = readB(i, kBase + KWG, nBase, 1);
+        }
+      }
+#endif
+    }
+    for(int kOffset = 0; kOffset < KWG; kOffset += KSize) {
+      for(int m = 0; m < MWI; m++)
+        coopMatLoad(matA[m], aTile.values,
+          stage * A_COUNT + ((m * MWAVE + subgroupM * MSize) * KWG + kOffset) / 4,
+          KWG / 4, gl_CooperativeMatrixLayoutRowMajor);
+      for(int n = 0; n < NWI; n++) {
+        int column = n * NWAVE + subgroupN * NSize;
+#if SB == 1
+        coopMatLoad(matB, mainBTile.values, stage * B_COUNT + (column * KWG + kOffset) / 4,
+          KWG / 4, gl_CooperativeMatrixLayoutColumnMajor);
+#else
+        coopMatLoad(matB, d_filter, ((nBase + column) * cSize + kBase + kOffset) / 4,
+          cSize / 4, gl_CooperativeMatrixLayoutColumnMajor);
+#endif
+        for(int m = 0; m < MWI; m++) mainAcc[n][m] = coopMatMulAdd(matA[m], matB, mainAcc[n][m]);
+#if SB == 1
+        coopMatLoad(matB, gateBTile.values, stage * B_COUNT + (column * KWG + kOffset) / 4,
+          KWG / 4, gl_CooperativeMatrixLayoutColumnMajor);
+#else
+        coopMatLoad(matB, d_filter, ((ffnSize + nBase + column) * cSize + kBase + kOffset) / 4,
+          cSize / 4, gl_CooperativeMatrixLayoutColumnMajor);
+#endif
+        for(int m = 0; m < MWI; m++) gateAcc[n][m] = coopMatMulAdd(matA[m], matB, gateAcc[n][m]);
       }
     }
+    if(STAGES == 1) barrier();
+    else if(hasNext) {
+      int nextStage = stage ^ 1;
+      for(int j = 0; j < A_PREFETCH; j++) {
+        int i = tid + j * THREADS;
+        if(i < A_COUNT) aTile.values[nextStage * A_COUNT + i] = nextA[j];
+      }
+#if SB == 1
+      for(int j = 0; j < B_PREFETCH; j++) {
+        int i = tid + j * THREADS;
+        if(i < B_COUNT) {
+          mainBTile.values[nextStage * B_COUNT + i] = nextMain[j];
+          gateBTile.values[nextStage * B_COUNT + i] = nextGate[j];
+        }
+      }
+#endif
+      barrier();
+    }
   }
 
-  barrier();
-
-  const int tid = LocalId0() + LocalSize0() * (LocalId1() + LocalSize1() * LocalId2());
-  const int numThreads = LocalSize0() * LocalSize1() * LocalSize2();
-  const int tileElementCount = MWG * NWG;
-  for(int tileElement = tid; tileElement < tileElementCount; tileElement += numThreads) {
-    const int m = tileElement % MWG;
-    const int n = tileElement / MWG;
-    const int hw = groupMBase + m;
-    const int oc = groupNBase + n;
-    if(hw < hwSize && oc < ffnSize) {
-      const float mainValue = float(mainCTileStorage.values[tileElement]);
-      const float gateValue = float(gateCTileStorage.values[tileElement]);
-      const float siluMain = mainValue / (1.0f + exp(-mainValue));
-      d_output[batchOutputBase + hw * outputChannelStride + oc] = float16_t(siluMain * gateValue);
+  for(int n = 0; n < NWI; n++) for(int m = 0; m < MWI; m++) {
+    // Preserve the fallback GEMM's FP16 rounding before FP32 SwiGLU.
+    for(int i = 0; i < mainAcc[n][m].length(); i++) {
+      float a = float(float16_t(mainAcc[n][m][i]));
+      float b = float(float16_t(gateAcc[n][m][i]));
+      mainAcc[n][m][i] = acc_dtype(float16_t((a / (1.0 + exp(-a))) * b));
     }
+    coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> result =
+      coopmat<float16_t, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(mainAcc[n][m]);
+    coopMatStore(result, d_output,
+      outputBase + (mBase + m * MWAVE + subgroupM * MSize) * outputChannelStride + nBase + n * NWAVE + subgroupN * NSize,
+      outputChannelStride, gl_CooperativeMatrixLayoutRowMajor);
   }
 }
