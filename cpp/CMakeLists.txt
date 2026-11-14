@@ -911,49 +911,69 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
 
   foreach(_comp_path IN LISTS VK_GLSL_FILES)
     get_filename_component(_base ${_comp_path} NAME_WE)
-    set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
-    set(_out_c ${GENERATED_DIR}/${_base}.c)
+    set(_shader_variants ${_base})
+    if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc")
+      # One source, two compile-time feature sets. Keep NV capabilities out of KHR SPIR-V.
+      set(_shader_variants
+        transformer_scale_dot_product_cooperative_nhwc_pair_p32s16
+        transformer_scale_dot_product_cooperative_nhwc_register_p32s16)
+    endif()
+    foreach(_base IN LISTS _shader_variants)
+      set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
+      set(_out_c ${GENERATED_DIR}/${_base}.c)
+      set(_shader_target_env vulkan1.2)
+      set(_shader_target_spv spv1.5)
+      set(_shader_defines)
+      if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc_register_p32s16")
+        set(_shader_target_env vulkan1.3)
+        set(_shader_target_spv spv1.6)
+        list(APPEND _shader_defines -DATTENTION_USE_NV2=1)
+      elseif(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc_pair_p32s16")
+        list(APPEND _shader_defines -DATTENTION_USE_NV2=0)
+      endif()
 
-    # Step 1: Compile GLSL (.comp) to SPIR-V using glslc
-    # --target-env=vulkan1.2: Target Vulkan 1.2
-    # -fshader-stage=compute: Specify compute shader stage
-    # -I: Include path for common.h and functions.h
-    add_custom_command(
-      OUTPUT ${_out_spv}
-      COMMAND ${GLSLC_EXECUTABLE}
-        -O
-        --target-env=vulkan1.2
-        --target-spv=spv1.5
-        -fshader-stage=compute
-        -I ${VK_SHADER_SRC_DIR}
-        -o ${_out_spv}
-        ${_comp_path}
-      DEPENDS ${_comp_path} ${VK_GLSL_INCLUDES}
-      COMMENT "Compiling GLSL to SPIR-V: ${_base}.comp -> ${_base}.spv"
-      VERBATIM
-    )
+      # Step 1: Compile GLSL (.comp) to SPIR-V using glslc
+      # --target-env=vulkan1.2: Target Vulkan 1.2
+      # -fshader-stage=compute: Specify compute shader stage
+      # -I: Include path for common.h and functions.h
+      add_custom_command(
+        OUTPUT ${_out_spv}
+        COMMAND ${GLSLC_EXECUTABLE}
+          -O
+          --target-env=${_shader_target_env}
+          --target-spv=${_shader_target_spv}
+          -fshader-stage=compute
+          ${_shader_defines}
+          -I ${VK_SHADER_SRC_DIR}
+          -o ${_out_spv}
+          ${_comp_path}
+        DEPENDS ${_comp_path} ${VK_GLSL_INCLUDES}
+        COMMENT "Compiling GLSL to SPIR-V: ${_base}.comp -> ${_base}.spv"
+        VERBATIM
+      )
 
-    # Step 2: Convert SPIR-V binary to C source file
-    # This generates a C file with _binary_<name>_start[], _binary_<name>_end, _binary_<name>_size
-    add_custom_command(
-      OUTPUT ${_out_c}
-      COMMAND ${CMAKE_COMMAND}
-        -DSPV_FILE=${_out_spv}
-        -DOUT_FILE=${_out_c}
-        -DSHADER_NAME=${_base}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderSource.cmake
-      DEPENDS ${_out_spv}
-      COMMENT "Generating C source from SPIR-V: ${_base}.spv -> ${_base}.c"
-      VERBATIM
-    )
+      # Step 2: Convert SPIR-V binary to C source file
+      # This generates a C file with _binary_<name>_start[], _binary_<name>_end, _binary_<name>_size
+      add_custom_command(
+        OUTPUT ${_out_c}
+        COMMAND ${CMAKE_COMMAND}
+          -DSPV_FILE=${_out_spv}
+          -DOUT_FILE=${_out_c}
+          -DSHADER_NAME=${_base}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderSource.cmake
+        DEPENDS ${_out_spv}
+        COMMENT "Generating C source from SPIR-V: ${_base}.spv -> ${_base}.c"
+        VERBATIM
+      )
 
-    # Step 3: Create object library from the generated C source
-    set(_obj_lib spirv_${_base}_obj)
-    add_library(${_obj_lib} OBJECT ${_out_c})
-    set_target_properties(${_obj_lib} PROPERTIES LINKER_LANGUAGE C)
+      # Step 3: Create object library from the generated C source
+      set(_obj_lib spirv_${_base}_obj)
+      add_library(${_obj_lib} OBJECT ${_out_c})
+      set_target_properties(${_obj_lib} PROPERTIES LINKER_LANGUAGE C)
 
-    # Collect object library for linking
-    list(APPEND SHADER_OBJECT_LIBS ${_obj_lib})
+      # Collect object library for linking
+      list(APPEND SHADER_OBJECT_LIBS ${_obj_lib})
+    endforeach()
   endforeach()
 
   # Store shader object libraries for linking with katago
@@ -1782,9 +1802,17 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
     endif()
   endif()
 elseif(USE_BACKEND STREQUAL "VULKAN")
-  if ( VULKAN_DEBUG STREQUAL "1" ) 
-    message(STATUS "VULKAN_DEBUG is set, enabling Vulkan API debug layers.")
-    target_compile_definitions(katago PRIVATE VULKAN_DEBUG)
+  if ( VULKAN_API_DEBUG STREQUAL "1" )
+    message(STATUS "VULKAN_API_DEBUG is set, enabling Vulkan API debug layers.")
+    target_compile_definitions(katago PRIVATE VULKAN_API_DEBUG)
+  endif()
+  if ( VK_BENCHMARK STREQUAL "1" )
+    message(STATUS "VK_BENCHMARK is set, enabling Vulkan shader timestamp benchmarking.")
+    target_compile_definitions(katago PRIVATE VK_BENCHMARK)
+  endif()
+  if ( VK_DUMP_BUFFER STREQUAL "1" )
+    message(STATUS "VK_DUMP_BUFFER is set, enabling Vulkan buffer dumping.")
+    target_compile_definitions(katago PRIVATE VK_DUMP_BUFFER)
   endif()
   target_compile_definitions(katago PRIVATE USE_VULKAN_BACKEND)
   find_package(Vulkan REQUIRED)
@@ -2220,4 +2248,3 @@ if(WIN32 AND USE_BACKEND STREQUAL "ROCM")
     endif()
   endif()
 endif()
-
