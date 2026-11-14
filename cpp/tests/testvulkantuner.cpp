@@ -189,6 +189,61 @@ void Tests::runVulkanTunerPersistenceTests() {
 #endif
   testAssert(VulkanTuner::TUNER_VERSION == 38);
   {
+    ModelDesc desc;
+    desc.trunk.initialConv.convXSize = desc.trunk.initialConv.convYSize = 3;
+    desc.trunk.initialConv.inChannels = 22;
+    desc.trunk.initialConv.outChannels = 192;
+    VulkanTuneParams config;
+    config.vulkan.shouldUseNHWC = false;
+    auto info = VulkanTuner::ModelInfoForTuning::ofDesc(desc);
+    auto plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(plan.winograd && !plan.attentionNCHW && !plan.attentionNHWC);
+    testAssert(!plan.rmsNorm && !plan.spatialRMSNorm);
+
+    // Tip normalization is independent of whether the trunk contains attention.
+    desc.trunk.trunkNormKind = TRUNK_NORM_KIND_RMSNORM;
+    desc.trunk.trunkTipRMSNorm.spatial = true;
+    info = VulkanTuner::ModelInfoForTuning::ofDesc(desc);
+    plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(!info.hasRMSNorm && info.hasSpatialRMSNorm);
+    testAssert(!plan.rmsNorm && plan.spatialRMSNorm);
+    desc.trunk.trunkTipRMSNorm.spatial = false;
+    info = VulkanTuner::ModelInfoForTuning::ofDesc(desc);
+    plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(info.hasRMSNorm && !info.hasSpatialRMSNorm);
+    testAssert(plan.rmsNorm && !plan.spatialRMSNorm);
+
+    info.hasRMSNorm = false;
+    info.transformerHeadDim = info.transformerVHeadDim = 32;
+    info.transformerNumHeads = info.transformerNumKVHeads = 6;
+    info.transformerProjections = {{192, 576, true}, {192, 192, false}};
+    info.hasSpatialRMSNorm = true;
+    config.vulkan.shouldUseNHWC = true;
+    plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(!plan.attentionNCHW && plan.attentionNHWC);
+    testAssert(!plan.rmsNorm && plan.spatialRMSNorm);
+    info.hasRMSNorm = true;
+    testAssert(VulkanTuner::getNonGemmTuningPlan(info, config).rmsNorm);
+    info.hasRMSNorm = false;
+
+    // Failed/unavailable NHWC GEMM retains scalar attention and its NCHW CM comparison.
+    config.vulkan.shouldUseNHWC = false;
+    plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(plan.attentionNCHW && !plan.attentionNHWC && plan.rmsNorm);
+    info.maxConvChannels3x3 = 0;
+    testAssert(!VulkanTuner::getNonGemmTuningPlan(info, config).winograd);
+    info.hasConv5x5 = true;
+    testAssert(VulkanTuner::getNonGemmTuningPlan(info, config).winograd);
+
+    // FFN-only trunks still use block RMSNorm without an attention descriptor.
+    info.transformerHeadDim = info.transformerVHeadDim = 0;
+    info.transformerNumHeads = info.transformerNumKVHeads = 0;
+    plan = VulkanTuner::getNonGemmTuningPlan(info, config);
+    testAssert(!plan.attentionNCHW && !plan.attentionNHWC && plan.rmsNorm);
+    config.vulkan.shouldUseNHWC = true;
+    testAssert(!VulkanTuner::getNonGemmTuningPlan(info, config).rmsNorm);
+  }
+  {
     using Case = VulkanTuner::GemmTuneCase;
     using Kind = Case::Kind;
     VulkanTuner::ModelInfoForTuning info;
@@ -475,8 +530,10 @@ void Tests::runVulkanTunerPersistenceTests() {
   testAssert(!attentionParams.isValid());
   attentionParams.ATTN_BLOCK_KV = 48;
   testAssert(!attentionParams.isValid());
-  testAssert(offsetof(vk_shader::spec::ScaleDotProductCooperativeSpec, COOP_USE_NV2) == 12 * sizeof(uint32_t));
-  testAssert(sizeof(vk_shader::spec::ScaleDotProductCooperativeSpec) == 13 * sizeof(uint32_t));
+  testAssert(offsetof(vk_shader::spec::ScaleDotProductCooperativeSpec, COOP_KV_STAGES) == 11 * sizeof(uint32_t));
+  testAssert(sizeof(vk_shader::spec::ScaleDotProductCooperativeSpec) == 12 * sizeof(uint32_t));
+  testAssert(offsetof(vk_shader::spec::WinogradOutputTransformSpec, useNHWC) == 8 * sizeof(uint32_t));
+  testAssert(sizeof(vk_shader::spec::WinogradOutputTransformSpec) == 9 * sizeof(uint32_t));
   TransformerCooperativeMatrixTuneParams nv2Attention;
   nv2Attention.ATTN_BLOCK_Q = 32;
   nv2Attention.ATTN_BLOCK_KV = 64;

@@ -6870,7 +6870,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       for(int n = 0; n < batchSize; ++n) {
         for(int c = 0; c < desc->numChannels; ++c) {
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-            const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            const size_t src = (static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->numChannels + c;
             const size_t dst = (static_cast<size_t>(n) * paddedSpatialSize + xy) * channelsPadded + c;
             inputPadded[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
           }
@@ -6946,7 +6946,7 @@ bool NeuralNet::testEvaluateBatchNorm(
         for(int c = 0; c < desc->numChannels; ++c)
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
             const size_t src = (static_cast<size_t>(n) * paddedSpatialSize + xy) * channelsPadded + c;
-            const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->numChannels + c;
             outputBuffer[dst] = static_cast<float>(outputPadded[src]);
           }
     }
@@ -7054,7 +7054,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       for(int n = 0; n < batchSize; ++n) {
         for(int c = 0; c < desc->preBN.numChannels; ++c) {
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-            const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            const size_t src = (static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->preBN.numChannels + c;
             const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
             inputPadded[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
           }
@@ -7172,7 +7172,7 @@ bool NeuralNet::testEvaluateBatchNorm(
         for(int c = 0; c < desc->preBN.numChannels; ++c) {
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
             const size_t src = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * paddedSpatialSize + xy;
-            const size_t dst = (static_cast<size_t>(n) * desc->preBN.numChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * logicalSpatialSize + xy) * desc->preBN.numChannels + c;
             outputBuffer[dst] = static_cast<float>(outputPadded[src]);
           }
         }
@@ -7290,7 +7290,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       for(int n = 0; n < batchSize; ++n) {
         for(int c = 0; c < trunkChannels; ++c) {
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-            const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            const size_t src = (static_cast<size_t>(n) * logicalSpatialSize + xy) * trunkChannels + c;
             const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
             paddedInputHalf[dst] = half_float::half_cast<half_t>(inputBuffer[src]);
           }
@@ -7399,7 +7399,7 @@ bool NeuralNet::testEvaluateBatchNorm(
         for(int c = 0; c < trunkChannels; ++c)
           for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
             const size_t src = (static_cast<size_t>(n) * trunkChannels + c) * paddedSpatialSize + xy;
-            const size_t dst = (static_cast<size_t>(n) * trunkChannels + c) * logicalSpatialSize + xy;
+            const size_t dst = (static_cast<size_t>(n) * logicalSpatialSize + xy) * trunkChannels + c;
             outputBuffer[dst] = static_cast<float>(outputPadded[src]);
           }
     } else {
