@@ -1292,7 +1292,6 @@ namespace vk_shader {
     spec.outTileYSize = tuneParams.outTileYSize;
     spec.inTileXSize = tuneParams.inTileXSize;
     spec.inTileYSize = tuneParams.inTileYSize;
-    spec.convX = convSize;
     spec.convY = convSize;
     spec.useNHWC = useNHWC ? 1u : 0u;
     std::vector<int32_t> specData = vk_helper::createSpecData(&spec, sizeof(spec));
@@ -1903,7 +1902,6 @@ namespace vk_shader {
     spec.COOP_PV_N_SIZE = tuneParams.COOP_PV_N_SIZE;
     spec.USE_NHWC = useNHWC ? 1u : 0u;
     spec.COOP_KV_STAGES = useNHWC ? tuneParams.ATTN_BLOCK_KV / tuneParams.COOP_N_SIZE : 1;
-    spec.COOP_USE_NV2 = tuneParams.COOP_USE_NV2;
     SpecializationData specData(spec);
     const std::string suffix = useNHWC ? "_nhwc" : "";
 

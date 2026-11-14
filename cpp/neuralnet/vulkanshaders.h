@@ -979,7 +979,6 @@ struct LocalDimHash {
       int outTileYSize = 2;
       int outTileXSize = 2;
       int convY = 3;
-      int convX = 3;
       uint32_t useNHWC = 0;
     };
 
@@ -1103,7 +1102,6 @@ struct LocalDimHash {
       int COOP_PV_N_SIZE = 16;
       uint32_t USE_NHWC = 0;
       int COOP_KV_STAGES = 1;
-      int COOP_USE_NV2 = 0;
     };
 
     struct ScaleDotProductNaiveSpec {

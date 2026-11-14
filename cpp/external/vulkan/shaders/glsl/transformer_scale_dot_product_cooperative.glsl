@@ -65,8 +65,6 @@ layout(constant_id = 11) const int COOP_KV_STAGES = 4;
 layout(constant_id = 10) const int USE_NHWC = 0;
 layout(constant_id = 11) const int COOP_KV_STAGES = 1;
 #endif
-// ID12 mirrors the host/cache choice; only ATTENTION_USE_NV2 selects extension code at compile time.
-layout(constant_id = 12) const int COOP_USE_NV2 = ATTENTION_USE_NV2;
 
 const int Q_BLOCK = COOP_M_SIZE * COOP_Q_TILES_PER_WORKGROUP;
 #if ATTENTION_USE_NV2 == 1

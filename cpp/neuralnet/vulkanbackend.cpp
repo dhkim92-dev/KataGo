@@ -381,8 +381,7 @@ struct ComputeContext {
     const std::string& tunerFile,
     const std::string& homeDataDirOverride,
     const VulkanTuner::ModelInfoForTuning* modelInfo,
-    const ModelDesc* modelDesc,
-    bool enableDualGemmForTesting = false)
+    const ModelDesc* modelDesc)
   : nnXLen(nnXLen),
     nnYLen(nnYLen),
     usingFP16Mode(useFP16Mode_),
@@ -469,10 +468,6 @@ struct ComputeContext {
             tuneParams.vulkan.shouldUseFP16Compute = supportsFP16Compute;
             tuneParams.vulkan.shouldUseCooperativeMatrix = hardwareParams.canUseCooperativeMatrix;
           }
-          if(enableDualGemmForTesting) {
-            tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = hardwareParams.canUseCooperativeMatrix;
-          }
-
           // Pipeline creation must use the same effective precision as the
           // buffers created by ComputeHandleInternal.  The tuning file stores
           // the Auto-mode decision, but useFP16=true/false overrides that
@@ -507,6 +502,10 @@ struct ComputeContext {
             tuneParams.vulkan.shouldUseFP16Storage &&
             tuneParams.vulkan.shouldUseFP16Compute;
           tuneParams.vulkan.shouldUseCooperativeMatrix = useCooperativeMatrixMode;
+          if(modelInfo != nullptr)
+            tuneParams.vulkan.shouldUseNHWC = tuneParams.vulkan.shouldUseNHWC &&
+              modelInfo->transformerHeadDim > 0 && modelInfo->transformerVHeadDim > 0 &&
+              useCooperativeMatrixMode;
           if(!useCooperativeMatrixMode) {
             tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU = false;
           }
@@ -3611,8 +3610,7 @@ struct TransformerFFNBlock {
 
   TransformerFFNBlock(
     ComputeHandleInternal *handle,
-    const TransformerFFNDesc* desc,
-    bool forceFallbackSwiGLU = false
+    const TransformerFFNDesc* desc
   ) :
     handle(handle),
     name(desc->name),
@@ -3650,7 +3648,6 @@ struct TransformerFFNBlock {
 
     const auto& dualParams = handle->tuneParams.transformerDualGemmSwiGLU;
     usingTransformerDualGemmSwiGLU =
-      !forceFallbackSwiGLU &&
       handle->usingFP16Storage &&
       usingNHWC &&
       handle->tuneParams.vulkan.canUseCooperativeMatrix &&
@@ -5293,8 +5290,7 @@ static ComputeContext* createComputeContextForTesting(
   int nnXLen,
   int nnYLen,
   bool useFP16,
-  bool useNHWC,
-  bool enableDualGemm = false
+  bool useNHWC
 ) {
   // std::cout << "[createComputeContextForTesting] create Compute Context with GPUs: ";
   return new ComputeContext(
@@ -5307,8 +5303,7 @@ static ComputeContext* createComputeContextForTesting(
     "",
     "",
     nullptr,
-    nullptr,
-    enableDualGemm
+    nullptr
   );
 }
 
@@ -5565,8 +5560,6 @@ struct ComputeHandle {
       inputsUseNHWC_
     ))
   {
-    if(inputsUseNHWC_ && !inputUsingNHWC)
-      throw StringError("Vulkan NHWC input was requested, but the selected device has no supported NHWC cooperative-matrix path");
     scratch = std::make_unique<ScratchBuffers>(
       handle.get(),
       model->maxBatchSize
@@ -5740,8 +5733,6 @@ ComputeHandle* NeuralNet::createComputeHandle(
   }
   // TODO: Check requiredExactNNLen required or not
   (void)requiredExactNNLen;
-  if(inputsUseNHWC && !ComputeHandle::shouldUseNHWC(context, gpuIdxForThisThread))
-    throw StringError("Vulkan NHWC input requires an active cooperative-matrix NHWC path");
   ComputeHandle* handle = new ComputeHandle(
     context,
     loadedModel,
@@ -6003,7 +5994,9 @@ void NeuralNet::getOutput(
   const int numPolicyChannels = computeHandle->model->numPolicyChannels;
   ComputeHandleInternal* handle = computeHandle->handle.get();
 
-  const int inputChannelStride = computeHandle->inputsUseNHWC
+  // The caller's host format is independent of the selected device execution layout.
+  const bool uploadUseNHWC = computeHandle->inputsUseNHWC && computeHandle->inputUsingNHWC;
+  const int inputChannelStride = uploadUseNHWC
     ? handle->getNHWCChannelsPadded(numSpatialFeatures)
     : numSpatialFeatures;
   const int policyChannelStride = computeHandle->inputUsingNHWC
@@ -6012,13 +6005,20 @@ void NeuralNet::getOutput(
   const int ownershipChannelStride = computeHandle->inputUsingNHWC
     ? handle->getNHWCChannelsPadded(computeHandle->model->numOwnershipChannels)
     : computeHandle->model->numOwnershipChannels;
-  const int inputSpatialStride = computeHandle->inputsUseNHWC
+  const int inputSpatialStride = uploadUseNHWC
     ? paddedNNXYLen
     : nnXYLen;
   inputBuffers->ensureStorageCapacity(
     inputChannelStride, policyChannelStride, ownershipChannelStride,
     inputSpatialStride, paddedNNXYLen
   );
+  bool useFP16Storage = handle->usingFP16Storage;
+  if(useFP16Storage) {
+    inputBuffers->ensureHalfSpatialCapacity(
+      numSpatialFeatures, numPolicyChannels, computeHandle->model->numOwnershipChannels, paddedNNXYLen,
+      computeHandle->inputUsingNHWC
+    );
+  }
   const size_t inputRowElts = static_cast<size_t>(inputChannelStride) * inputSpatialStride;
   const size_t tightInputRowElts = static_cast<size_t>(numSpatialFeatures) * nnXLen * nnYLen;
   std::vector<float> tightSpatialInput;
@@ -6043,19 +6043,27 @@ void NeuralNet::getOutput(
     } else {
       testAssert(!hasRowMeta);
     }
-    if(computeHandle->inputsUseNHWC)
+    if(uploadUseNHWC)
       std::fill(rowSpatialInput, rowSpatialInput + inputRowElts, 0.0f);
     if(computeHandle->inputsUseNHWC) {
       SymmetryHelpers::copyInputsWithSymmetry(
         rowSpatial, tightSpatialInput.data(), 1, nnYLen, nnXLen, numSpatialFeatures,
         true, inputBufs[nIdx]->symmetry
       );
-      for(int xy = 0; xy < nnXYLen; xy++) {
-        std::copy(
-          tightSpatialInput.data() + static_cast<size_t>(xy) * numSpatialFeatures,
-          tightSpatialInput.data() + static_cast<size_t>(xy + 1) * numSpatialFeatures,
-          rowSpatialInput + static_cast<size_t>(xy) * inputChannelStride
-        );
+      if(uploadUseNHWC) {
+        for(int xy = 0; xy < nnXYLen; xy++) {
+          std::copy(
+            tightSpatialInput.data() + static_cast<size_t>(xy) * numSpatialFeatures,
+            tightSpatialInput.data() + static_cast<size_t>(xy + 1) * numSpatialFeatures,
+            rowSpatialInput + static_cast<size_t>(xy) * inputChannelStride
+          );
+        }
+      }
+      else {
+        for(int c = 0; c < numSpatialFeatures; c++)
+          for(int xy = 0; xy < nnXYLen; xy++)
+            rowSpatialInput[static_cast<size_t>(c) * nnXYLen + xy] =
+              tightSpatialInput[static_cast<size_t>(xy) * numSpatialFeatures + c];
       }
     } else {
       SymmetryHelpers::copyInputsWithSymmetry(
@@ -6078,14 +6086,6 @@ void NeuralNet::getOutput(
   assert(inputBuffers->ownershipResultBufferElts == buffers->ownershipElts);
   assert(inputBuffers->singleOwnershipResultElts == nnXLen*nnYLen);
 
-  bool useFP16Storage = handle->usingFP16Storage;
-  if(useFP16Storage) {
-    inputBuffers->ensureHalfSpatialCapacity(
-      numSpatialFeatures, numPolicyChannels, computeHandle->model->numOwnershipChannels, paddedNNXYLen,
-      computeHandle->inputUsingNHWC
-    );
-  }
-
   VkResult res = VK_ERROR_UNKNOWN;
   const void* spatialInputData = inputBuffers->userInputBuffer;
   VkDeviceSize spatialInputBytes = static_cast<VkDeviceSize>(sizeof(float) * batchSize * inputRowElts);
@@ -6094,7 +6094,7 @@ void NeuralNet::getOutput(
     size_t paddedInputElts = static_cast<size_t>(inputChannelStride) * paddedNNXYLen * batchSize;
     size_t totalChannels = static_cast<size_t>(numSpatialFeatures * batchSize);
     // Convert float to half with spatial and channel padding.
-    if(computeHandle->inputsUseNHWC) {
+    if(uploadUseNHWC) {
       for(int n = 0; n < batchSize; n++) {
         for(int xy = 0; xy < paddedNNXYLen; xy++) {
           for(int c = 0; c < inputChannelStride; c++) {
@@ -6807,199 +6807,6 @@ bool NeuralNet::testEvaluateConv(
   dOutput = nullptr;
   convWorkspace = nullptr;
   convWorkspace2 = nullptr;
-  delete layer;
-  delete handle;
-  freeComputeContext(ctx);
-  return true;
-}
-
-bool NeuralNet::testEvaluateTransformerFFN(
-  const TransformerFFNDesc* desc,
-  int batchSize,
-  int nnXLen,
-  int nnYLen,
-  bool useFP16,
-  bool useNHWC,
-  const std::vector<float>& inputNCHW,
-  std::vector<float>& outputNCHW,
-  bool forceFallbackSwiGLU,
-  bool* usedDualGemm
-) {
-  if(usedDualGemm != nullptr)
-    *usedDualGemm = false;
-  if(desc == nullptr || !desc->useSwiGLU || batchSize <= 0 || nnXLen <= 0 || nnYLen <= 0 || (useNHWC && !useFP16))
-    return false;
-
-  const size_t logicalSpatialSize = static_cast<size_t>(nnXLen) * static_cast<size_t>(nnYLen);
-  const size_t expectedInputSize = static_cast<size_t>(batchSize) *
-    static_cast<size_t>(desc->numChannels) * logicalSpatialSize;
-  if(inputNCHW.size() != expectedInputSize)
-    throw StringError("[testEvaluateTransformerFFN] unexpected NCHW input size");
-
-  ComputeContext* ctx = createComputeContextForTesting(
-    {0}, nullptr, nnXLen, nnYLen, useFP16, useNHWC,
-    useNHWC && !forceFallbackSwiGLU && usedDualGemm != nullptr
-  );
-  ComputeHandleInternal* handle = new ComputeHandleInternal(ctx, 0, useNHWC, useNHWC);
-  if(useNHWC && !handle->usingNHWC) {
-    delete handle;
-    freeComputeContext(ctx);
-    return false;
-  }
-  if(useNHWC && !handle->usingFP16Storage) {
-    delete handle;
-    freeComputeContext(ctx);
-    return false;
-  }
-
-  if(useNHWC) {
-    const auto& params = handle->tuneParams.hgemmCooperativeMatrixNHWC;
-    if(!params.isValid()) {
-      delete handle;
-      freeComputeContext(ctx);
-      return false;
-    }
-    const int packedOperationChannels = vk_helper::roundUpToMultipleInt(
-      2 * desc->ffnChannels, params.NWG
-    );
-    const int packedRowStride = handle->getNHWCChannelsPadded(2 * desc->ffnChannels);
-    const bool supportsProjection = handle->paddedNNXYLen % params.MWG == 0 &&
-      desc->numChannels % params.KWG == 0 &&
-      desc->ffnChannels % params.KWG == 0 &&
-      desc->numChannels % 4 == 0 && desc->ffnChannels % 4 == 0 &&
-      desc->numChannels % params.NWG == 0 &&
-      packedOperationChannels % params.NWG == 0 &&
-      packedRowStride >= packedOperationChannels;
-    if(!supportsProjection) {
-      delete handle;
-      freeComputeContext(ctx);
-      return false;
-    }
-  }
-  TransformerFFNBlock* layer = nullptr;
-  try {
-    layer = new TransformerFFNBlock(handle, desc, forceFallbackSwiGLU);
-  }
-  catch(...) {
-    delete handle;
-    freeComputeContext(ctx);
-    throw;
-  }
-  if(usedDualGemm != nullptr)
-    *usedDualGemm = layer->usingTransformerDualGemmSwiGLU;
-
-  const VulkanDevice* device = handle->vulkanDevice;
-  const int paddedSpatialSize = handle->paddedNNXYLen;
-  const int inputChannelStride = useNHWC
-    ? handle->getNHWCChannelsPadded(desc->numChannels, true)
-    : desc->numChannels;
-  const size_t inputStorageElts = static_cast<size_t>(batchSize) * inputChannelStride * paddedSpatialSize;
-  std::vector<float> paddedInputFP32;
-  std::vector<half_t> paddedInputFP16;
-  std::vector<float> maskFP32;
-  std::vector<half_t> maskFP16;
-  const bool storageFP16 = handle->usingFP16Storage;
-  if(storageFP16) {
-    paddedInputFP16.assign(inputStorageElts, half_float::half_cast<half_t>(0.0f));
-    maskFP16.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, half_float::half_cast<half_t>(0.0f));
-  }
-  else {
-    paddedInputFP32.assign(inputStorageElts, 0.0f);
-    maskFP32.assign(static_cast<size_t>(batchSize) * paddedSpatialSize, 0.0f);
-  }
-  for(int n = 0; n < batchSize; ++n) {
-    for(int c = 0; c < desc->numChannels; ++c) {
-      for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-        const size_t src = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
-        const size_t dst = useNHWC
-          ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
-          : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
-        if(storageFP16)
-          paddedInputFP16[dst] = half_float::half_cast<half_t>(inputNCHW[src]);
-        else
-          paddedInputFP32[dst] = inputNCHW[src];
-      }
-    }
-    for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-      const size_t idx = static_cast<size_t>(n) * paddedSpatialSize + xy;
-      if(storageFP16)
-        maskFP16[idx] = half_float::half_cast<half_t>(1.0f);
-      else
-        maskFP32[idx] = 1.0f;
-    }
-  }
-
-  VkResult res = VK_ERROR_UNKNOWN;
-  VulkanBuffer* dInput = vk_helper::createDeviceBufferWithData(
-    device,
-    storageFP16 ? byteSizeofVectorContents(paddedInputFP16) : byteSizeofVectorContents(paddedInputFP32),
-    storageFP16 ? static_cast<const void*>(paddedInputFP16.data()) : static_cast<const void*>(paddedInputFP32.data()),
-    true, &res
-  );
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded model-layout input", res);
-  VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
-    device,
-    storageFP16 ? byteSizeofVectorContents(maskFP16) : byteSizeofVectorContents(maskFP32),
-    storageFP16 ? static_cast<const void*>(maskFP16.data()) : static_cast<const void*>(maskFP32.data()),
-    true, &res
-  );
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] create padded mask", res);
-  ScratchBuffers* scratch = new ScratchBuffers(handle, batchSize);
-  VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
-    device, scratch->getBufSizeXY(desc->numChannels), false, &res
-  );
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] create trunk scratch", res);
-
-  VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(device);
-  res = vk_helper::beginCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] begin command buffer", res);
-  layer->forward(commandBuffer, scratch, batchSize, dInput, dTrunkScratch, dMask, nullptr, nullptr);
-  res = vk_helper::endCommandBuffer(commandBuffer);
-  CHECK_VK_MSG("[testEvaluateTransformerFFN] end command buffer", res);
-  vk_helper::submitCommandBuffers(device, {commandBuffer}, nullptr);
-  vkQueueWaitIdle(device->queue);
-  vkDeviceWaitIdle(device->device);
-
-  outputNCHW.resize(expectedInputSize);
-  if(storageFP16) {
-    std::vector<half_t> outputPadded(inputStorageElts);
-    vk_helper::copyDeviceBufferToHost(
-      device, dInput,
-      static_cast<VkDeviceSize>(inputStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
-    );
-    CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
-    for(int n = 0; n < batchSize; ++n)
-      for(int c = 0; c < desc->numChannels; ++c)
-        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-          const size_t src = useNHWC
-            ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
-            : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
-          const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
-          outputNCHW[dst] = static_cast<float>(outputPadded[src]);
-        }
-  }
-  else {
-    std::vector<float> outputPadded(inputStorageElts);
-    vk_helper::copyDeviceBufferToHost(
-      device, dInput,
-      static_cast<VkDeviceSize>(inputStorageElts * sizeof(float)), outputPadded.data(), true, &res
-    );
-    CHECK_VK_MSG("[testEvaluateTransformerFFN] copy NCHW output", res);
-    for(int n = 0; n < batchSize; ++n)
-      for(int c = 0; c < desc->numChannels; ++c)
-        for(size_t xy = 0; xy < logicalSpatialSize; ++xy) {
-          const size_t src = useNHWC
-            ? (static_cast<size_t>(n) * paddedSpatialSize + xy) * inputChannelStride + c
-            : (static_cast<size_t>(n) * desc->numChannels + c) * paddedSpatialSize + xy;
-          const size_t dst = (static_cast<size_t>(n) * desc->numChannels + c) * logicalSpatialSize + xy;
-          outputNCHW[dst] = outputPadded[src];
-        }
-  }
-
-  vk_helper::releaseVulkanBuffer(device, dInput);
-  vk_helper::releaseVulkanBuffer(device, dMask);
-  vk_helper::releaseVulkanBuffer(device, dTrunkScratch);
-  delete scratch;
   delete layer;
   delete handle;
   freeComputeContext(ctx);

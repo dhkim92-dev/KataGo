@@ -17,8 +17,7 @@ layout(constant_id=4) const int INTILE_XSIZE = 4;
 layout(constant_id=5) const int OUTTILE_YSIZE = 2;
 layout(constant_id=6) const int OUTTILE_XSIZE = 2;
 layout(constant_id=7) const int CONV_YSIZE = 3;
-layout(constant_id=8) const int CONV_XSIZE = 3;
-layout(constant_id=9) const int USE_NHWC = 0;
+layout(constant_id=8) const int USE_NHWC = 0;
 
 layout(set=0, binding = 0) readonly buffer InputBuffer {
     realstore _input[];

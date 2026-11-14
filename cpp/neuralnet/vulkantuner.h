@@ -29,7 +29,10 @@ namespace VulkanTuner {
   constexpr std::size_t COOPERATIVE_MATRIX_MIN_SHAPES_PER_ACCUMULATOR = 3;
   constexpr std::size_t COOPERATIVE_MATRIX_NON_FULL_PROPERTY_LIMIT = 2;
 
-  bool isTransformerGemmUpgrade(const std::vector<double>& referenceSeconds, const std::vector<double>& candidateSeconds);
+  bool isTransformerGemmUpgrade(
+    const std::vector<double>& referenceSeconds,
+    const std::vector<double>& candidateSeconds
+  );
   double computeErrorProp(const std::vector<float>& reference, const std::vector<float>& values);
   std::vector<float> computeTransformerDualGemmSwiGLUReference(
     const std::vector<float>& input,
@@ -41,7 +44,11 @@ namespace VulkanTuner {
     int ffnSize
   );
   std::vector<float> packTransformerDualGemmSwiGLUFilterForNHWC(
-    const std::vector<float>& mainWeights, const std::vector<float>& gateWeights, int cSize, int ffnSize);
+    const std::vector<float>& mainWeights,
+    const std::vector<float>& gateWeights,
+    int cSize,
+    int ffnSize
+  );
   std::vector<float> packTransformerDualGemmSwiGLUFilter(
     const std::vector<float>& mainWeights,
     const std::vector<float>& gateWeights,
@@ -49,9 +56,21 @@ namespace VulkanTuner {
     int ffnSize,
     int packedOCSize
   );
-  double computeTuningScore(double callsPerSecond, double errorProp, double errorToleranceScale);
-  double computeCooperativeMatrixTuningScore(double callsPerSecond, double errorProp, double errorTolerance);
-  bool isFastEnough(double callsPerSecond, double baselineCallsPerSecond, double requiredRatio);
+  double computeTuningScore(
+    double callsPerSecond,
+    double errorProp,
+    double errorToleranceScale
+  );
+  double computeCooperativeMatrixTuningScore(
+    double callsPerSecond,
+    double errorProp,
+    double errorTolerance
+  );
+  bool isFastEnough(
+    double callsPerSecond,
+    double baselineCallsPerSecond,
+    double requiredRatio
+  );
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
 
   struct GemmTuneCase {
@@ -81,6 +100,8 @@ namespace VulkanTuner {
     int regularNumChannels = 0;
     int gpoolNumChannels = 0;
     int modelVersion = 0;
+    bool hasRMSNorm = false;
+    bool hasSpatialRMSNorm = false;
     int transformerHeadDim = 0;
     int transformerVHeadDim = 0;
     int transformerNumHeads = 0;
@@ -97,9 +118,25 @@ namespace VulkanTuner {
     static ModelInfoForTuning ofDesc(const ModelDesc& desc);
   };
 
+  struct NonGemmTuningPlan {
+    bool winograd;
+    bool attentionNCHW;
+    bool attentionNHWC;
+    bool rmsNorm;
+    bool spatialRMSNorm;
+  };
+
+  NonGemmTuningPlan getNonGemmTuningPlan(
+    const ModelInfoForTuning& modelInfo,
+    const VulkanTuneParams& config
+  );
+
   int getTransformerFFNInputChannelsForTuning(const ModelInfoForTuning& modelInfo);
   std::vector<GemmTuneCase> getGemmTuningCases(
-    const std::string& tunerName, const ModelInfoForTuning& modelInfo, const VulkanTuneParams& config);
+    const std::string& tunerName,
+    const ModelInfoForTuning& modelInfo,
+    const VulkanTuneParams& config
+  );
 
   struct HgemmCooperativeMatrixNCHWTuner {
     static bool selectCooperativeMatrixProperties(
@@ -115,6 +152,7 @@ namespace VulkanTuner {
     );
   };
 
+  // Candidate results always report improvements; this flag controls extra progress diagnostics.
   void tune(
     const VulkanDevice* device,
     int batchSize,
@@ -129,12 +167,23 @@ namespace VulkanTuner {
     bool transformerGemmOnly = false,
     bool transformerFFNOnly = false,
     bool transformerResidualOnly = false,
-    bool transformerPreNormOnly = false);
+    bool transformerPreNormOnly = false
+  );
 
   std::string defaultDirectory(bool makeDir, const std::string& homeDataDirOverride);
-  std::string
-  defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, int trunkNumChannels, int modelVersion);
-  std::string defaultFileName(const std::string& gpuName, int nnXLen, int nnYLen, const ModelInfoForTuning& modelInfo);
+  std::string defaultFileName(
+    const std::string& gpuName,
+    int nnXLen,
+    int nnYLen,
+    int trunkNumChannels,
+    int modelVersion
+  );
+  std::string defaultFileName(
+    const std::string& gpuName,
+    int nnXLen,
+    int nnYLen,
+    const ModelInfoForTuning& modelInfo
+  );
 
   VulkanTuneParams loadOrCreate(
     const std::string& tunerFile,
@@ -144,7 +193,8 @@ namespace VulkanTuner {
     int nnYLen,
     const ModelInfoForTuning& modelInfo,
     const VulkanDeviceInfo& deviceInfo,
-    Logger* logger);
+    Logger* logger
+  );
 
   VulkanTuneParams loadOrAutoTune(
     const std::string& tunerFile,
@@ -155,7 +205,8 @@ namespace VulkanTuner {
     const ModelInfoForTuning& modelInfo,
     const VulkanDevice* device,
     Logger* logger,
-    bool* didAutoTune = nullptr);
+    bool* didAutoTune = nullptr
+  );
 }  // namespace VulkanTuner
 
 #endif
