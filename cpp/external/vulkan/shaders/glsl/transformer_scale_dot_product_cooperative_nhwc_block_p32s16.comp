@@ -1,0 +1,7 @@
+#version 460
+#define PRECISION 32
+#define PRECISION_STORAGE 16
+#define ATTENTION_COOPERATIVE_ACC_TYPE 32
+#define ATTENTION_KV_BLOCK_SOFTMAX 1
+#define ATTENTION_PERSISTENT_OUTPUT 1
+#include "transformer_scale_dot_product_cooperative.glsl"

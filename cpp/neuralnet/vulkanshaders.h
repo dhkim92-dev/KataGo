@@ -1,0 +1,2149 @@
+/**
+ * @file vulkanshaders.h
+ * @author Dohoon Kim(https://github.com/dhkim92-dev)
+ * @details External symbols generated from SPIR-V shader binaries. 
+ * These are produced by cmake/GenerateShaderSource.cmake during build. 
+ * Symbol naming convention: _binary_<shader_name>_start, _binary_<shader_name>_end, _binary_<shader_name>_size
+ */
+#ifdef USE_VULKAN_BACKEND
+#pragma once
+
+#include <vector>
+#include <cstddef>
+#include <map>
+#include <string>
+#include "../neuralnet/activations.h"
+#include "../neuralnet/vulkanhelpers.h"
+
+extern "C" {
+  // conv2d_fp32.glsl
+  extern const unsigned char _binary_conv2d_fp32_start[];
+  extern const unsigned char* _binary_conv2d_fp32_end;
+  extern const size_t _binary_conv2d_fp32_size;
+
+  // conv2d_p32s16.glsl
+  extern const unsigned char _binary_conv2d_p32s16_start[];
+  extern const unsigned char* _binary_conv2d_p32s16_end;
+  extern const size_t _binary_conv2d_p32s16_size;
+
+  // conv2d_p16s16.glsl
+  extern const unsigned char _binary_conv2d_p16s16_start[];
+  extern const unsigned char* _binary_conv2d_p16s16_end;
+  extern const size_t _binary_conv2d_p16s16_size;
+
+  // NCHW/NHWC conversion shaders used by cooperative-matrix ConvLayer.
+  extern const unsigned char _binary_nchw_to_nhwc_p16s16_start[];
+  extern const unsigned char* _binary_nchw_to_nhwc_p16s16_end;
+  extern const size_t _binary_nchw_to_nhwc_p16s16_size;
+
+  extern const unsigned char _binary_nhwc_to_nchw_p16s16_start[];
+  extern const unsigned char* _binary_nhwc_to_nchw_p16s16_end;
+  extern const size_t _binary_nhwc_to_nchw_p16s16_size;
+
+  extern const unsigned char _binary_nhwc_matrix_to_nchw_p16s16_start[];
+  extern const unsigned char* _binary_nhwc_matrix_to_nchw_p16s16_end;
+  extern const size_t _binary_nhwc_matrix_to_nchw_p16s16_size;
+
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nhwc_acc_fp16_size;
+
+  extern const unsigned char _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_start[];
+  extern const unsigned char* _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_end;
+  extern const size_t _binary_hgemm_cooperative_matrix_nhwc_acc_fp32_size;
+
+#define DECLARE_HGEMM_VARIANT(name) \
+  extern const unsigned char _binary_##name##_start[]; \
+  extern const unsigned char* _binary_##name##_end; \
+  extern const size_t _binary_##name##_size;
+
+#define DECLARE_HGEMM_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm1_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm2_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwm4_vwn4##suffix)
+
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
+  DECLARE_HGEMM_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+
+#define DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk1_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk2_vwn4##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn1##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn2##suffix) \
+  DECLARE_HGEMM_VARIANT(stem##_vwk4_vwn4##suffix)
+
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
+
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
+
+#undef DECLARE_HGEMM_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_NHWC_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_VARIANT
+
+  // winograd_input_transform.glsl
+  extern const unsigned char _binary_winograd_input_transform_fp32_start[];
+  extern const unsigned char* _binary_winograd_input_transform_fp32_end;
+  extern const size_t _binary_winograd_input_transform_fp32_size;
+
+  extern const unsigned char _binary_winograd_input_transform_p32s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_p32s16_end;
+  extern const size_t _binary_winograd_input_transform_p32s16_size;
+
+  extern const unsigned char _binary_winograd_input_transform_p16s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_p16s16_end;
+  extern const size_t _binary_winograd_input_transform_p16s16_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_fp32_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_fp32_end;
+  extern const size_t _binary_winograd_input_transform_bnact_fp32_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_p32s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_p32s16_end;
+  extern const size_t _binary_winograd_input_transform_bnact_p32s16_size;
+
+  extern const unsigned char _binary_winograd_input_transform_bnact_p16s16_start[];
+  extern const unsigned char* _binary_winograd_input_transform_bnact_p16s16_end;
+  extern const size_t _binary_winograd_input_transform_bnact_p16s16_size;
+
+  // winograd_output_transform.glsl
+  extern const unsigned char _binary_winograd_output_transform_fp32_start[];
+  extern const unsigned char* _binary_winograd_output_transform_fpo32__end;
+  extern const size_t _binary_winograd_output_transform_fp32_size;
+
+  extern const unsigned char _binary_winograd_output_transform_p32s16_start[];
+  extern const unsigned char* _binary_winograd_output_transform_p32s16_end;
+  extern const size_t _binary_winograd_output_transform_p32s16_size;
+
+  extern const unsigned char _binary_winograd_output_transform_p16s16_start[];
+  extern const unsigned char* _binary_winograd_output_transform_p16s16_end;
+  extern const size_t _binary_winograd_output_transform_p16s16_size;
+
+  // add_pointwise_fp32.glsl
+  extern const unsigned char _binary_add_pointwise_fp32_start[];
+  extern const unsigned char* _binary_add_pointwise_fp32_end;
+  extern const size_t _binary_add_pointwise_fp32_size;
+
+  // add_pointwise_p32s16.glsl
+  extern const unsigned char _binary_add_pointwise_p32s16_start[];
+  extern const unsigned char* _binary_add_pointwise_p32s16_end;
+  extern const size_t _binary_add_pointwise_p32s16_size;
+
+  // add_pointwise_p16s16.glsl
+  extern const unsigned char _binary_add_pointwise_p16s16_start[];
+  extern const unsigned char* _binary_add_pointwise_p16s16_end;
+  extern const size_t _binary_add_pointwise_p16s16_size;
+
+#define DECLARE_XGEMM_VARIANT(name) \
+  extern const unsigned char _binary_##name##_start[]; \
+  extern const unsigned char* _binary_##name##_end; \
+  extern const size_t _binary_##name##_size;
+
+#define DECLARE_XGEMM_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p16s16) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p16s16)
+
+#define DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(base, mp, np) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##1_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##2_##np##4_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##1_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##2_p32s32) \
+  DECLARE_XGEMM_VARIANT(base##_##mp##4_##np##4_p32s32)
+
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
+  DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
+  DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+
+#undef DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS
+#undef DECLARE_XGEMM_WIDTH_VARIANTS
+#undef DECLARE_XGEMM_VARIANT
+
+  // bn_mask_identity_fp32.glsl
+  extern const unsigned char _binary_bn_mask_identity_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_identity_fp32_end;
+  extern const size_t _binary_bn_mask_identity_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_identity_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_identity_p32s16_end;
+  extern const size_t _binary_bn_mask_identity_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_identity_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_identity_p16s16_end;
+  extern const size_t _binary_bn_mask_identity_p16s16_size;
+
+  // bn_mask_relu_fp32.glsl
+  extern const unsigned char _binary_bn_mask_relu_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_relu_fp32_end;
+  extern const size_t _binary_bn_mask_relu_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_relu_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_relu_p32s16_end;
+  extern const size_t _binary_bn_mask_relu_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_relu_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_relu_p16s16_end;
+  extern const size_t _binary_bn_mask_relu_p16s16_size;
+
+  // bn_mask_mish_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_mish_fp32_end;
+  extern const size_t _binary_bn_mask_mish_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_mish_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_p32s16_end;
+  extern const size_t _binary_bn_mask_mish_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_mish_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_p16s16_end;
+  extern const size_t _binary_bn_mask_mish_p16s16_size;
+
+  // bn_mask_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_fp32_end;
+  extern const size_t _binary_bn_mask_mish_scale8_fp32_size;
+
+  // bn_mask_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_p32s16_end;
+  extern const size_t _binary_bn_mask_mish_scale8_p32s16_size;
+
+  // bn_mask_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_bn_mask_mish_scale8_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_mish_scale8_p16s16_end;
+  extern const size_t _binary_bn_mask_mish_scale8_p16s16_size;
+
+  // bn_mask_silu_fp32.glsl
+  extern const unsigned char _binary_bn_mask_silu_fp32_start[];
+  extern const unsigned char* _binary_bn_mask_silu_fp32_end;
+  extern const size_t _binary_bn_mask_silu_fp32_size;
+
+  extern const unsigned char _binary_bn_mask_silu_p32s16_start[];
+  extern const unsigned char* _binary_bn_mask_silu_p32s16_end;
+  extern const size_t _binary_bn_mask_silu_p32s16_size;
+
+  extern const unsigned char _binary_bn_mask_silu_p16s16_start[];
+  extern const unsigned char* _binary_bn_mask_silu_p16s16_end;
+  extern const size_t _binary_bn_mask_silu_p16s16_size;
+
+  // global_pooling_channels_fp32.glsl
+  extern const unsigned char _binary_global_pooling_channels_fp32_start[];
+  extern const unsigned char* _binary_global_pooling_channels_fp32_end;
+  extern const size_t _binary_global_pooling_channels_fp32_size;
+
+  // global_pooling_channels_p32s16.glsl
+  extern const unsigned char _binary_global_pooling_channels_p32s16_start[];
+  extern const unsigned char* _binary_global_pooling_channels_p32s16_end;
+  extern const size_t _binary_global_pooling_channels_p32s16_size;
+
+  // value_head_pool_channels_fp32.glsl
+  extern const unsigned char _binary_value_head_pool_channels_fp32_start[];
+  extern const unsigned char* _binary_value_head_pool_channels_fp32_end;
+  extern const size_t _binary_value_head_pool_channels_fp32_size;
+
+  // value_head_pool_channels_p32s16.glsl
+  extern const unsigned char _binary_value_head_pool_channels_p32s16_start[];
+  extern const unsigned char* _binary_value_head_pool_channels_p32s16_end;
+  extern const size_t _binary_value_head_pool_channels_p32s16_size;
+
+  // sum_channels_fp32.glsl
+  extern const unsigned char _binary_sum_channels_fp32_start[];
+  extern const unsigned char* _binary_sum_channels_fp32_end;
+  extern const size_t _binary_sum_channels_fp32_size;
+
+  // sum_channels_p32s16.glsl
+  extern const unsigned char _binary_sum_channels_p32s16_start[];
+  extern const unsigned char* _binary_sum_channels_p32s16_end;
+  extern const size_t _binary_sum_channels_p32s16_size;
+
+  // add_channel_bias_fp32.comp
+  extern const unsigned char _binary_add_channel_bias_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_fp32_end;
+  extern const size_t _binary_add_channel_bias_fp32_size;
+
+  extern const unsigned char _binary_add_channel_bias_p32s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_p32s16_end;
+  extern const size_t _binary_add_channel_bias_p32s16_size;
+
+  extern const unsigned char _binary_add_channel_bias_p16s16_start[];
+  extern const unsigned char* _binary_add_channel_bias_p16s16_end;
+  extern const size_t _binary_add_channel_bias_p16s16_size;
+
+  // add_channel_bias_nc_identity_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_identity_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_identity_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_identity_fp32_size;
+
+  // add_channel_bias_nc_relu_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_relu_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_relu_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_relu_fp32_size;
+
+  // add_channel_bias_nc_mish_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_mish_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_mish_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_mish_fp32_size;
+
+  // add_channel_bias_nc_mish_scale8_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_mish_scale8_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_mish_scale8_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_mish_scale8_fp32_size;
+
+  // add_channel_bias_nc_silu_fp32.glsl
+  extern const unsigned char _binary_add_channel_bias_nc_silu_fp32_start[];
+  extern const unsigned char* _binary_add_channel_bias_nc_silu_fp32_end;
+  extern const size_t _binary_add_channel_bias_nc_silu_fp32_size;
+
+  // extract_channel0_fp32
+  extern const unsigned char _binary_extract_channel0_fp32_start[];
+  extern const unsigned char* _binary_extract_channel0_fp32_end;
+  extern const size_t _binary_extract_channel0_fp32_size;
+
+  // extract_channel0_p32s16
+  extern const unsigned char _binary_extract_channel0_p32s16_start[];
+  extern const unsigned char* _binary_extract_channel0_p32s16_end;
+  extern const size_t _binary_extract_channel0_p32s16_size;
+
+  // extract_channel0_p16s16
+  extern const unsigned char _binary_extract_channel0_p16s16_start[];
+  extern const unsigned char* _binary_extract_channel0_p16s16_end;
+  extern const size_t _binary_extract_channel0_p16s16_size;
+
+  // transformer_rms_norm_fp32
+  extern const unsigned char _binary_transformer_rms_norm_subgroup_p16s16_start[];
+  extern const size_t _binary_transformer_rms_norm_subgroup_p16s16_size;
+  extern const unsigned char _binary_transformer_residual_rms_norm_subgroup_p16s16_start[];
+  extern const size_t _binary_transformer_residual_rms_norm_subgroup_p16s16_size;
+  extern const unsigned char _binary_transformer_rms_norm_fp32_start[];
+  extern const unsigned char* _binary_transformer_rms_norm_fp32_end;
+  extern const size_t _binary_transformer_rms_norm_fp32_size;
+
+  extern const unsigned char _binary_transformer_rms_norm_p32s16_start[];
+  extern const unsigned char* _binary_transformer_rms_norm_p32s16_end;
+  extern const size_t _binary_transformer_rms_norm_p32s16_size;
+
+  extern const unsigned char _binary_transformer_rms_norm_p16s16_start[];
+  extern const unsigned char* _binary_transformer_rms_norm_p16s16_end;
+  extern const size_t _binary_transformer_rms_norm_p16s16_size;
+  extern const unsigned char _binary_transformer_residual_rms_norm_p16s16_start[];
+  extern const size_t _binary_transformer_residual_rms_norm_p16s16_size;
+
+  // transformer_rope_fp32
+  extern const unsigned char _binary_transformer_apply_rope_fp32_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_fp32_end;
+  extern const size_t _binary_transformer_apply_rope_fp32_size;
+
+  extern const unsigned char _binary_transformer_apply_rope_p32s16_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_p32s16_end;
+  extern const size_t _binary_transformer_apply_rope_p32s16_size;
+
+  extern const unsigned char _binary_transformer_apply_rope_p16s16_start[];
+  extern const unsigned char* _binary_transformer_apply_rope_p16s16_end;
+  extern const size_t _binary_transformer_apply_rope_p16s16_size;
+
+  // transformer_scale_dot_product_naive
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_fp32_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_fp32_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_fp32_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_naive_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_naive_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_naive_p16s16_size;
+
+  // transformer_scale_dot_product
+  extern const unsigned char _binary_transformer_scale_dot_product_fp32_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_fp32_end;
+  extern const size_t _binary_transformer_scale_dot_product_fp32_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_p16s16_size;
+
+  // transformer_scale_dot_product_cooperative
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_p32s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_cooperative_p32s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_p32s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_p16s16_start[];
+  extern const unsigned char* _binary_transformer_scale_dot_product_cooperative_p16s16_end;
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_p16s16_size;
+
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_start[];
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size;
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_start[];
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size;
+  extern const unsigned char _binary_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_start[];
+  extern const size_t _binary_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size;
+
+  // transformer_swiglu_fp32
+  extern const unsigned char _binary_transformer_swiglu_fp32_start[];
+  extern const unsigned char* _binary_transformer_swiglu_fp32_end;
+  extern const size_t _binary_transformer_swiglu_fp32_size;
+
+  extern const unsigned char _binary_transformer_swiglu_p32s16_start[];
+  extern const unsigned char* _binary_transformer_swiglu_p32s16_end;
+  extern const size_t _binary_transformer_swiglu_p32s16_size;
+
+  extern const unsigned char _binary_transformer_swiglu_p16s16_start[];
+  extern const unsigned char* _binary_transformer_swiglu_p16s16_end;
+  extern const size_t _binary_transformer_swiglu_p16s16_size;
+
+  // transformer_spatial_rms_norm_apply_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_fp32_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_apply_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_apply_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_apply_p16s16_size;
+
+  // transformer_spatial_rms_norm_reduce_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_fp32_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_reduce_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_reduce_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_reduce_p16s16_size;
+
+  // transformer_spatial_rms_norm_sum_sq_fp32
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_fp32_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_fp32_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_fp32_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_p32s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_p32s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_p32s16_size;
+
+  extern const unsigned char _binary_transformer_spatial_rms_norm_sum_sq_p16s16_start[];
+  extern const unsigned char* _binary_transformer_spatial_rms_norm_sum_sq_p16s16_end;
+  extern const size_t _binary_transformer_spatial_rms_norm_sum_sq_p16s16_size;
+
+}
+
+/**
+ * @brief SPIR-V shader data accessors.
+ * Provides convenient access to embedded shader bytecode.
+ * NCHW is the default data layout unless otherwise specified.
+ */
+namespace vk_shader {
+
+  // conv2d_fp32 - Direct convolution layer
+  extern const unsigned char* spirv_conv2d_fp32;
+  extern size_t spirv_conv2d_fp32_size;
+
+  extern const unsigned char* spirv_conv2d_p32s16;
+  extern size_t spirv_conv2d_p32s16_size;
+
+  extern const unsigned char* spirv_conv2d_p16s16;
+  extern size_t spirv_conv2d_p16s16_size;
+
+#define DECLARE_HGEMM_SPIRV_VARIANT(name) \
+  extern const unsigned char* spirv_##name; \
+  extern size_t spirv_##name##_size;
+
+#define DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm1_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm2_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwm4_vwn4##suffix)
+
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp16, _sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0)
+  DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1)
+#define DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(stem, suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk1_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk2_vwn4##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn1##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn2##suffix) \
+  DECLARE_HGEMM_SPIRV_VARIANT(stem##_vwk4_vwn4##suffix)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa0_sb1)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0)
+  DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0)
+  DECLARE_HGEMM_SPIRV_VARIANT(transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1)
+
+#undef DECLARE_HGEMM_SPIRV_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_SPIRV_NHWC_WIDTH_VARIANTS
+#undef DECLARE_HGEMM_SPIRV_VARIANT
+
+  extern const unsigned char* spirv_winograd_input_transform_fp32;
+  extern size_t spirv_winograd_input_transform_fp32_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_p32s16;
+  extern size_t spirv_winograd_input_transform_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_p16s16;
+  extern size_t spirv_winograd_input_transform_p16s16_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_bnact_fp32;
+  extern size_t spirv_winograd_input_transform_bnact_fp32_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_bnact_p32s16;
+  extern size_t spirv_winograd_input_transform_bnact_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_input_transform_bnact_p16s16;
+  extern size_t spirv_winograd_input_transform_bnact_p16s16_size;
+
+  extern const unsigned char* spirv_winograd_output_transform_fp32;
+  extern size_t spirv_winograd_output_transform_fp32_size;
+
+  extern const unsigned char* spirv_winograd_output_transform_p32s16;
+  extern size_t spirv_winograd_output_transform_p32s16_size;
+
+  extern const unsigned char* spirv_winograd_output_transform_p16s16;
+  extern size_t spirv_winograd_output_transform_p16s16_size;
+
+  // Convolution layers 3x3 with identity activation function
+  // extern const unsigned char* spirv_conv2d_3x3_bn_fp32;
+  // extern size_t spirv_conv2d_3x3_bn_fp32_size;
+
+  // Convolution layers 3x3 with ReLU activation function
+  // extern const unsigned char* spirv_conv2d_3x3_bn_relu_fp32;
+  // extern size_t spirv_conv2d_3x3_bn_relu_fp32_size;
+
+  // Convolution layers 3x3 with Mish activation function
+  // extern const unsigned char* spirv_conv2d_3x3_bn_mish_fp32;
+  // extern size_t spirv_conv2d_3x3_bn_mish_fp32_size;
+
+  // Convolution layers 5x5 with identity activation function
+  // extern const unsigned char* spirv_conv2d_5x5_bn_fp32;
+  // extern size_t spirv_conv2d_5x5_bn_fp32_size;
+
+  // Convolution layers 5x5 with ReLU activation function
+  // extern const unsigned char* spirv_conv2d_5x5_bn_relu_fp32;
+  // extern size_t spirv_conv2d_5x5_bn_relu_fp32_size;
+
+  // Convolution layers 5x5 with Mish activation function
+  // extern const unsigned char* spirv_conv2d_5x5_bn_mish_fp32;
+  // extern size_t spirv_conv2d_5x5_bn_mish_fp32_size;
+
+  // add_pointwise_fp32 - Element-wise add for skip connections
+  extern const unsigned char* spirv_add_pointwise_fp32;
+  extern size_t spirv_add_pointwise_fp32_size;
+
+  extern const unsigned char* spirv_add_pointwise_p32s16;
+  extern size_t spirv_add_pointwise_p32s16_size;
+
+  extern const unsigned char* spirv_add_pointwise_p16s16;
+  extern size_t spirv_add_pointwise_p16s16_size;
+
+  // Future support, NCHW matmul Fp32
+  // extern const unsigned char* spirv_matmul_tiled_chw_4x4x32_fp32;
+  // extern size_t spirv_matmul_tiled_chw_4x4x32_fp32_size;
+
+  // bn_mask_fp32 - Batch normalization with mask (identity activation)
+  extern const unsigned char* spirv_bn_mask_identity_fp32;
+  extern size_t spirv_bn_mask_identity_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_identity_p32s16;
+  extern size_t spirv_bn_mask_identity_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_identity_p16s16;
+  extern size_t spirv_bn_mask_identity_p16s16_size;
+
+  // bn_mask_relu_fp32 - Batch normalization with mask + ReLU
+  extern const unsigned char* spirv_bn_mask_relu_fp32;
+  extern size_t spirv_bn_mask_relu_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_relu_p32s16;
+  extern size_t spirv_bn_mask_relu_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_relu_p16s16;
+  extern size_t spirv_bn_mask_relu_p16s16_size;
+
+  // bn_mask_mish_fp32 - Batch normalization with mask + Mish
+  extern const unsigned char* spirv_bn_mask_mish_fp32;
+  extern size_t spirv_bn_mask_mish_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_p32s16;
+  extern size_t spirv_bn_mask_mish_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_p16s16;
+  extern size_t spirv_bn_mask_mish_p16s16_size;
+
+  // bn_mask_mish_scale8_fp32 - Batch normalization with mask + Mish + Scale8
+  extern const unsigned char* spirv_bn_mask_mish_scale8_fp32;
+  extern size_t spirv_bn_mask_mish_scale8_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_scale8_p32s16;
+  extern size_t spirv_bn_mask_mish_scale8_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_mish_scale8_p16s16;
+  extern size_t spirv_bn_mask_mish_scale8_p16s16_size;
+
+  // bn_mask_silu_fp32 - Batch normalization with mask + silu
+  extern const unsigned char* spirv_bn_mask_silu_fp32;
+  extern size_t spirv_bn_mask_silu_fp32_size;
+
+  extern const unsigned char* spirv_bn_mask_silu_p32s16;
+  extern size_t spirv_bn_mask_silu_p32s16_size;
+
+  extern const unsigned char* spirv_bn_mask_silu_p16s16;
+  extern size_t spirv_bn_mask_silu_p16s16_size;
+
+  // sum_channels_fp32 - Sum over channels
+  extern const unsigned char* spirv_sum_channels_fp32;
+  extern size_t spirv_sum_channels_fp32_size;
+
+  extern const unsigned char* spirv_sum_channels_p32s16;
+  extern size_t spirv_sum_channels_p32s16_size;
+
+  // global_pooling_channels_fp32 - Global pooling with mask
+  extern const unsigned char* spirv_global_pooling_channels_fp32;
+  extern size_t spirv_global_pooling_channels_fp32_size;
+
+  extern const unsigned char* spirv_global_pooling_channels_p32s16;
+  extern size_t spirv_global_pooling_channels_p32s16_size;
+
+  // value_head_pool_channels_fp32 - Value head pooling
+  extern const unsigned char* spirv_value_head_pool_channels_fp32;
+  extern size_t spirv_value_head_pool_channels_fp32_size;
+
+  extern const unsigned char* spirv_value_head_pool_channels_p32s16;
+  extern size_t spirv_value_head_pool_channels_p32s16_size;
+
+  // add_channel_bias_fp32 - Add channel bias (identity)
+  extern const unsigned char* spirv_add_channel_bias_fp32;
+  extern size_t spirv_add_channel_bias_fp32_size;
+
+  extern const unsigned char* spirv_add_channel_bias_p32s16;
+  extern size_t spirv_add_channel_bias_p32s16_size;
+
+  extern const unsigned char* spirv_add_channel_bias_p16s16;
+  extern size_t spirv_add_channel_bias_p16s16_size;
+
+  // add_channel_bias_nc_identity_fp32 - Add channel bias + Identity
+  extern const unsigned char* spirv_add_channel_bias_nc_identity_fp32;
+  extern size_t spirv_add_channel_bias_nc_identity_fp32_size;
+
+  // add_channel_bias_nc_relu_fp32 - Add channel bias + ReLU
+  extern const unsigned char* spirv_add_channel_bias_nc_relu_fp32;
+  extern size_t spirv_add_channel_bias_nc_relu_fp32_size;
+
+  // add_channel_bias_nc_mish_fp32 - Add channel bias + Mish
+  extern const unsigned char* spirv_add_channel_bias_nc_mish_fp32;
+  extern size_t spirv_add_channel_bias_nc_mish_fp32_size;
+
+  // add_channel_bias_nc_mish_scale8_fp32 - Add channel bias + Mish + Scale8
+  extern const unsigned char* spirv_add_channel_bias_nc_mish_scale8_fp32;
+  extern size_t spirv_add_channel_bias_nc_mish_scale8_fp32_size;
+
+  // add_channel_bias_nc_relu_fp32 - Add channel bias + ReLU
+  extern const unsigned char* spirv_add_channel_bias_nc_silu_fp32;
+  extern size_t spirv_add_channel_bias_nc_silu_fp32_size;
+
+  // Extract channel 0 from NCHW or NHWC input
+  extern const unsigned char* spirv_extract_channel0_fp32;
+  extern size_t spirv_extract_channel0_fp32_size;
+
+  extern const unsigned char* spirv_extract_channel0_p32s16;
+  extern size_t spirv_extract_channel0_p32s16_size;
+
+  extern const unsigned char* spirv_extract_channel0_p16s16;
+  extern size_t spirv_extract_channel0_p16s16_size;
+
+  // Transformer RMS Norm f32
+  extern const unsigned char* spirv_transformer_rms_norm_fp32;
+  extern size_t spirv_transformer_rms_norm_fp32_size;
+  extern const unsigned char* spirv_transformer_rms_norm_p32s16;
+  extern size_t spirv_transformer_rms_norm_p32s16_size;
+  extern const unsigned char* spirv_transformer_rms_norm_p16s16;
+  extern size_t spirv_transformer_rms_norm_p16s16_size;
+  extern const unsigned char* spirv_transformer_residual_rms_norm_p16s16;
+  extern size_t spirv_transformer_residual_rms_norm_p16s16_size;
+
+  // Transformer apply RoPE fp32
+  extern const unsigned char* spirv_transformer_apply_rope_fp32;
+  extern size_t spirv_transformer_apply_rope_fp32_size;;
+  extern const unsigned char* spirv_transformer_apply_rope_p32s16;
+  extern size_t spirv_transformer_apply_rope_p32s16_size;
+  extern const unsigned char* spirv_transformer_apply_rope_p16s16;
+  extern size_t spirv_transformer_apply_rope_p16s16_size;
+
+  // Transformer scale dot product naive
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_fp32;
+  extern size_t spirv_transformer_scale_dot_product_naive_fp32_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_naive_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_naive_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_naive_p16s16_size;
+
+  // Transformer scale dot product
+  extern const unsigned char* spirv_transformer_scale_dot_product_fp32;
+  extern size_t spirv_transformer_scale_dot_product_fp32_size;;
+  extern const unsigned char* spirv_transformer_scale_dot_product_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_p16s16_size;
+
+  // Transformer scale dot product with cooperative-matrix QK and PV
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_p16s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_p16s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size;
+  extern const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16;
+  extern size_t spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size;
+
+  // Transformer SwiGLU fp32
+  extern const unsigned char* spirv_transformer_swiglu_fp32;
+  extern size_t spirv_transformer_swiglu_fp32_size;
+  extern const unsigned char* spirv_transformer_swiglu_p32s16;
+  extern size_t spirv_transformer_swiglu_p32s16_size;
+  extern const unsigned char* spirv_transformer_swiglu_p16s16;
+  extern size_t spirv_transformer_swiglu_p16s16_size;
+
+  // Transformer spatial RMS norm apply fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_apply_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_apply_p16s16_size;
+
+  // Transformer spatial RMS norm reduce fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_reduce_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_reduce_p16s16_size;
+
+  // Transformer spatial RMS norm sum square fp32
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_fp32;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_fp32_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p32s16;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size;
+  extern const unsigned char* spirv_transformer_spatial_rms_norm_sum_sq_p16s16;
+  extern size_t spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size;
+
+  struct LocalDim {
+    int x;
+    int y;
+    int z;
+
+    bool operator==(const LocalDim& other) const {
+        return x == other.x &&
+                y == other.y &&
+                z == other.z;
+    }
+
+    bool operator<(const LocalDim& other) const {
+        if (x != other.x)
+            return x < other.x;
+        if (y != other.y)
+            return y < other.y;
+        return z < other.z;
+    }
+  };
+
+struct LocalDimHash {
+  std::size_t operator()(const LocalDim& dim) const noexcept {
+    std::size_t seed = 0;
+
+    auto hash_combine = [&seed](int value) {
+        seed ^= std::hash<int>{}(value)
+              + 0x9e3779b9
+              + (seed << 6)
+              + (seed >> 2);
+    };
+
+    hash_combine(dim.x);
+    hash_combine(dim.y);
+    hash_combine(dim.z);
+
+    return seed;
+  }
+};
+
+
+
+  namespace spec {
+    struct Conv2DSpec {
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 8;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct AddPointWiseSpec {
+      uint32_t localSizeX = 256;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ELTS_PER_THREAD = 1;
+    };
+
+    struct BatchNormMaskSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 8;
+      uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
+    };
+
+    struct GlobalPoolingChannelsSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
+      uint32_t useNHWC = 0;
+    };
+
+    struct ValueHeadPoolingChannelsSpec {
+      uint32_t localSizeX = 128;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
+      uint32_t useNHWC = 0;
+    };
+
+    /**
+     * @brief SumChannels Kernel Specialization Info
+     * @param XYSTRIDE - power of two parallelism stride for reduction, should be gl_WorkGroupSize.x;
+     * @param CHANNELSTRIDE - stride for channels, should be get gl_WorkGroupSize.y
+     * @param LOCALSIZE_TOTAL = should be get gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z
+     */
+    struct SumChannelsSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int XYSTRIDE;
+      int CHANNELSTRIDE;
+      int LOCALSIZE_TOTAL;
+    };
+
+    struct AddChannelBiasNCHWSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int XY_ELTS_PER_THREAD = 1;
+      int NC_ELTS_PER_THREAD = 1;
+      uint32_t useNHWC = 0;
+    };
+
+    struct AddChannelBiasNCSpec {
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 4;
+      uint32_t localSizeZ = 1;
+    };
+
+    struct ExtractChannel0Spec {
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
+    };
+
+    struct WinogradInputTransformBnActSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int inTileYOffset = -1;
+      int inTileXOffset = -1;
+      int convY = 3;
+      int convX = 3;
+      int activation = 0; // 0: Identity, 1: ReLU, 2: Mish, 12: Mish + Scale8
+      uint32_t useNHWC = 0;
+    };
+
+    struct WinogradInputTransformSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int inTileYOffset = -1;
+      int inTileXOffset = -1;
+      int convY = 3;
+      int convX = 3;
+      uint32_t useNHWC = 0;
+    };
+
+    struct WinogradOutputTransformSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int inTileYSize = 4;
+      int inTileXSize = 4;
+      int outTileYSize = 2;
+      int outTileXSize = 2;
+      int convY = 3;
+      uint32_t useNHWC = 0;
+    };
+
+    struct XGEMMBatchedSpec {
+      // Field order matches xgemm_batched.glsl specialization IDs 0 through 10.
+      uint32_t localSizeX = 16;
+      uint32_t localSizeY = 16;
+      uint32_t localSizeZ = 1;
+      uint32_t MWG=64;
+      uint32_t NWG=64;
+      uint32_t KWG=32;
+      uint32_t MDIMC=16;
+      uint32_t NDIMC=16;
+      uint32_t MDIMA=16;
+      uint32_t NDIMB=16;
+      uint32_t KWI=1;
+    };
+
+    struct XgemmDirectSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int WGD = 8;
+      int MDIMCD = 1;
+      int NDIMCD = 1;
+      int MDIMAD = 1;
+      int NDIMBD = 1;
+      int KWID = 2;
+      int PADA = 1;
+      int PADB = 1;
+    };
+
+    /** Specialization constants for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+    };
+
+    /**
+     * Specialization constants for hgemm_cooperative_matrix_nchw. The first three fields map to
+     * local_size_*_id 0..2; the remaining fields map to constant IDs 3..10 in
+     * the shader and therefore must remain in this order.
+     */
+    struct HGemmCooperativeMatrixNCHWSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 16;
+      int KSize = 16;
+      int MWG = 16;
+      int NWG = 16;
+      int KWG = 16;
+      int MWAVE = 16;
+      int NWAVE = 16;
+    };
+
+    struct TransformerDualGemmSwiGLUSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int MSize = 16;
+      int NSize = 8;
+      int KSize = 16;
+      int MWG = 128;
+      int NWG = 64;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 16;
+      int STAGES = 1;
+    };
+
+    struct TransformerRMSNormSpec {
+      uint32_t localSizeX;
+      uint32_t localSizeY;
+      uint32_t localSizeZ;
+      int WG_C_SIZE = 64;
+      int WG_XY_SIZE = 1;
+      int C_PER_THREAD = 4;
+      uint32_t useNHWC = 0;
+      int MODE = 0;
+    };
+
+    struct TransformerApplyRoPESpec {
+      uint32_t localSizeX = 64;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      uint32_t useNHWC = 0;
+    };
+
+    struct ScaleDotProductSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ATTN_BLOCK_Q = 32;
+      int ATTN_BLOCK_KV = 32;
+      int Q_PER_THREAD = 1;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+    };
+
+    struct ScaleDotProductCooperativeSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int COOP_M_SIZE = 16;
+      int COOP_N_SIZE = 16;
+      int COOP_K_SIZE = 16;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+      int COOP_Q_TILES_PER_WORKGROUP = 1;
+      int COOP_PV_N_SIZE = 16;
+      uint32_t USE_NHWC = 0;
+      int COOP_KV_STAGES = 1;
+    };
+
+    struct ScaleDotProductNaiveSpec {
+      uint32_t localSizeX = 1;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ATTN_HEAD_DIM = 1;
+      int ATTN_V_HEAD_DIM = 1;
+    };
+
+    struct TransformerSwiGLUSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int ELTS_PER_THREAD = 1;
+    };
+
+    struct TransformerSpatialRMSNormApplySpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int APPLY_ELTS_PER_THREAD = 1;
+      int useNHWC = 0;
+    };
+
+    struct TransformerSpatialRMSNormReduceSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int TILE_SIZE = 32;
+    };
+
+    struct TransformerSpatialRMSNormSumSqSpec {
+      uint32_t localSizeX = 32;
+      uint32_t localSizeY = 1;
+      uint32_t localSizeZ = 1;
+      int TILE_SIZE = 32;
+      int useNHWC = 0;
+    };
+  };
+
+  namespace push {
+    struct Conv2DPushConstantParams {
+      int nSize;
+      int xSize;
+      int ySize;
+      int ocSize;
+      int icSize;
+      int filterXRadius;
+      int filterYRadius;
+      int xyStride;
+    };
+
+    struct WinogradInputTransformParams {
+      int batchSize;
+      int nnXLen;
+      int nnYLen;
+      int numTilesX;
+      int numTilesY;
+      int inChannels;
+      int inChannelsPadded;
+      int ntxtySizePadded;
+      int xyStride;
+    };
+
+    struct WinogradOutputTransformParams {
+      int batchSize;
+      int ySize;
+      int xSize;
+      int numTilesY;
+      int numTilesX;
+      int outChannels;
+      int outChannelsPadded;
+      int ntxtySizePadded;
+      int xyStride;
+    };
+
+    struct NCHWNHWCParams {
+      int batchSize;
+      int channels;
+      int spatialSize;
+      int spatialStride;
+      int channelsPadded;
+      int logicalSpatialSize;
+    };
+
+    struct NHWCMatrixToNCHWParams {
+      int batchSize;
+      int channels;
+      int logicalSpatialSize;
+      int spatialSize;
+      int outputSpatialStride;
+      int matrixChannels;
+    };
+
+    struct XGEMMBatchedParams{
+      uint32_t M;  
+      uint32_t N;  
+      uint32_t K;
+      uint32_t aOne;
+      uint32_t aTwo;
+      uint32_t bOne;
+      uint32_t bTwo;
+      uint32_t cOne;
+      uint32_t cTwo;
+    };
+
+    struct XgemmDirectBatchedTTParams {
+      uint32_t M;  
+      uint32_t N;
+      uint32_t K;  
+      uint32_t aLead;
+      uint32_t bLead;
+      uint32_t cLead;
+      uint32_t aTranspose; // Input A Transpose
+      uint32_t bTranspose; // Input B Transpose
+      uint32_t cTranspose; // Output C Transpose
+    };
+
+    struct XgemmStridedBatchedFp32Params {
+      uint32_t kSizeM;  
+      uint32_t kSizeN;
+      uint32_t kSizeK;  
+      uint32_t aLead;
+      uint32_t aStride;
+      uint32_t bLead;
+      uint32_t bStride;
+      uint32_t cLead;
+      uint32_t cStride;
+      uint32_t cTranspose;
+    };
+
+    struct BatchedXgemmDirectFp32Params {
+      uint32_t kSizeM;  
+      uint32_t kSizeN;
+      uint32_t kSizeK;  
+      uint32_t aLead;
+      uint32_t bLead;
+      uint32_t cLead;
+      uint32_t cTranspose; // Output C Transpose
+    };
+
+    /**
+     * @brief Batch Normalization Mask Fp32 Push Constant Parameters 
+     * @param batchSize
+     * @param numChannels
+     * @param nnYLen
+     */
+    struct BatchNormMaskParams {
+      uint32_t batchSize;
+      uint32_t numChannels;
+      uint32_t nnXYLen;
+      uint32_t maskSpatialStride;
+      uint32_t channelsPadded;
+    };
+
+    /**
+     * @brief Sum Channels Fp32 Push Constant Parameters
+     * @param nSize - number of batch
+     * @param cSize - number of channels
+     * @param xySize - H*W spatial size
+     */
+    struct SumChannelsParams {
+      uint32_t nSize;
+      uint32_t cSize;
+      uint32_t xySize;
+    };
+
+    /**
+     * @brief MatBias Push Constant Parameters
+     */
+    struct MatBiasPushParams {
+      uint32_t batchSize;
+      uint32_t numChannels;
+    };
+
+    /**
+      * @brief Global Pooling Channels Push Constant Parameters
+      */
+    struct GlobalPoolingChannelsParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      int maskSpatialStride;
+      int channelsPadded;
+    };
+
+    /**
+      * @brief Value Head Pooling Channels Push Constant Parameters
+      */
+    struct ValueHeadPoolingChannelsParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      int channelsPadded;
+    };
+
+    /**
+    *  @brief Add Point Wise Push Constant Parameters
+    **/
+    struct AddPointWiseParams {
+      uint32_t size;
+    };
+
+    /**
+     * @brief Add Channel Bias NCHW Push Constant Parameters
+     */
+    struct AddChannelBiasNCHWParams {
+      uint32_t ncSize;
+      uint32_t xySize;
+      uint32_t cSize;
+      uint32_t channelsPadded;
+      uint32_t logicalSpatialSize;
+    };
+
+    /**
+     * @brief Add Channel Bias NC Push Constant Parameters
+     */
+    struct AddChannelBiasNCParams {
+      uint32_t nSize;
+      uint32_t cSize;
+    };
+
+    /**
+     * @brief Push parameters for ExtractChannel0 shader
+     * @param nSize: number of batches
+     * @param cSize: number of input channels
+     * @param nhwcSpatialSize: NHWC staging spatial size
+     * @param nchwSpatialStride: external NCHW spatial stride
+     * @param logicalSpatialSize: logical, unpadded spatial size
+     */
+    struct ExtractChannel0Params {
+      int nSize;  
+      int cSize;
+      int nhwcSpatialSize;
+      int nchwSpatialStride;
+      int logicalSpatialSize;
+      int channelsPadded;
+    };
+
+    struct NCHWPushConstantParams {
+      uint32_t N; // Batch size
+      uint32_t C; // Channels
+      uint32_t H; // Height
+      uint32_t W; // Width
+    };
+
+    /** Push constants for hgemm_cooperative_matrix_nchw. */
+    struct HGemmCooperativeMatrixNCHWParams {
+      int cSize;
+      int hwSize;
+      int ocSize;
+    };
+
+    struct TransformerDualGemmSwiGLUPushParams {
+      int cSize;
+      int hwSize;
+      int packedOCSize;
+      int ffnSize;
+      int inputChannelStride;
+      int outputChannelStride;
+    };
+
+    /** Push constants for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixParams {
+      int M;
+      int N;
+      int K;
+    };
+
+    struct HGemmCooperativeMatrixNHWCParams {
+      int M;
+      int N;
+      int K;
+      int aRowStride;
+      int cRowStride;
+      int aBatchStride;
+      int bBatchStride;
+      int cBatchStride;
+    };
+
+    struct TransformerRMSNormPushParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      float epsilon;
+      int channelsPadded;
+    };
+
+    struct TransformerApplyRoPEPushParams {
+      int nSize;
+      int numBufHeads;
+      int numKVHeads;
+      int headDim;
+      int xySize;
+      int numPairs;
+      int learnableRope;
+      int regionOffset;
+      int batchStride;
+      int channelsPadded;
+    };
+
+    /**
+     * Scale dot product shader params, transformer_scale_dot_product & transformer_scale_dot_product_naive both share this struct.
+     */
+    struct ScaleDotProductPushParam {
+      int seqLen;
+      int numHeads;
+      int numKVHeads;
+      float scale;
+      int qOffset;
+      int kOffset;
+      int vOffset;
+      int qBatchStride;
+      int kBatchStride;
+      int vBatchStride;
+      int useRope;
+      int learnableRope;
+      int ropeNumPairs;
+      int ropeReserved;
+    };
+
+    struct ScaleDotProductCooperativePushParam {
+      int seqLen;
+      int numHeads;
+      int numKVHeads;
+      float scale;
+      int qOffset;
+      int kOffset;
+      int vOffset;
+      int qBatchStride;
+      int kBatchStride;
+      int vBatchStride;
+      int qRowStride;
+      int kRowStride;
+      int vRowStride;
+      int outputBatchStride;
+      int outputRowStride;
+      int useRope;
+      int learnableRope;
+      int ropeNumPairs;
+      int ropeReserved;
+    };
+
+    struct TransformerSwiGLUPushParams {
+      int size;
+      int packedInputBatchStride;
+      int outputBatchStride;
+      int outputPhysicalBatchStride;
+      int ffnSize;
+      int inputChannelsPadded;
+      int outputChannelsPadded;
+      int useNHWC;
+    };
+
+    struct TransformerSpatialRMSNormApplyPushParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      float eps;
+      int channelsPadded;
+    };
+
+    struct TransformerSpatialRMSNormReducePushParams {
+      int nSize;
+      int numPartials;
+      int tilesPerGroup;
+    };
+
+    struct TransformerSpatialRMSNormSumSqPushParams {
+      int nSize;
+      int cSize;
+      int xySize;
+      int tilesPerGroup;
+      int channelsPadded;
+    };
+  };
+
+  namespace tune {
+
+    struct AddPointWiseTuneParams {
+      int LOCAL_SIZE=64;
+      int ELTS_PER_THREAD=4;
+
+      bool isValid() const;
+    };
+
+    struct AddChannelBiasesNCHWTuneParams {
+      int XY_ELTS_PER_THREAD=4;
+      int NC_ELTS_PER_THREAD=4;
+
+      bool isValid() const;
+    };
+
+    struct GPoolTuneParams {
+      int XYSTRIDE=32;
+      int CHANNELSTRIDE=1;
+      int BATCHSTRIDE=4;
+
+      bool isValid() const;
+    };
+
+    struct ConvTuneParams {
+      uint32_t inTileYSize;
+      uint32_t inTileXSize;
+      uint32_t outTileYSize;
+      uint32_t outTileXSize;
+      uint32_t inputTransformLocalXSize;
+      uint32_t inputTransformLocalYSize;
+      uint32_t outputTransformLocalXSize;
+      uint32_t outputTransformLocalYSize;
+      uint32_t outputTransformLocalZSize;
+      uint32_t inputTransformNHWCLocalXSize;
+      uint32_t inputTransformNHWCLocalYSize;
+      uint32_t outputTransformNHWCLocalXSize;
+      uint32_t outputTransformNHWCLocalYSize;
+
+      bool isValid(uint32_t convSize) const;
+    };
+
+    struct XgemmTuneParams {
+      uint32_t MDIMC=8;
+      uint32_t NDIMC=8;
+      uint32_t MWG=32;
+      uint32_t NWG=32;
+      uint32_t KWG=32;
+      uint32_t KWI=1;
+      uint32_t MDIMA=8;
+      uint32_t NDIMB=8;
+      uint32_t VWM=4;
+      uint32_t VWN=4;
+
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
+    struct XgemmDirectTuneParams {
+      uint32_t WGD = 8;
+      uint32_t MDIMCD = 1;
+      uint32_t NDIMCD = 1;
+      uint32_t MDIMAD = 1;
+      uint32_t NDIMBD = 1;
+      uint32_t KWID = 2;
+      uint32_t PADA = 1;
+      uint32_t PADB = 1;
+      uint32_t VWMD = 4;
+      uint32_t VWND = 4;
+
+      bool isValid() const;
+    };
+
+    /** Runtime tuning parameters for hgemm_cooperative_matrix. */
+    struct HGemmCooperativeMatrixTuneParams {
+      // MWARP/NWARP/KDIM and subgroupSize are selected from device properties.
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      int accType = 16;
+      int SA = 0;
+      int SB = 0;
+      int VWM = 4;
+      int VWN = 4;
+
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
+    /** Runtime tuning parameters for the row-major NHWC cooperative-matrix HGEMM. */
+    struct HGemmCooperativeMatrixNHWCTuneParams {
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 32;
+      int NWG = 32;
+      int KWG = 32;
+      int MWAVE = 32;
+      int NWAVE = 32;
+      int accType = 16;
+      int SA = 0;
+      int SB = 0;
+      int DB = 0;
+      int VWK = 1;
+      int VWN = 1;
+
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
+    /**
+     * Runtime tuning parameters for hgemm_cooperative_matrix_nchw. SB selects the shader binary
+     * (shared-memory or direct-filter load); MWG through NWAVE are passed as
+     * specialization constants when a pipeline is created.
+     */
+    struct HGemmCooperativeMatrixNCHWTuneParams {
+      // These values come from VkCooperativeMatrixPropertiesKHR and are not
+      // tuner candidates.
+      int MWARP = 16;
+      int NWARP = 16;
+      int KDIM = 16;
+      uint32_t subgroupSize = 32;
+      int MWG = 16;
+      int NWG = 16;
+      int KWG = 16;
+      int MWAVE = 16;
+      int NWAVE = 16;
+      int accType = 16;
+      int SB = 0;
+      int VWM = 4;
+      int VWN = 4;
+
+      int getRequiredSpatialAlignment() const;
+      bool isValid() const;
+      bool isSimple() const;
+    };
+
+    /** Runtime tuning parameters for the fused transformer dual-GEMM SwiGLU path. */
+    struct TransformerDualGemmSwiGLUTuneParams : HGemmCooperativeMatrixNCHWTuneParams {
+      int STAGES = 1;
+      TransformerDualGemmSwiGLUTuneParams() {
+        VWM = 1;
+        VWN = 1;
+      }
+
+      bool isValid() const {
+        return HGemmCooperativeMatrixNCHWTuneParams::isValid() && VWM == 1 && VWN == 1 &&
+          KDIM % 4 == 0 && KWG % 4 == 0 && (STAGES == 1 || STAGES == 2);
+      }
+
+      int getRequiredSpatialAlignment() const;
+    };
+
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixNHWCTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const HGemmCooperativeMatrixNCHWTuneParams& params
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const TransformerDualGemmSwiGLUTuneParams& params
+    );
+
+    struct TransformerTuneParams {
+      int ATTN_BLOCK_Q=128  ;
+      int ATTN_BLOCK_KV=32;
+      int Q_PER_THREAD=1;
+      int USE_TILED_ATTN=1;
+      bool isValid() const;
+    };
+
+    struct TransformerCooperativeMatrixTuneParams {
+      int ATTN_BLOCK_Q=16;
+      int ATTN_BLOCK_KV=16;
+      int COOP_ACC_TYPE=32;
+      int COOP_M_SIZE=16;
+      int COOP_N_SIZE=16;
+      int COOP_K_SIZE=16;
+      uint32_t COOP_SUBGROUP_SIZE=32;
+      uint32_t COOP_Q_TILES_PER_WORKGROUP=1;
+      int COOP_PV_N_SIZE=16;
+      int COOP_USE_NV2=0;
+
+      bool isValid() const;
+      uint32_t getLocalSizeX() const;
+    };
+
+    bool canUseRegisterAttentionNHWC(
+      const VulkanDeviceInfo& deviceInfo, const TransformerCooperativeMatrixTuneParams& params,
+      int qHeadDim, int vHeadDim
+    );
+    bool isValidCooperativeMatrixConfig(
+      const VulkanDeviceInfo& deviceInfo,
+      const TransformerCooperativeMatrixTuneParams& params,
+      int qHeadDim,
+      int vHeadDim,
+      bool useNHWC = false
+    );
+
+    struct TransformerRMSNormTuneParms {
+      int WG_C_SIZE = 64;
+      int WG_XY_SIZE = 1;
+      int C_PER_THREAD = 4;
+      int MODE = 0; // 0: legacy, 1: cached shared reduction, 2: cached subgroup reduction
+
+      bool isValid() const;
+    };
+
+    bool canUseTransformerRMSNormSubgroup(const VulkanDeviceInfo& deviceInfo, const TransformerRMSNormTuneParms& params);
+
+    struct TransformerSpatialRmsNormTuneParams {
+      int TILE_SIZE = 32;
+      int APPLY_ELTS_PER_THREAD = 1;
+
+      bool isValid() const;
+    };
+
+    struct VulkanParams {
+      // canUse* records hardware capability only. Performance and requested
+      // execution mode are represented by shouldUse*.
+      bool canUseFP16Storage = false;
+      bool canUseFP16Compute = false;
+      bool canUseCooperativeMatrix = false;
+      bool canUseSubgroup = false;
+      bool shouldUseFP16Storage = false;
+      bool shouldUseFP16Compute = false;
+      // Generic Winograd HGEMM only. NCHW HGEMM is controlled independently below.
+      bool shouldUseCooperativeMatrix = false;
+      bool shouldUseNHWC = false;
+      bool shouldUseHgemmCooperativeMatrixNCHW = false;
+      bool shouldUseSubgroup = false;
+      bool shouldUseTransformerDualGemmSwiGLU = false;
+      bool shouldUseTransformerCooperativeMatrixNCHW = false;
+      bool shouldUseTransformerCooperativeMatrixNHWC = false;
+    };
+
+    // All non-GEMM specialization parameters are stored once for the final
+    // selected precision. xgemm and xgemm16 remain independent because the
+    // batched-GEMM pipeline selects between them at runtime.
+    struct VulkanTuningProfile {
+      AddChannelBiasesNCHWTuneParams addChannelBiases;
+      AddPointWiseTuneParams pointwise;
+      GPoolTuneParams gPool;
+      ConvTuneParams conv3x3;
+      ConvTuneParams conv5x5;
+      HGemmCooperativeMatrixTuneParams hgemmCooperativeMatrix;
+      HGemmCooperativeMatrixNHWCTuneParams hgemmCooperativeMatrixNHWC;
+      HGemmCooperativeMatrixNHWCTuneParams transformerHgemmNHWC;
+      HGemmCooperativeMatrixNCHWTuneParams hgemmCooperativeMatrixNCHW;
+      TransformerDualGemmSwiGLUTuneParams transformerDualGemmSwiGLU;
+      XgemmTuneParams xgemm;
+      XgemmTuneParams xgemm16;
+      XgemmDirectTuneParams xgemmDirect;
+      TransformerTuneParams transformer;
+      TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNCHW;
+      TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNHWC;
+      TransformerRMSNormTuneParms rmsNorm;
+      TransformerRMSNormTuneParms transformerPreNorm;
+      TransformerSpatialRmsNormTuneParams spatialRMSNorm;
+
+      bool isValid() const;
+
+      bool operator==(const VulkanTuningProfile& other) const;
+      bool operator!=(const VulkanTuningProfile& other) const { return !(*this == other); }
+
+      VulkanTuningProfile() {
+        conv3x3 = ConvTuneParams();
+        conv3x3.inTileYSize = 6;
+        conv3x3.inTileXSize = 6;
+        conv3x3.outTileYSize = 4;
+        conv3x3.outTileXSize = 4;
+        conv3x3.inputTransformLocalXSize = 4;
+        conv3x3.inputTransformLocalYSize = 2;
+        conv3x3.outputTransformLocalXSize = 8;
+        conv3x3.outputTransformLocalYSize = 2;
+        conv3x3.outputTransformLocalZSize = 2;
+        conv3x3.inputTransformNHWCLocalXSize = 4;
+        conv3x3.inputTransformNHWCLocalYSize = 2;
+        conv3x3.outputTransformNHWCLocalXSize = 8;
+        conv3x3.outputTransformNHWCLocalYSize = 2;
+
+        conv5x5 = ConvTuneParams();
+        conv5x5.inTileYSize = 6;
+        conv5x5.inTileXSize = 6;
+        conv5x5.outTileYSize = 2;
+        conv5x5.outTileXSize = 2;
+        conv5x5.inputTransformLocalXSize = 4;
+        conv5x5.inputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalXSize = 8;
+        conv5x5.outputTransformLocalYSize = 2;
+        conv5x5.outputTransformLocalZSize = 2;
+        conv5x5.inputTransformNHWCLocalXSize = 4;
+        conv5x5.inputTransformNHWCLocalYSize = 2;
+        conv5x5.outputTransformNHWCLocalXSize = 8;
+        conv5x5.outputTransformNHWCLocalYSize = 2;
+        // xgemm = XgemmTuneParams{
+        //   .MDIMC = 16,
+        //   .NDIMC = 16,
+        //   .MWG = 64,
+        //   .NWG = 64,
+        //   .KWG = 16,
+        //   .MDIMA = 16,
+        //   .NDIMB = 16
+        // };
+
+        // xgemmDirect = XgemmDirectTuneParams{
+        //   .WGD = 32,
+        //   .MDIMCD = 8,
+        //   .NDIMCD = 8,
+        //   .MDIMAD = 8,
+        //   .NDIMBD = 8,
+        //   .KWID = 2,
+        //   .PADA = 1,
+        //   .PADB = 1
+        // };
+
+        xgemm = XgemmTuneParams();
+        xgemm16 = xgemm;
+
+        xgemmDirect = XgemmDirectTuneParams();
+      }
+    };
+
+    struct VulkanTuneParams : VulkanTuningProfile {
+      VulkanParams vulkan;
+      VulkanTuneParams() = default;
+      VulkanTuneParams(const VulkanTuneParams& other) = default;
+      VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
+
+      bool isValid() const;
+      bool operator==(const VulkanTuneParams& other) const;
+      bool operator!=(const VulkanTuneParams& other) const { return !(*this == other); }
+
+      static void save(const std::string& filename, const VulkanTuneParams& config);
+      static VulkanTuneParams load(const std::string& filename);
+    };
+
+  }
+
+  struct ComputePipelines {
+    VkDevice device;
+    VulkanDeviceInfo deviceInfo;
+    VkPipelineCache cache;
+    Logger* logger;
+    bool printPipelineCreation = false;
+
+    // Shader modules are shared by all specialization variants of a SPIR-V binary.
+    VkShaderModule shaderModule_add_channel_bias_nc_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_nc_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_channel_bias_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_add_pointwise_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_identity_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_mish_scale8_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_relu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_bn_mask_silu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_conv2d_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nchw_to_nhwc_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nhwc_to_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_nhwc_matrix_to_nchw_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_extract_channel0_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_global_pooling_channels_p32s16 = VK_NULL_HANDLE;
+#define DECLARE_HGEMM_SHADER_MODULES(base) \
+    VkShaderModule shaderModule_##base##_variants[9] = {};
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa0_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa0_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa1_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp16_sa1_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp16_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp16_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa0_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa0_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa1_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_acc_fp32_sa1_sb1)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
+    DECLARE_HGEMM_SHADER_MODULES(hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
+#define DECLARE_HGEMM_NHWC_SHADER_MODULES(base) \
+    VkShaderModule shaderModule_##base##_variants[9] = {};
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa0_sb1)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
+    DECLARE_HGEMM_NHWC_SHADER_MODULES(hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
+#undef DECLARE_HGEMM_NHWC_SHADER_MODULES
+#undef DECLARE_HGEMM_SHADER_MODULES
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_sum_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_apply_rope_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_subgroup_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_residual_rms_norm_subgroup_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_residual_rms_norm_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_rms_norm_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_naive_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_scale_dot_product_cooperative_nhwc_block_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_apply_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_reduce_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_spatial_rms_norm_sum_sq_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_transformer_swiglu_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_value_head_pool_channels_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_bnact_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_input_transform_p32s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_fp32 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p16s16 = VK_NULL_HANDLE;
+    VkShaderModule shaderModule_winograd_output_transform_p32s16 = VK_NULL_HANDLE;
+    // Width-specific source variants; direct-batched-TT contains p32s32 only.
+    VkShaderModule shaderModule_xgemm_batched_variants[27] = {};
+    VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[9] = {};
+    VkShaderModule shaderModule_xgemm_strided_batched_nn_variants[27] = {};
+    std::vector<VkShaderModule*> shaderModuleFields;
+    // In this code, assume that NCHW is default format if no postfix is given.
+
+    // Conv2D pipelines
+    Pipeline conv2dFp32; 
+    Pipeline nchwToNhwc;
+    Pipeline nhwcToNchw;
+    Pipeline nhwcMatrixToNchw;
+    Pipeline hgemmCooperativeMatrixNHWC;
+    Pipeline transformerHgemmNHWC;
+    Pipeline winogradInputTransform3x3;
+    Pipeline winogradInputTransform5x5;
+    Pipeline winogradInputTransform3x3NHWC;
+    Pipeline winogradInputTransform5x5NHWC;
+
+    Pipeline winogradInputTransform3x3_bnact_identity;
+    Pipeline winogradInputTransform3x3_bnact_relu;
+    Pipeline winogradInputTransform3x3_bnact_mish;
+    Pipeline winogradInputTransform3x3_bnact_mish_scale8;
+    Pipeline winogradInputTransform3x3_bnact_silu;
+    Pipeline winogradInputTransform5x5_bnact_identity;
+    Pipeline winogradInputTransform5x5_bnact_relu;
+    Pipeline winogradInputTransform5x5_bnact_mish;
+    Pipeline winogradInputTransform5x5_bnact_mish_scale8;
+    Pipeline winogradInputTransform5x5_bnact_silu;
+    Pipeline winogradInputTransform3x3_bnact_identityNHWC;
+    Pipeline winogradInputTransform3x3_bnact_reluNHWC;
+    Pipeline winogradInputTransform3x3_bnact_mishNHWC;
+    Pipeline winogradInputTransform3x3_bnact_mish_scale8NHWC;
+    Pipeline winogradInputTransform3x3_bnact_siluNHWC;
+    Pipeline winogradInputTransform5x5_bnact_identityNHWC;
+    Pipeline winogradInputTransform5x5_bnact_reluNHWC;
+    Pipeline winogradInputTransform5x5_bnact_mishNHWC;
+    Pipeline winogradInputTransform5x5_bnact_mish_scale8NHWC;
+    Pipeline winogradInputTransform5x5_bnact_siluNHWC;
+
+    Pipeline winogradOutputTransform3x3;
+    Pipeline winogradOutputTransform5x5;
+    Pipeline winogradOutputTransform3x3NHWC;
+    Pipeline winogradOutputTransform5x5NHWC;
+
+    Pipeline addPointWise;  // operation for skipping connections
+
+    // Pipeline for matrix multiplication
+    Pipeline hgemmCooperativeMatrix;
+    Pipeline hgemmCooperativeMatrixNCHW;
+    Pipeline xgemmDirectBatchedTT;
+    Pipeline xgemmBatchedFp32;
+
+    // note that conv1x1 can be implemented as matmul operation
+    // Pipeline stridedBatchedMatmulFp32;
+    Pipeline xgemmStridedBatchedFp32;
+
+    // Batch Normalization pipelines
+    // note that prediction phase does not need batch normalization operation separately
+    // as the parameters can be folded into convolution scale and bias.
+    Pipeline batchNormMaskIdentity;
+    Pipeline batchNormMaskIdentityNHWC;
+    Pipeline batchNormMaskRelu;
+    Pipeline batchNormMaskReluNHWC;
+    Pipeline batchNormMaskMish;
+    Pipeline batchNormMaskMishNHWC;
+    Pipeline batchNormMaskMishScale8;
+    Pipeline batchNormMaskMishScale8NHWC;
+    Pipeline batchNormMaskSilu;
+    Pipeline batchNormMaskSiluNHWC;
+    Pipeline batchNormMaskSiluNCHW;
+
+    // Pooling pipelines
+    Pipeline globalPoolingChannelsFp32;
+    Pipeline globalPoolingChannelsFp32NHWC;
+
+    std::map<LocalDim, Pipeline> valueHeadPoolingChannels;
+    std::map<LocalDim, Pipeline> valueHeadPoolingChannelsNHWC;
+    
+    // Element wise operations
+    std::map<LocalDim, Pipeline> sumChannels;
+
+    Pipeline addChannelBias;
+    Pipeline addChannelBiasNHWC;
+    Pipeline addChannelBiasNCIdentity;
+    Pipeline addChannelBiasNCRelu;
+    Pipeline addChannelBiasNCMish;
+    Pipeline addChannelBiasNCMishScale8;
+    Pipeline addChannelBiasNCSilu;
+    Pipeline extractChannel0Fp32;
+    Pipeline extractChannel0Fp32NHWC;
+
+    // Transformer
+
+    Pipeline transformerRmsNorm;
+    Pipeline transformerRmsNormNHWC;
+    Pipeline transformerPreNormNHWC;
+    Pipeline transformerResidualRmsNormNHWC;
+    Pipeline transformerApplyRoPE;
+    Pipeline transformerApplyRoPENHWC;
+    Pipeline transformerScaleDotProduct;
+    Pipeline transformerScaleDotProductCooperative;
+    Pipeline transformerScaleDotProductCooperativeNHWC;
+    Pipeline transformerScaleDotProductNaive;
+    Pipeline transformerSwiGLU;
+    Pipeline transformerDualGemmSwiGLU;
+    Pipeline transformerSpatialRMSNormApply;
+    Pipeline transformerSpatialRMSNormApplyNHWC;
+    Pipeline transformerSpatialRMSNormReduce;
+    Pipeline transformerSpatialRMSNormSumSq;
+    Pipeline transformerSpatialRMSNormSumSqNHWC;
+
+    ComputePipelines(
+      VkDevice device_,
+      const VulkanDeviceInfo& deviceInfo_,
+      Logger* logger_,
+      bool waitForDeviceIdle_ = true
+    );
+    ComputePipelines() = delete;
+    ComputePipelines(const ComputePipelines&) = delete;
+    ComputePipelines& operator=(const ComputePipelines&) = delete;
+
+    ~ComputePipelines();
+
+    VkResult createPipelines(const tune::VulkanTuneParams& tuneParams, int qHeadDim, int vHeadDim, bool print);
+    VkResult createWinogradInputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createNchwToNhwc(Pipeline& pipeline);
+    VkResult createNhwcToNchw(Pipeline& pipeline);
+    VkResult createNHWCMatrixToNCHW(Pipeline& pipeline);
+    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNHWCTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrixNHWC(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
+    VkResult createWinogradInputTransformBnAct(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, int activation, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createWinogradOutputTransform(Pipeline& pipeline, const tune::ConvTuneParams& tuneParams, int convSize, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createAddPointWise(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createHgemmCooperativeMatrix(Pipeline& pipeline, const tune::HGemmCooperativeMatrixTuneParams& tuneParams);
+    VkResult createHgemmCooperativeMatrixNCHW(Pipeline& pipeline, const tune::HGemmCooperativeMatrixNCHWTuneParams& tuneParams);
+    VkResult createTransformerDualGemmSwiGLU(Pipeline& pipeline, const tune::TransformerDualGemmSwiGLUTuneParams& tuneParams);
+    VkResult createXgemmDirectBatchedTT(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createXgemmBatched(
+      Pipeline& pipeline,
+      const tune::XgemmTuneParams& tuneParams,
+      const tune::XgemmTuneParams& tuneParams16,
+      const tune::VulkanParams& vulkanParams
+    );
+    VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createBatchNormMaskSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createGlobalPoolingChannelsFp32(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createValueHeadPoolingChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeY, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createSumChannels(Pipeline& pipeline, const tune::GPoolTuneParams& tuneParams, uint32_t localSizeZ, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBias(Pipeline& pipeline, const tune::AddChannelBiasesNCHWTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createAddChannelBiasNCIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCMishScale8(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createAddChannelBiasNCSilu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams);
+    VkResult createExtractChannel0Fp32(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
+    VkResult createTransformerRMSNorm(Pipeline& pipeline, const tune::TransformerRMSNormTuneParms& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false, bool residualAdd = false);
+    VkResult createTransformerApplyRoPE(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createTransformerScaleDotProduct(Pipeline& pipeline, const tune::TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerScaleDotProductCooperative(Pipeline& pipeline, const tune::TransformerCooperativeMatrixTuneParams& tuneParams, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createTransformerScaleDotProductNaive(Pipeline& pipeline, int qHeadDim, int vHeadDim, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSwiGLU(Pipeline& pipeline, const tune::AddPointWiseTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormApply(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    VkResult createTransformerSpatialRMSNormReduce(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const tune::TransformerSpatialRmsNormTuneParams& tuneParams, const tune::VulkanParams& vulkanParams, bool useNHWC = false);
+    void destroyPipeline(Pipeline& pipeline);
+    VkResult createPipeline(
+      std::string pipelineName,
+      VkShaderModule shaderModule,
+      size_t bindingSize,
+      uint32_t pushConstantSize,
+      Pipeline &outPipeline,
+      VkSpecializationInfo* specializationInfo = nullptr,
+      uint32_t localSizeX = 1,
+      uint32_t localSizeY = 1,
+      uint32_t localSizeZ = 1,
+      VkPipelineShaderStageCreateFlags stageFlags = 0
+    );
+
+  private :
+    bool waitForDeviceIdle;
+    VkResult createShaderModules();
+    void destroyShaderModules();
+    void destroyPipelines();
+  };
+}
+
+#endif

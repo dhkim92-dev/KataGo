@@ -1,0 +1,225 @@
+/**
+* Vulkan ported transformer RMSNorm kernel.
+* Based on openclkernels.cpp, transformerRMSNorm kernel function
+*/
+#ifndef RMSNORM_SUBGROUP
+#define RMSNORM_SUBGROUP 0
+#endif
+#if RMSNORM_SUBGROUP
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
+#include "common.glsl"
+
+#ifndef RESIDUAL_ADD
+#define RESIDUAL_ADD 0
+#endif
+
+layout(constant_id = 3) const int WG_C_SIZE = 64;
+layout(constant_id = 4) const int WG_XY_SIZE = 1;
+layout(constant_id = 5) const int C_PER_THREAD = 4;
+layout(constant_id = 6) const int USE_NHWC = 0;
+layout(constant_id = 7) const int MODE = 0;
+
+layout(push_constant) uniform TransformerRMSNormParams {
+    int nSize;
+    int cSize;
+    int xySize;
+    float eps;
+    int channelsPadded;
+};
+
+#if RESIDUAL_ADD
+layout(set = 0, binding = 0) buffer input_buffer {
+#else
+layout(set = 0, binding = 0) buffer readonly input_buffer {
+#endif
+    realstore d_input[];
+};
+
+#if RESIDUAL_ADD
+layout(set = 0, binding = 1) buffer output_buffer {
+#else
+layout(set = 0, binding = 1) buffer writeonly output_buffer {
+#endif
+    realstore d_output[]; // NCHW
+};
+
+layout(set = 0, binding = 2) buffer readonly weight_buffer {
+    float weight[]; // C(gamma)
+};
+
+layout(set = 0, binding = 3) buffer readonly beta_buffer {
+    float beta[]; // (per-channel bias added after scaling)
+};
+
+layout(set = 0, binding = 4) buffer readonly mask_buffer {
+    realstore mask[]; // NHW
+};
+
+shared float partials[WG_XY_SIZE * WG_C_SIZE];
+
+void transformerRmsNormNCHW() {
+    const int lid = int(gl_LocalInvocationID.x);
+    const int lid_xy = lid % WG_XY_SIZE;
+    const int lid_c = lid / WG_XY_SIZE;
+    const int xy = int(gl_WorkGroupID.x) * WG_XY_SIZE + lid_xy;
+    const int n = int(gl_WorkGroupID.y);
+
+    if ( n >= nSize) return;
+
+    float maskVal = (xy < xySize) ? LOAD(mask, n*xySize + xy) : 0.0f;
+
+    // Phase 1: Sum of squares for its channels;
+    float acc = 0.0f;
+
+    for ( int base = lid_c * C_PER_THREAD ; base < cSize ; base += WG_C_SIZE * C_PER_THREAD ) {
+        for ( int dc = 0 ; dc < C_PER_THREAD ; dc++ ) {
+            int c = base + dc;
+            if ( c < cSize && xy < xySize ) {
+                float val = LOAD(d_input, (n*cSize + c) * xySize + xy) * maskVal;
+                acc += val*val;
+            }
+        }
+    }
+
+    // Phase 2: Reduce across C dimension in local memory
+
+    partials[lid_xy * WG_C_SIZE + lid_c] = acc;
+    for ( int span = WG_C_SIZE / 2 ; span > 0 ; span /= 2 ) {
+        barrier();
+        if ( lid_c < span ) {
+            partials[lid_xy * WG_C_SIZE + lid_c] += partials[lid_xy * WG_C_SIZE + lid_c + span];
+        }
+    }
+    barrier();
+
+    float rms = inversesqrt(partials[lid_xy * WG_C_SIZE] / float(cSize) + eps);
+
+    // Phase 3: Apply normalization
+    for ( int base = lid_c * C_PER_THREAD ; base < cSize ; base += WG_C_SIZE * C_PER_THREAD ) {
+        for ( int dc = 0 ; dc < C_PER_THREAD ; dc++ ) {
+            int c = base + dc;
+            if ( (c < cSize) && xy < xySize ) {
+                float val = LOAD(d_input, (n * cSize + c) * xySize + xy);
+                float result = (val * rms * weight[c] + beta[c]) * maskVal;
+                STORE(d_output, (n * cSize + c) * xySize + xy, floatToReal(result));
+            }
+        }
+    }
+}
+
+void transformerRmsNormNHWC() {
+    const int lid = int(gl_LocalInvocationID.x);
+    const int lid_xy = lid % WG_XY_SIZE;
+    const int lid_c = lid / WG_XY_SIZE;
+    const int xy = int(gl_WorkGroupID.x) * WG_XY_SIZE + lid_xy;
+    const int n = int(gl_WorkGroupID.y);
+
+    if (n >= nSize) return;
+
+    float maskVal = (xy < xySize) ? LOAD(mask, n*xySize + xy) : 0.0f;
+    float acc = 0.0f;
+
+    for (int base = lid_c * C_PER_THREAD; base < cSize; base += WG_C_SIZE * C_PER_THREAD) {
+        for (int dc = 0; dc < C_PER_THREAD; dc++) {
+            int c = base + dc;
+            if (c < cSize && xy < xySize) {
+#if RESIDUAL_ADD
+                // Match the separate add's storage rounding before RMSNorm.
+                const int index = (n*xySize + xy) * channelsPadded + c;
+                const realstore updated = realstore(LOAD(d_input, index) + LOAD(d_output, index));
+                d_input[index] = updated;
+                float val = float(updated) * maskVal;
+#else
+                float val = LOAD(d_input, (n*xySize + xy) * channelsPadded + c) * maskVal;
+#endif
+                acc += val * val;
+            }
+        }
+    }
+
+    partials[lid_xy * WG_C_SIZE + lid_c] = acc;
+    for (int span = WG_C_SIZE / 2; span > 0; span /= 2) {
+        barrier();
+        if (lid_c < span)
+            partials[lid_xy * WG_C_SIZE + lid_c] += partials[lid_xy * WG_C_SIZE + lid_c + span];
+    }
+    barrier();
+
+    float rms = inversesqrt(partials[lid_xy * WG_C_SIZE] / float(cSize) + eps);
+
+    for (int base = lid_c * C_PER_THREAD; base < cSize; base += WG_C_SIZE * C_PER_THREAD) {
+        for (int dc = 0; dc < C_PER_THREAD; dc++) {
+            int c = base + dc;
+            if (c < cSize && xy < xySize) {
+                float val = LOAD(d_input, (n*xySize + xy) * channelsPadded + c);
+                float result = (val * rms * weight[c] + beta[c]) * maskVal;
+                STORE(d_output, (n*xySize + xy) * channelsPadded + c, floatToReal(result));
+            }
+        }
+    }
+}
+
+// Cached NHWC path: adjacent lanes own adjacent channels and retain the
+// unmasked, storage-rounded values through the FP32 reduction and epilogue.
+void transformerRmsNormCachedNHWC() {
+#if RMSNORM_SUBGROUP
+    const int lane = int(gl_SubgroupInvocationID);
+    const int row = int(gl_SubgroupID);
+#else
+    const int lane = int(gl_LocalInvocationIndex) % WG_C_SIZE;
+    const int row = int(gl_LocalInvocationIndex) / WG_C_SIZE;
+#endif
+    const int xy = int(gl_WorkGroupID.x) * WG_XY_SIZE + row;
+    const int n = int(gl_WorkGroupID.y);
+    const float m = xy < xySize ? LOAD(mask, n * xySize + xy) : 0.0f;
+    float values[C_PER_THREAD];
+    float sum = 0.0f;
+    for(int i = 0; i < C_PER_THREAD; i++) {
+        const int c = lane + i * WG_C_SIZE;
+        float value = 0.0f;
+        if(c < cSize && xy < xySize) {
+            const int index = (n * xySize + xy) * channelsPadded + c;
+#if RESIDUAL_ADD
+            const realstore updated = realstore(LOAD(d_input, index) + LOAD(d_output, index));
+            d_input[index] = updated;
+            value = float(updated);
+#else
+            value = LOAD(d_input, index);
+#endif
+        }
+        values[i] = value;
+        const float masked = value * m;
+        sum += masked * masked;
+    }
+#if RMSNORM_SUBGROUP
+    sum = subgroupAdd(sum);
+#else
+    const int offset = row * WG_C_SIZE + lane;
+    partials[offset] = sum;
+    for(int span = WG_C_SIZE / 2; span > 0; span /= 2) {
+        barrier();
+        if(lane < span) partials[offset] += partials[offset + span];
+    }
+    barrier();
+    sum = partials[row * WG_C_SIZE];
+#endif
+    const float rms = inversesqrt(sum / float(cSize) + eps);
+    for(int i = 0; i < C_PER_THREAD; i++) {
+        const int c = lane + i * WG_C_SIZE;
+        if(c < cSize && xy < xySize) {
+            const float result = (values[i] * rms * weight[c] + beta[c]) * m;
+            STORE(d_output, (n * xySize + xy) * channelsPadded + c, floatToReal(result));
+        }
+    }
+}
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+void main() {
+    if (USE_NHWC == 1 && MODE != 0 && cSize <= WG_C_SIZE * C_PER_THREAD)
+        transformerRmsNormCachedNHWC();
+    else if (USE_NHWC == 1)
+        transformerRmsNormNHWC();
+    else
+        transformerRmsNormNCHW();
+}

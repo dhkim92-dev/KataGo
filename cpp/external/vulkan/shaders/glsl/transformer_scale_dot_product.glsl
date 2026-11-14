@@ -1,0 +1,241 @@
+#include "common.glsl"
+#include "transformer_rope.glsl"
+
+layout(constant_id=3) const int ATTN_BLOCK_Q = 32;
+layout(constant_id=4) const int ATTN_BLOCK_KV = 32;
+layout(constant_id=5) const int Q_PER_THREAD = 1;
+layout(constant_id=6) const int ATTN_HEAD_DIM = 1;
+layout(constant_id=7) const int ATTN_V_HEAD_DIM = 1;
+
+layout(set = 0, binding = 0) readonly buffer Query {
+    realstore Q[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Key {
+    realstore K[];
+};
+
+
+layout(set = 0, binding = 2) readonly buffer Value {
+    realstore V[];
+};
+
+layout(set = 0, binding = 3) writeonly buffer Output {
+    realstore d_output[];
+};
+
+layout(set = 0, binding = 4) readonly buffer Mask {
+    realstore mask[];
+};
+
+layout(set = 0, binding = 5) readonly buffer RopeCosine {
+    float ropeCosTable[];
+};
+
+layout(set = 0, binding = 6) readonly buffer RopeSine {
+    float ropeSinTable[];
+};
+
+layout(push_constant) uniform ScaleDotProductAttentionParams {
+    int seqLen;
+    int numHeads;
+    int numKVHeads;
+    float scale; // 1/sqrt(headDim)
+    int qOffset;
+    int kOffset;
+    int vOffset;
+    int qBatchStride;
+    int kBatchStride;
+    int vBatchStride;
+    int useRope;
+    int learnableRope;
+    int ropeNumPairs;
+    int ropeReserved;
+};
+
+// Store tiles as [dimension][key position]. This preserves the original
+// coalesced global-load mapping. RoPE is applied after the complete K tile is
+// visible to the workgroup, so paired dimensions do not change the load map.
+shared float kTile[ATTN_HEAD_DIM * ATTN_BLOCK_KV];
+shared float vTile[ATTN_V_HEAD_DIM * ATTN_BLOCK_KV];
+shared float kMaskTile[ATTN_BLOCK_KV];
+
+layout(local_size_x_id=0, local_size_y_id = 1, local_size_z_id = 2) in;
+void main() {
+  const int localIdx = int(gl_LocalInvocationID.x);
+  const int qBlockStart = int(gl_WorkGroupID.x) * (ATTN_BLOCK_Q * Q_PER_THREAD);
+  const int bh = int(gl_GlobalInvocationID.y);
+
+  const int n = bh / numHeads;
+  const int h = bh % numHeads;
+  const int kvh = h / (numHeads / numKVHeads);
+  const int qBatchBase = n * qBatchStride;
+  const int kBatchBase = n * kBatchStride;
+  const int vBatchBase = n * vBatchStride;
+
+  float q[Q_PER_THREAD * ATTN_HEAD_DIM];
+  float qMask[Q_PER_THREAD];
+  float runningMax[Q_PER_THREAD];
+  float runningSum[Q_PER_THREAD];
+  float acc[Q_PER_THREAD * ATTN_V_HEAD_DIM];
+
+  for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+    int qPos = qBlockStart + qi * ATTN_BLOCK_Q + localIdx;
+    qMask[qi] = 0.0f;
+    if(qPos < seqLen) {
+      qMask[qi] = LOAD(mask, n * seqLen + qPos);
+      if(qMask[qi] != 0.0f) {
+        for(int d = 0; d < ATTN_HEAD_DIM; d++) {
+          q[qi * ATTN_HEAD_DIM + d] = LOAD(Q, qBatchBase + qOffset + (h * ATTN_HEAD_DIM + d) * seqLen + qPos);
+        }
+        if(useRope != 0) {
+          int ropeTableHead = h * numKVHeads / numHeads;
+          for(int pairIdx = 0; pairIdx < ropeNumPairs; pairIdx++) {
+            int d0 = pairIdx * 2;
+            int d1 = d0 + 1;
+            int tableIdx = learnableRope != 0
+              ? (ropeTableHead * ropeNumPairs + pairIdx) * seqLen + qPos
+              : pairIdx * seqLen + qPos;
+            float cosVal = ropeCosTable[tableIdx];
+            float sinVal = ropeSinTable[tableIdx];
+            float q0 = q[qi * ATTN_HEAD_DIM + d0];
+            float q1 = q[qi * ATTN_HEAD_DIM + d1];
+            applyTransformerRoPE(q0, q1, cosVal, sinVal);
+            q[qi * ATTN_HEAD_DIM + d0] = q0;
+            q[qi * ATTN_HEAD_DIM + d1] = q1;
+          }
+        }
+      }
+    }
+    runningMax[qi] = -1e30f;
+    runningSum[qi] = 0.0f;
+    for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
+      acc[qi * ATTN_V_HEAD_DIM + d] = 0.0f;
+    }
+  }
+
+  // Iterate over key/value positions in tiles
+  for(int kvStart = 0; kvStart < seqLen; kvStart += ATTN_BLOCK_KV) {
+    // Cooperatively load K tile into local memory
+    for(int t = localIdx; t < ATTN_BLOCK_KV * ATTN_HEAD_DIM; t += ATTN_BLOCK_Q) {
+      // The global buffers are laid out as [head, dim, sequence]. Map the
+      // linear load so neighboring invocations read neighboring sequence
+      // positions for the same dimension. The shared tile is laid out as
+      // [dimension, sequence].
+      int tileD = t / ATTN_BLOCK_KV;
+      int tileKPos = t % ATTN_BLOCK_KV;
+      int globalKPos = kvStart + tileKPos;
+      if(globalKPos < seqLen) {
+        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(K, kBatchBase + kOffset + (kvh * ATTN_HEAD_DIM + tileD) * seqLen + globalKPos);
+      } else {
+        kTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
+      }
+    }
+
+    // Cooperatively load V tile
+    for(int t = localIdx; t < ATTN_BLOCK_KV * ATTN_V_HEAD_DIM; t += ATTN_BLOCK_Q) {
+      // Keep the same coalesced global-load mapping for V.
+      int tileD = t / ATTN_BLOCK_KV;
+      int tileKPos = t % ATTN_BLOCK_KV;
+      int globalKPos = kvStart + tileKPos;
+      if(globalKPos < seqLen) {
+        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = LOAD(V, vBatchBase + vOffset + (kvh * ATTN_V_HEAD_DIM + tileD) * seqLen + globalKPos);
+      } else {
+        vTile[tileD * ATTN_BLOCK_KV + tileKPos] = 0.0f;
+      }
+    }
+
+    // Cooperatively load mask for this KV tile
+    for(int t = localIdx; t < ATTN_BLOCK_KV; t += ATTN_BLOCK_Q) {
+      int globalKPos = kvStart + t;
+      if(globalKPos < seqLen) {
+        kMaskTile[t] = LOAD(mask, n * seqLen + globalKPos);
+      } else {
+        kMaskTile[t] = 0.0f;
+      }
+    }
+
+    barrier();
+
+    if(useRope != 0) {
+      int ropeAwarePairCount = min(ropeNumPairs, ATTN_HEAD_DIM / 2);
+      for(int t = localIdx; t < ATTN_BLOCK_KV * ropeAwarePairCount; t += ATTN_BLOCK_Q) {
+        int pairIdx = t / ATTN_BLOCK_KV;
+        int tileKPos = t % ATTN_BLOCK_KV;
+        int globalKPos = kvStart + tileKPos;
+        if(globalKPos < seqLen) {
+          int d0 = pairIdx * 2;
+          int d1 = d0 + 1;
+          float k0 = kTile[d0 * ATTN_BLOCK_KV + tileKPos];
+          float k1 = kTile[d1 * ATTN_BLOCK_KV + tileKPos];
+          int tableIdx = learnableRope != 0
+            ? (kvh * ropeNumPairs + pairIdx) * seqLen + globalKPos
+            : pairIdx * seqLen + globalKPos;
+          applyTransformerRoPE(k0, k1, ropeCosTable[tableIdx], ropeSinTable[tableIdx]);
+          kTile[d0 * ATTN_BLOCK_KV + tileKPos] = k0;
+          kTile[d1 * ATTN_BLOCK_KV + tileKPos] = k1;
+        }
+      }
+      barrier();
+    }
+
+    int kvEnd = min(ATTN_BLOCK_KV, seqLen - kvStart);
+
+    // Each thread processes Q_PER_THREAD query positions against the shared KV tile
+    for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+      int qPos = qBlockStart + qi * ATTN_BLOCK_Q + localIdx;
+      if(qPos < seqLen && qMask[qi] != 0.0f) {
+        for(int tileK = 0; tileK < kvEnd; tileK++) {
+          if(kMaskTile[tileK] == 0.0f)
+            continue;
+
+          // Dot product Q . K
+          float _dot = 0.0f;
+          for(int d = 0; d < ATTN_HEAD_DIM; d++) {
+            _dot += q[qi * ATTN_HEAD_DIM + d] * kTile[d * ATTN_BLOCK_KV + tileK];
+          }
+          _dot *= scale;
+
+          // Online softmax update
+          float newMax = max(runningMax[qi], _dot);
+          float expOldMax = exp(runningMax[qi] - newMax);
+          float expCur = exp(_dot - newMax);
+
+          for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
+            acc[qi * ATTN_V_HEAD_DIM + d] *= expOldMax;
+          }
+          runningSum[qi] = runningSum[qi] * expOldMax + expCur;
+          runningMax[qi] = newMax;
+
+          for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
+            acc[qi * ATTN_V_HEAD_DIM + d] += expCur * vTile[d * ATTN_BLOCK_KV + tileK];
+          }
+        }
+      }
+    }
+
+    // The next iteration overwrites the shared tiles. Synchronize only when
+    // another iteration will actually read them; the final tile has no later
+    // shared-memory consumer before this workgroup exits.
+    if(kvStart + ATTN_BLOCK_KV < seqLen)
+      barrier();
+  }
+
+  // Write output for all Q_PER_THREAD positions
+  for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+    int qPos = qBlockStart + qi * ATTN_BLOCK_Q + localIdx;
+    if(qPos < seqLen) {
+      if(qMask[qi] == 0.0f) {
+        for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
+          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(0.0f));
+        }
+      } else {
+        float invSum = (runningSum[qi] > 0.0f) ? (1.0f / runningSum[qi]) : 0.0f;
+        for(int d = 0; d < ATTN_V_HEAD_DIM; d++) {
+          float result = acc[qi * ATTN_V_HEAD_DIM + d] * invSum;
+          STORE(d_output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, floatToReal(result));
+        }
+      }
+    }
+  }
+}

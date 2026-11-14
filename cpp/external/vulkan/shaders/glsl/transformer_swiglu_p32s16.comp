@@ -1,0 +1,5 @@
+#version 460
+#define PRECISION 32
+#define PRECISION_STORAGE 16
+
+#include "transformer_swiglu.glsl"

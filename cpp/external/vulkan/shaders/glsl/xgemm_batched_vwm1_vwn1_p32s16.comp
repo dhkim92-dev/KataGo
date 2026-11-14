@@ -1,0 +1,7 @@
+#version 460
+#define PRECISION 32
+#define PRECISION_STORAGE 16
+#define VWM 1
+#define VWN 1
+
+#include "xgemm_batched.glsl"

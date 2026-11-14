@@ -1,0 +1,5 @@
+#version 460
+#define PRECISION 16
+#define PRECISION_STORAGE 16
+
+#include "winograd_input_transform_bnact.glsl"

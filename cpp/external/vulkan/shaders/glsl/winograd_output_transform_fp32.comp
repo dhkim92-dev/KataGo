@@ -1,0 +1,5 @@
+#version 460
+#define PRECISION 32
+#define PRECISION_STORAGE 32
+
+#include "winograd_output_transform.glsl"

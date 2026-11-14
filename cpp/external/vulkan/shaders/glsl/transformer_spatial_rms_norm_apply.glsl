@@ -1,0 +1,75 @@
+//Defines:
+//TILE_SIZE - workgroup size (power of two)
+
+#include "common.glsl"
+
+layout(constant_id = 3) const int APPLY_ELTS_PER_THREAD = 1;
+layout(constant_id = 4) const int USE_NHWC = 0;
+
+
+layout(push_constant) uniform SpatialRmsNormApplyParams{
+    int nSize;
+    int cSize;
+    int xySize;
+    float eps;
+    int channelsPadded;
+};
+
+layout(set=0, binding=0) buffer readonly input_buffer {
+    realstore d_input[];
+};
+
+layout(set=0, binding=1) buffer writeonly output_buffer {
+    realstore d_output[];
+};
+
+layout(set=0, binding=2) buffer readonly gamma_buffer {
+    float gamma[];
+};
+
+layout(set=0, binding=3) buffer readonly beta_buffer {
+    float beta[];
+};
+
+layout(set=0, binding=4) buffer readonly mask_buffer {
+    realstore mask[];
+};
+
+layout(set=0, binding=5) buffer readonly mask_sum_buffer {
+    float maskSum[];
+};
+
+layout(set=0, binding=6) buffer readonly sum_sq {
+    float sumSqBuf[];
+};
+
+
+// workgroup [groupSize, batchSize]
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+void main() {
+    const int n = int(gl_WorkGroupID.y);
+    if(n >= nSize) return;
+
+    float mSum = maskSum[n];
+    float denom = mSum * float(cSize);
+    float rms = inversesqrt(sumSqBuf[n] / denom + eps);
+
+    const int totalElems = cSize * xySize;
+    int idx = int(gl_WorkGroupID.x) * int(gl_WorkGroupSize.x) * APPLY_ELTS_PER_THREAD + int(gl_LocalInvocationID.x);
+
+    for ( int e = 0 ; e < APPLY_ELTS_PER_THREAD ; e++ ) {
+        if ( idx < totalElems ) {
+            int c = idx / xySize;
+            int xy = idx % xySize;
+            float maskVal = LOAD(mask, n * xySize + xy);
+            int inputIdx = USE_NHWC == 1
+                ? (n * xySize + xy) * channelsPadded + c
+                : (n * cSize + c) * xySize + xy;
+            int outputIdx = inputIdx;
+            float val = LOAD(d_input, inputIdx);
+            float result = (val * rms * gamma[c] + beta[c]) * maskVal;
+            STORE(d_output, outputIdx, floatToReal(result));
+        }
+        idx += int(gl_WorkGroupSize.x);
+    }
+}

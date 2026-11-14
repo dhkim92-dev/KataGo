@@ -1,0 +1,6 @@
+#version 460
+#define PRECISION 16
+#define PRECISION_STORAGE 16
+#define RMSNORM_SUBGROUP 1
+#define RESIDUAL_ADD 1
+#include "transformer_rms_norm.glsl"

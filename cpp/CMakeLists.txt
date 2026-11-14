@@ -582,7 +582,7 @@ endif()
 set(BUILD_DISTRIBUTED 0 CACHE BOOL "Build with http support for contributing to distributed training")
 set(USE_BACKEND CACHE STRING "Neural net backend")
 string(TOUPPER "${USE_BACKEND}" USE_BACKEND)
-set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN METAL ONNX ROCM)
+set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN METAL ONNX ROCM VULKAN)
 
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
@@ -843,6 +843,142 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
   set(NEURALNET_BACKEND_SOURCES
     neuralnet/eigenbackend.cpp
     )
+elseif(USE_BACKEND STREQUAL "VULKAN")
+  message(STATUS "-DUSE_BACKEND=VULKAN, using Vulkan backend.")
+  set(NEURALNET_BACKEND_SOURCES
+    neuralnet/vulkanbackend.cpp
+    neuralnet/vulkanhelpers.cpp
+    neuralnet/vulkanshaders.cpp
+    neuralnet/vulkancompute.cpp
+    neuralnet/vulkantuner.cpp
+  )
+
+  #--------------------------- VULKAN SHADER COMPILATION ---------------------------------------------------------------
+
+  # ==================== glslc-based GLSL (.comp) shader compilation ====================
+  # Find glslc (from Vulkan SDK or system)
+  if(WIN32)
+    find_program(GLSLC_EXECUTABLE glslc
+      HINTS
+        ENV VULKAN_SDK
+        "$ENV{VULKAN_SDK}/Bin"
+        "$ENV{VULKAN_SDK}/Bin32"
+        "C:/VulkanSDK/*/Bin"
+    )
+  elseif(APPLE)
+    find_program(GLSLC_EXECUTABLE glslc
+      HINTS
+        ENV VULKAN_SDK
+        "$ENV{VULKAN_SDK}/bin"
+        /usr/local/bin
+        /opt/homebrew/bin
+        /opt/local/bin
+    )
+  else()
+    find_program(GLSLC_EXECUTABLE glslc
+      HINTS
+        ENV VULKAN_SDK
+        "$ENV{VULKAN_SDK}/bin"
+        /usr/bin
+        /usr/local/bin
+    )
+  endif()
+
+  if(NOT GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc not found. Install Vulkan SDK or shaderc:\n"
+      "  - Windows/Linux/macOS: Install Vulkan SDK (https://vulkan.lunarg.com/sdk/home)\n"
+      "  - macOS: brew install shaderc\n"
+      "  - Linux: apt install glslc  or  dnf install glslc\n"
+      "Or set VULKAN_SDK environment variable.")
+  endif()
+  message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
+
+  # Shader source and output directories
+  set(VK_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/vulkan/shaders/glsl)
+  set(SPIRV_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/spirv)
+  set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+  file(MAKE_DIRECTORY ${SPIRV_OUT_DIR})
+  file(MAKE_DIRECTORY ${GENERATED_DIR})
+
+  # Collect GLSL compute shader files (.comp)
+  file(GLOB VK_GLSL_FILES CONFIGURE_DEPENDS "${VK_SHADER_SRC_DIR}/*.comp")
+  # Collect header dependencies for proper rebuilds
+  file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.glsl")
+
+  # List to collect all shader object libraries
+  set(SHADER_OBJECT_LIBS)
+
+  foreach(_comp_path IN LISTS VK_GLSL_FILES)
+    get_filename_component(_base ${_comp_path} NAME_WE)
+    set(_shader_variants ${_base})
+    if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc")
+      # One source, two compile-time feature sets. Keep NV capabilities out of KHR SPIR-V.
+      set(_shader_variants
+        transformer_scale_dot_product_cooperative_nhwc_pair_p32s16
+        transformer_scale_dot_product_cooperative_nhwc_register_p32s16)
+    endif()
+    foreach(_base IN LISTS _shader_variants)
+      set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
+      set(_out_c ${GENERATED_DIR}/${_base}.c)
+      set(_shader_target_env vulkan1.2)
+      set(_shader_target_spv spv1.5)
+      set(_shader_defines)
+      if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc_register_p32s16")
+        set(_shader_target_env vulkan1.3)
+        set(_shader_target_spv spv1.6)
+        list(APPEND _shader_defines -DATTENTION_USE_NV2=1)
+      elseif(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc_pair_p32s16")
+        list(APPEND _shader_defines -DATTENTION_USE_NV2=0)
+      endif()
+
+      # Step 1: Compile GLSL (.comp) to SPIR-V using glslc
+      # --target-env=vulkan1.2: Target Vulkan 1.2
+      # -fshader-stage=compute: Specify compute shader stage
+      # -I: Include path for common.h and functions.h
+      add_custom_command(
+        OUTPUT ${_out_spv}
+        COMMAND ${GLSLC_EXECUTABLE}
+          -O
+          --target-env=${_shader_target_env}
+          --target-spv=${_shader_target_spv}
+          -fshader-stage=compute
+          ${_shader_defines}
+          -I ${VK_SHADER_SRC_DIR}
+          -o ${_out_spv}
+          ${_comp_path}
+        DEPENDS ${_comp_path} ${VK_GLSL_INCLUDES}
+        COMMENT "Compiling GLSL to SPIR-V: ${_base}.comp -> ${_base}.spv"
+        VERBATIM
+      )
+
+      # Step 2: Convert SPIR-V binary to C source file
+      # This generates a C file with _binary_<name>_start[], _binary_<name>_end, _binary_<name>_size
+      add_custom_command(
+        OUTPUT ${_out_c}
+        COMMAND ${CMAKE_COMMAND}
+          -DSPV_FILE=${_out_spv}
+          -DOUT_FILE=${_out_c}
+          -DSHADER_NAME=${_base}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderSource.cmake
+        DEPENDS ${_out_spv}
+        COMMENT "Generating C source from SPIR-V: ${_base}.spv -> ${_base}.c"
+        VERBATIM
+      )
+
+      # Step 3: Create object library from the generated C source
+      set(_obj_lib spirv_${_base}_obj)
+      add_library(${_obj_lib} OBJECT ${_out_c})
+      set_target_properties(${_obj_lib} PROPERTIES LINKER_LANGUAGE C)
+
+      # Collect object library for linking
+      list(APPEND SHADER_OBJECT_LIBS ${_obj_lib})
+    endforeach()
+  endforeach()
+
+  # Store shader object libraries for linking with katago
+  set(VULKAN_SHADER_OBJECT_LIBS ${SHADER_OBJECT_LIBS})
+
 elseif(USE_BACKEND STREQUAL "ONNX")
   message(STATUS "-DUSE_BACKEND=ONNX, using ONNX Runtime backend.")
   set(NEURALNET_BACKEND_SOURCES
@@ -1664,6 +1800,30 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
       message(STATUS "Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
     endif()
   endif()
+elseif(USE_BACKEND STREQUAL "VULKAN")
+  if ( VULKAN_API_DEBUG STREQUAL "1" )
+    message(STATUS "VULKAN_API_DEBUG is set, enabling Vulkan API debug layers.")
+    target_compile_definitions(katago PRIVATE VULKAN_API_DEBUG)
+  endif()
+  if ( VK_BENCHMARK STREQUAL "1" )
+    message(STATUS "VK_BENCHMARK is set, enabling Vulkan shader timestamp benchmarking.")
+    target_compile_definitions(katago PRIVATE VK_BENCHMARK)
+  endif()
+  if ( VK_DUMP_BUFFER STREQUAL "1" )
+    message(STATUS "VK_DUMP_BUFFER is set, enabling Vulkan buffer dumping.")
+    target_compile_definitions(katago PRIVATE VK_DUMP_BUFFER)
+  endif()
+  target_compile_definitions(katago PRIVATE USE_VULKAN_BACKEND)
+  find_package(Vulkan REQUIRED)
+  ## Important! VMA required.
+  MESSAGE(STATUS "Found Vulkan SDK at ${Vulkan_INCLUDE_DIRS}")
+  set(VMA_DIR "${CMAKE_SOURCE_DIR}/external/vulkan")
+  target_include_directories(katago PRIVATE ${Vulkan_INCLUDE_DIRS} ${VMA_DIR})
+  target_link_libraries(katago Vulkan::Vulkan)
+  # Link shader object libraries containing embedded SPIR-V bytecode
+  foreach(_obj_lib IN LISTS VULKAN_SHADER_OBJECT_LIBS)
+    target_link_libraries(katago $<TARGET_OBJECTS:${_obj_lib}>)
+  endforeach()
 elseif(USE_BACKEND STREQUAL "ONNX")
   target_compile_definitions(katago PRIVATE USE_ONNX_BACKEND)
 
@@ -2046,6 +2206,11 @@ endif()
 
 target_include_directories(katago PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
+# Link Vulkan shader objects if building with Vulkan backend
+if(USE_BACKEND STREQUAL "VULKAN" AND DEFINED VULKAN_SHADER_OBJECTS)
+  target_sources(katago PRIVATE ${VULKAN_SHADER_OBJECTS})
+  message(STATUS "Linking Vulkan shader objects with katago")
+endif()
 # On Windows ROCm builds, clang compiles host code against MSVC-compatibility headers
 # that require Windows SDK ucrt/shared/um headers.
 if(WIN32 AND USE_BACKEND STREQUAL "ROCM")
@@ -2082,4 +2247,3 @@ if(WIN32 AND USE_BACKEND STREQUAL "ROCM")
     endif()
   endif()
 endif()
-

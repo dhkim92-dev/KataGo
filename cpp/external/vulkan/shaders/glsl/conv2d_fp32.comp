@@ -1,0 +1,5 @@
+#version 460
+#define PRECISON 32
+#define PRECISION_STORAGE 32
+
+#include "conv2d.glsl"

@@ -1,0 +1,268 @@
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Vulkan cooperative-matrix port of the OpenCL WMMA kernel. Matrices use the same layout as
+// the OpenCL kernel: A[k*M+m] and C[n*M+m] are column-major, while B[k*N+n] is
+// row-major.
+#ifndef VWM
+#define VWM 4
+#endif
+#ifndef VWN
+#define VWN 4
+#endif
+
+#ifndef ACC_TYPE
+#define ACC_TYPE 16
+#endif
+#if ACC_TYPE == 16
+#define acc_dtype float16_t
+#elif ACC_TYPE == 32
+#define acc_dtype float
+#else
+#error "ACC_TYPE must be 16 or 32"
+#endif
+
+#if VWM == 1
+#define realstoreM float16_t
+#elif VWM == 2
+#define realstoreM f16vec2
+#elif VWM == 4
+#define realstoreM f16vec4
+#else
+#error "VWM must be 1, 2, or 4"
+#endif
+
+#if VWN == 1
+#define realstoreN float16_t
+#elif VWN == 2
+#define realstoreN f16vec2
+#elif VWN == 4
+#define realstoreN f16vec4
+#else
+#error "VWN must be 1, 2, or 4"
+#endif
+
+#ifndef SA
+#define SA 0
+#endif
+#ifndef SB
+#define SB 0
+#endif
+
+// IDs 0, 1 and 2 are reserved for local_size_*_id.  Keep the remaining
+// fields in this order: the host fills them through specialization info.
+layout(constant_id = 3) const int MSize = 16;
+layout(constant_id = 4) const int NSize = 16;
+layout(constant_id = 5) const int KSize = 16;
+layout(constant_id = 6) const int MWG = 32;
+layout(constant_id = 7) const int NWG = 32;
+layout(constant_id = 8) const int KWG = 32;
+layout(constant_id = 9) const int MWAVE = 32;
+layout(constant_id = 10) const int NWAVE = 32;
+
+#define MWI (MWG / MWAVE)
+#define NWI (NWG / NWAVE)
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+
+// VWM/VWN describe the width of the explicit global-to-shared copies. Direct
+// cooperative-matrix accesses, like the OpenCL WMMA loads, address scalar FP16
+// elements and use scalar-element strides.
+layout(set = 0, binding = 0) readonly buffer MatA {
+#if SA == 1
+  realstoreM agm[];
+#else
+  float16_t agm[];
+#endif
+};
+
+layout(set = 0, binding = 1) readonly buffer MatB {
+#if SB == 1
+  realstoreN bgm[];
+#else
+  float16_t bgm[];
+#endif
+};
+
+layout(set = 0, binding = 2) writeonly buffer MatC {
+  float16_t cgm[];
+};
+
+layout(push_constant) uniform HGemmCooperativeMatrixParams {
+  int kSizeM;
+  int kSizeN;
+  int kSizeK;
+};
+
+#if SA == 1
+// The leading uvec4 gives the cooperative-matrix pointee a 16-byte-aligned
+// address, matching the explicit alignment on the OpenCL local tile.
+struct ATileStorage {
+  uvec4 alignment;
+  realstoreM values[(MWG * KWG) / VWM];
+};
+shared ATileStorage aTileStorage;
+#define alm aTileStorage.values
+#endif
+#if SB == 1
+// See ATileStorage: cooperative matrix rows/columns require up to 16-byte
+// pointer and stride alignment.
+struct BTileStorage {
+  uvec4 alignment;
+  realstoreN values[(NWG * KWG) / VWN];
+};
+shared BTileStorage bTileStorage;
+#define blm bTileStorage.values
+#endif
+#if ACC_TYPE == 32
+// A float accumulator occupies twice as many bytes as the FP16 output. Store
+// it to correctly-sized workgroup memory, then explicitly convert to FP16.
+struct CTileStorage {
+  uvec4 alignment;
+  float values[MWG * NWG];
+};
+shared CTileStorage cTileStorage;
+#define cTile cTileStorage.values
+#endif
+
+void loadSharedTiles(int kwg, int baseA, int baseB, int groupMBase, int groupNBase) {
+  const int tid = int(gl_LocalInvocationIndex);
+  const int numThreads = int(gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z);
+
+#if SA == 1
+  const int aVectorCount = (MWG * KWG) / VWM;
+  for(int i = tid; i < aVectorCount; i += numThreads) {
+    const int m = i % (MWG / VWM);
+    const int k = i / (MWG / VWM);
+    alm[i] = agm[(baseA + (kwg + k) * kSizeM + groupMBase + m * VWM) / VWM];
+  }
+#endif
+#if SB == 1
+  const int bVectorCount = (NWG * KWG) / VWN;
+  for(int i = tid; i < bVectorCount; i += numThreads) {
+    const int n = i % (NWG / VWN);
+    const int k = i / (NWG / VWN);
+    blm[i] = bgm[(baseB + (kwg + k) * kSizeN + groupNBase + n * VWN) / VWN];
+  }
+#endif
+
+#if SA == 1 || SB == 1
+  barrier();
+#endif
+}
+
+void main() {
+  const int groupM = int(gl_WorkGroupID.x);
+  const int groupN = int(gl_WorkGroupID.y);
+  const int batch = int(gl_WorkGroupID.z);
+  const int subgroupCountM = MWAVE / MSize;
+  const int subgroupLinear = int(gl_SubgroupID);
+  const int subgroupM = subgroupLinear % subgroupCountM;
+  const int subgroupN = subgroupLinear / subgroupCountM;
+  const int groupMBase = groupM * MWG;
+  const int groupNBase = groupN * NWG;
+  const int baseA = batch * kSizeM * kSizeK;
+  const int baseB = batch * kSizeN * kSizeK;
+  const int baseC = batch * kSizeM * kSizeN;
+
+  coopmat<float16_t, gl_ScopeSubgroup, MSize, KSize, gl_MatrixUseA> aFrag[MWI];
+  coopmat<float16_t, gl_ScopeSubgroup, KSize, NSize, gl_MatrixUseB> bFrag;
+  coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator> cFrag[NWI][MWI];
+
+  for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
+    for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
+      cFrag[bWaveId][aWaveId] =
+        coopmat<acc_dtype, gl_ScopeSubgroup, MSize, NSize, gl_MatrixUseAccumulator>(acc_dtype(0.0));
+    }
+  }
+
+  for(int kwg = 0; kwg < kSizeK; kwg += KWG) {
+    loadSharedTiles(kwg, baseA, baseB, groupMBase, groupNBase);
+
+    for(int kOffset = 0; kOffset < KWG; kOffset += KSize) {
+      for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
+        const int aOffset = aWaveId * MWAVE + subgroupM * MSize;
+#if SA == 1
+        const int aSharedIndex = (kOffset * MWG + aOffset) / VWM;
+        coopMatLoad(
+          aFrag[aWaveId], alm, aSharedIndex, MWG / VWM,
+          gl_CooperativeMatrixLayoutColumnMajor
+        );
+#else
+        coopMatLoad(
+          aFrag[aWaveId], agm,
+          baseA + (kwg + kOffset) * kSizeM + groupMBase + aOffset,
+          kSizeM,
+          gl_CooperativeMatrixLayoutColumnMajor
+        );
+#endif
+      }
+
+      for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
+        const int bOffset = bWaveId * NWAVE + subgroupN * NSize;
+#if SB == 1
+        const int bSharedIndex = (kOffset * NWG + bOffset) / VWN;
+        coopMatLoad(
+          bFrag, blm, bSharedIndex, NWG / VWN,
+          gl_CooperativeMatrixLayoutRowMajor
+        );
+#else
+        const int bIndex = groupNBase + bOffset;
+        coopMatLoad(
+          bFrag, bgm,
+          baseB + (kwg + kOffset) * kSizeN + bIndex,
+          kSizeN,
+          gl_CooperativeMatrixLayoutRowMajor
+        );
+#endif
+        for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
+          cFrag[bWaveId][aWaveId] =
+            coopMatMulAdd(aFrag[aWaveId], bFrag, cFrag[bWaveId][aWaveId]);
+        }
+      }
+    }
+
+#if SA == 1 || SB == 1
+    barrier();
+#endif
+  }
+
+  for(int bWaveId = 0; bWaveId < NWI; bWaveId++) {
+    const int bOffset = bWaveId * NWAVE + subgroupN * NSize;
+    for(int aWaveId = 0; aWaveId < MWI; aWaveId++) {
+      const int aOffset = aWaveId * MWAVE + subgroupM * MSize;
+      const int cIndex = baseC + (groupNBase + bOffset) * kSizeM + groupMBase + aOffset;
+#if ACC_TYPE == 16
+      coopMatStore(
+        cFrag[bWaveId][aWaveId], cgm, cIndex, kSizeM,
+        gl_CooperativeMatrixLayoutColumnMajor
+      );
+#else
+      coopMatStore(
+        cFrag[bWaveId][aWaveId], cTile,
+        bOffset * MWG + aOffset, MWG,
+        gl_CooperativeMatrixLayoutColumnMajor
+      );
+#endif
+    }
+  }
+
+#if ACC_TYPE == 32
+  barrier();
+  const int tid = int(gl_LocalInvocationIndex);
+  const int numThreads = int(gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z);
+  const int tileVectorCount = (MWG * NWG) / VWM;
+  for(int tileVector = tid; tileVector < tileVectorCount; tileVector += numThreads) {
+    const int tileBase = tileVector * VWM;
+    for(int lane = 0; lane < VWM; lane++) {
+      const int tileIndex = tileBase + lane;
+      const int m = tileIndex % MWG;
+      const int n = tileIndex / MWG;
+      cgm[baseC + (groupNBase + n) * kSizeM + groupMBase + m] = float16_t(cTile[tileIndex]);
+    }
+  }
+#endif
+}

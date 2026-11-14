@@ -1,0 +1,3 @@
+#version 460
+#define ACC_TYPE 32
+#include "hgemm_cooperative_matrix_nhwc.glsl"
