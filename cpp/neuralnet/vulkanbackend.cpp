@@ -395,8 +395,18 @@ struct ComputeContext {
       }
 
       VkInstance instance = vk_helper::createVulkanInstance();
+      std::vector<VulkanDevice *> vulkanDevices;
+      bool initialized = false;
+      Global::CustomScopeGuard cleanup([&]() {
+        if(initialized)
+          return;
+        for(auto& entry: pipelinesPerDev)
+          delete entry.second;
+        for(VulkanDevice* device: vulkanDevices)
+          delete device;
+        vkDestroyInstance(instance, nullptr);
+      });
       std::vector<VulkanDeviceInfo> allDeviceInfos = vk_helper::enumerateVulkanDevices(instance, logger);
-      std::vector<VulkanDevice *> vulkanDevices = {};
 
       if ( gpuIdxsToUse.size() == 1 && gpuIdxsToUse[0] == UINT32_MAX ) {
         if ( logger ) {
@@ -426,23 +436,6 @@ struct ComputeContext {
 
         if ( usingFP16Mode == enabled_t::True && (!supportsFP16Storage || !supportsFP16Compute) ) {
           throw StringError("Requested FP16 mode but device " + deviceInfo.deviceName + " does not support FP16 storage and compute");
-        }
-
-        // The tuner probes hardware FP16 capability independently of whether
-        // this run will use FP16. Actual use is controlled by shouldUseFP16*.
-        if ( supportsFP16Compute ) {
-          requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-        }
-        if (
-          supportsFP16Storage &&
-          VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
-          VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
-        ) {
-          requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
-        }
-
-        if (deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE) {
-          requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
         }
 
         VulkanDevice* vulkanDevice = vk_helper::createVulkanDevice(
@@ -534,6 +527,7 @@ struct ComputeContext {
         vulkanDevices,
         logger
       );
+      initialized = true;
   }
 
   ~ComputeContext() {
@@ -5689,6 +5683,7 @@ void NeuralNet::globalCleanup() {
 
 void NeuralNet::printDevices() {
   VkInstance inst = vk_helper::createVulkanInstance();
+  Global::CustomScopeGuard cleanup([&]() { vkDestroyInstance(inst, nullptr); });
   auto infos = vk_helper::enumerateVulkanDevices(inst, nullptr);
 
   for ( const auto& info : infos ) {

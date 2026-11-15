@@ -6065,7 +6065,7 @@ namespace {
         VkResult result = VK_SUCCESS;
         VkCommandPoolCreateInfo commandPoolInfo = {};
         commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        commandPoolInfo.queueFamilyIndex = 0;
+        commandPoolInfo.queueFamilyIndex = device->queueFamilyIndex;
         commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         result = vkCreateCommandPool(device->device, &commandPoolInfo, nullptr, &commandPool);
         if(result != VK_SUCCESS)
@@ -9842,7 +9842,8 @@ VulkanTuneParams VulkanTuner::loadOrCreate(
           deviceInfo, loaded.transformerCooperativeMatrixNCHW,
           modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
         )) ||
-      (loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC &&
+      ((loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC ||
+        loaded.transformerCooperativeMatrixNHWC.COOP_USE_NV2 == 1) &&
         !isValidCooperativeMatrixConfig(
           deviceInfo, loaded.transformerCooperativeMatrixNHWC,
           modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim, true
@@ -9908,7 +9909,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
             device->info, loaded.transformerCooperativeMatrixNCHW,
             modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim
           )) ||
-        (loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC &&
+        ((loaded.vulkan.shouldUseTransformerCooperativeMatrixNHWC ||
+          loaded.transformerCooperativeMatrixNHWC.COOP_USE_NV2 == 1) &&
           !isValidCooperativeMatrixConfig(
             device->info, loaded.transformerCooperativeMatrixNHWC,
             modelInfo.transformerHeadDim, modelInfo.transformerVHeadDim, true

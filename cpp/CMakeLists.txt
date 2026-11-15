@@ -906,6 +906,28 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
   # Collect header dependencies for proper rebuilds
   file(GLOB VK_GLSL_INCLUDES "${VK_SHADER_SRC_DIR}/*.glsl")
 
+  # NV2 is optional, and older glslc versions may only support the KHR path.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${VK_GLSL_INCLUDES}
+    "${VK_SHADER_SRC_DIR}/transformer_scale_dot_product_cooperative_nhwc.comp")
+  execute_process(
+    COMMAND ${GLSLC_EXECUTABLE}
+      -O --target-env=vulkan1.3 --target-spv=spv1.6 -fshader-stage=compute
+      -DATTENTION_USE_NV2=1 -I ${VK_SHADER_SRC_DIR}
+      -o "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/vulkan-nv2-probe.spv"
+      "${VK_SHADER_SRC_DIR}/transformer_scale_dot_product_cooperative_nhwc.comp"
+    RESULT_VARIABLE _nv2_compile_result
+    OUTPUT_VARIABLE _nv2_compile_stdout
+    ERROR_VARIABLE _nv2_compile_stderr
+  )
+  set(VULKAN_HAS_NV2_SHADER OFF)
+  if(_nv2_compile_result EQUAL 0)
+    set(VULKAN_HAS_NV2_SHADER ON)
+    message(STATUS "glslc supports NV2 register Attention")
+  else()
+    message(WARNING "glslc cannot compile NV2 register Attention; using the KHR path.\n"
+      "Compiler: ${GLSLC_EXECUTABLE}\n${_nv2_compile_stdout}${_nv2_compile_stderr}")
+  endif()
+
   # List to collect all shader object libraries
   set(SHADER_OBJECT_LIBS)
 
@@ -915,8 +937,10 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc")
       # One source, two compile-time feature sets. Keep NV capabilities out of KHR SPIR-V.
       set(_shader_variants
-        transformer_scale_dot_product_cooperative_nhwc_pair_p32s16
-        transformer_scale_dot_product_cooperative_nhwc_register_p32s16)
+        transformer_scale_dot_product_cooperative_nhwc_pair_p32s16)
+      if(VULKAN_HAS_NV2_SHADER)
+        list(APPEND _shader_variants transformer_scale_dot_product_cooperative_nhwc_register_p32s16)
+      endif()
     endif()
     foreach(_base IN LISTS _shader_variants)
       set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
@@ -1814,6 +1838,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     target_compile_definitions(katago PRIVATE VK_DUMP_BUFFER)
   endif()
   target_compile_definitions(katago PRIVATE USE_VULKAN_BACKEND)
+  target_compile_definitions(katago PRIVATE VULKAN_HAS_NV2_SHADER=$<BOOL:${VULKAN_HAS_NV2_SHADER}>)
   find_package(Vulkan REQUIRED)
   ## Important! VMA required.
   MESSAGE(STATUS "Found Vulkan SDK at ${Vulkan_INCLUDE_DIRS}")

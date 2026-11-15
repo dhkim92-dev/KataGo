@@ -23,6 +23,8 @@ struct VulkanDeviceInfo {
   std::string vendor;
   VkPhysicalDeviceType deviceType;
   std::string deviceName;
+  uint32_t apiVersion = VK_API_VERSION_1_0;
+  std::vector<VkExtensionProperties> extensions;
 
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memoryProperties;
@@ -46,12 +48,13 @@ struct VulkanDeviceInfo {
 
 struct VulkanDevice {
   VulkanDeviceInfo info;
-  VkDevice device;
-  VkQueue queue;
+  VkDevice device = VK_NULL_HANDLE;
+  VkQueue queue = VK_NULL_HANDLE;
+  uint32_t queueFamilyIndex = 0;
   VkQueue dummyQueue = VK_NULL_HANDLE;
-  VkDescriptorPool descriptorPool;
-  VkCommandPool commandPool;
-  VmaAllocator allocator;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+  VkCommandPool commandPool = VK_NULL_HANDLE;
+  VmaAllocator allocator = VK_NULL_HANDLE;
   // vkQueueSubmit is externally synchronized for each VkQueue handle. Keep
   // submits serialized when the tuner and dummy thread share a device.
   mutable std::mutex queueSubmitMutex;
