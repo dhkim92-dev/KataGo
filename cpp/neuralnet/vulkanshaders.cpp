@@ -898,7 +898,7 @@ namespace vk_shader {
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
-      if(tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
+      if(supportsNHWC && tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformerCooperativeMatrixNCHW, qHeadDim, vHeadDim, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
       }
       if(buildTransformerAttentionNHWC) {
