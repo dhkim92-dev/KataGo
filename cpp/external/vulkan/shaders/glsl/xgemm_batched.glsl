@@ -3,6 +3,7 @@
  * Vulkan API: 1.1
  * SPIR-V: 1.3
  * Multiply batched matrices.
+ * Ported from the CLBlast version to GLSL.
  */
 #ifndef VWM
 #define VWM 4

@@ -3,6 +3,7 @@
  * Vulkan API: 1.1
  * SPIR-V: 1.3
  * Multiply transposed batched matrices directly.
+ * Ported from the CLBlast version to GLSL.
  */
 layout(constant_id = 3) const int _WGD = 8;
 layout(constant_id = 4) const int _MDIMCD = 16;

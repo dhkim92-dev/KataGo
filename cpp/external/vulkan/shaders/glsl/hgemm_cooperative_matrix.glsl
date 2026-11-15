@@ -3,6 +3,7 @@
  * Vulkan API: 1.1
  * SPIR-V: 1.3
  * Multiply matrices with KHR cooperative matrices.
+ * Ported from the CLBlast version to GLSL.
  */
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : require

@@ -3,6 +3,7 @@
  * Vulkan API: 1.1
  * SPIR-V: 1.3
  * Define direct matrix multiplication helpers.
+ * Ported from the CLBlast version to GLSL.
  */
 #include "common.glsl"
 
