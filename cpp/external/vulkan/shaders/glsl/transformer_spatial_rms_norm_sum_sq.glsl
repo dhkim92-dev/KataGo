@@ -1,6 +1,9 @@
-//Defines:
-//TILE_SIZE - workgroup size (power of two)
-
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Accumulate partial spatial squared sums.
+ */
 #include "common.glsl"
 
 layout(constant_id = 3) const int TILE_SIZE = 32;

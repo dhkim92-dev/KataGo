@@ -354,6 +354,7 @@ namespace {
   ) {
 #if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_subgroup_size_control)
     if(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups != VK_TRUE ||
+       (deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) == 0 ||
        (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0)
       return false;
     vector<VkCooperativeMatrixPropertiesKHR> properties;
@@ -488,6 +489,7 @@ VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) 
 #if defined(VK_EXT_subgroup_size_control)
   params.canUseSubgroup =
     (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+    (deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
 #else
   params.canUseSubgroup = false;

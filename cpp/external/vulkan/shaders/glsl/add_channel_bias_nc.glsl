@@ -1,6 +1,9 @@
-// @author dhkim92.dev@gmail.com
-// Add Channel Bias NC - GLSL compute shader
-
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Add bias and activation to NC tensors.
+ */
 #include "common.glsl"
 #include "functions.glsl"
 

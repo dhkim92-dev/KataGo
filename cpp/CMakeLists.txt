@@ -945,8 +945,8 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
     foreach(_base IN LISTS _shader_variants)
       set(_out_spv ${SPIRV_OUT_DIR}/${_base}.spv)
       set(_out_c ${GENERATED_DIR}/${_base}.c)
-      set(_shader_target_env vulkan1.2)
-      set(_shader_target_spv spv1.5)
+      set(_shader_target_env vulkan1.1)
+      set(_shader_target_spv spv1.3)
       set(_shader_defines)
       if(_base STREQUAL "transformer_scale_dot_product_cooperative_nhwc_register_p32s16")
         set(_shader_target_env vulkan1.3)
@@ -957,7 +957,7 @@ elseif(USE_BACKEND STREQUAL "VULKAN")
       endif()
 
       # Step 1: Compile GLSL (.comp) to SPIR-V using glslc
-      # --target-env=vulkan1.2: Target Vulkan 1.2
+      # Baseline and per-feature targets are documented in external/vulkan/COMPILE.md.
       # -fshader-stage=compute: Specify compute shader stage
       # -I: Include path for common.h and functions.h
       add_custom_command(

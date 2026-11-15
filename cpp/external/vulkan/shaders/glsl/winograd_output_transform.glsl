@@ -1,15 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* @brief Winograd Output Recover Shader
-* @details This shader performs A * input * A^T to recover the output from Winograd domain to spatial domain.
-*          x-dimension means number of tiles in width axis
-*          y-dimension means number of tiles in height axis
-*          z-dimension means batch * output_channels
-*          each thread 
-* _input = [ InTileSizeY, InTileSizeX, OC, Batch, NumTileY, NumTIleX ] last two dimensions are padded
-* _output = [ N, C, H, W ] 
-*/
-
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Transform Winograd results into spatial outputs.
+ */
 #include "common.glsl"
 
 layout(constant_id=3) const int INTILE_YSIZE = 4;

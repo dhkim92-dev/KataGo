@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Define precision-dependent direct GEMM vector types.
+ */
 #ifndef XGEMM_DIRECT_TYPES_GLSL_H
 #define XGEMM_DIRECT_TYPES_GLSL_H
 

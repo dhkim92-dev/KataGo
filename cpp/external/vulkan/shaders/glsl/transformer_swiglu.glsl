@@ -1,4 +1,9 @@
-// The packed FFN path binds the main and gate descriptors to the same input buffer.
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Apply the SwiGLU activation.
+ */
 #extension GL_EXT_spirv_intrinsics : require
 #define SPV_DECORATION_ALIASED 20
 

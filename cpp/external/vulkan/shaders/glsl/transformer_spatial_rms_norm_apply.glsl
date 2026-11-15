@@ -1,6 +1,9 @@
-//Defines:
-//TILE_SIZE - workgroup size (power of two)
-
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Apply spatial RMS normalization from reduced sums.
+ */
 #include "common.glsl"
 
 layout(constant_id = 3) const int APPLY_ELTS_PER_THREAD = 1;

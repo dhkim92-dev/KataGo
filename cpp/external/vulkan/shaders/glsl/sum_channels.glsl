@@ -1,14 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* @brief Sum Channels NCHW FP32 compute shader
-* Sums all spatial elements for each (batch, channel) pair
-* Input: N, C, HW (NCHW format)
-* Output: N, C (sum over spatial dimensions)
-* SpecializationInfo
-*  - XYSTRIDE
-*  - CHANNELSTRIDE
-*  - LOCALSIZE_TOTAL
-*/
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Sum spatial elements for each batch and channel.
+ */
 #include "common.glsl"
 
 layout(constant_id = 3) const int XYSTRIDE = 32;

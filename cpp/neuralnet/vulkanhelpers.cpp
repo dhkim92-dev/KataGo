@@ -285,8 +285,8 @@ std::string vk_helper::vkPhysicalDeviceTypeToString(VkPhysicalDeviceType type) {
 VkInstance vk_helper::createVulkanInstance() {
   VkInstance instance = VK_NULL_HANDLE;
   const uint32_t apiVersion = getVulkanInstanceVersion();
-  if(apiVersion < VK_API_VERSION_1_2)
-    throw StringError("The Vulkan backend requires Vulkan 1.2 or newer");
+  if(apiVersion < VK_API_VERSION_1_1)
+    throw StringError("The Vulkan backend requires Vulkan 1.1 or newer");
   const auto layers = enumerateVulkanProperties<VkLayerProperties>([](uint32_t* count, VkLayerProperties* data) {
     return vkEnumerateInstanceLayerProperties(count, data);
   });
@@ -682,14 +682,15 @@ VulkanDevice* vk_helper::createVulkanDevice(
     logger->write("Creating Vulkan Logical Device for " + deviceInfo.deviceName);
   }
   VkPhysicalDevice physicalDevice = deviceInfo.physicalDevice;
-  if(deviceInfo.apiVersion < VK_API_VERSION_1_2)
-    throw StringError("Device " + deviceInfo.deviceName + " does not support the Vulkan 1.2 shader target");
+  if(deviceInfo.apiVersion < VK_API_VERSION_1_1)
+    throw StringError("Device " + deviceInfo.deviceName + " does not support the Vulkan 1.1 shader target");
+  const bool core12 = deviceInfo.apiVersion >= VK_API_VERSION_1_2;
   const bool core13 = deviceInfo.apiVersion >= VK_MAKE_VERSION(1, 3, 0);
   // Existing callers may request names for features promoted into core Vulkan.
-  requiredExtensions.erase(std::remove_if(requiredExtensions.begin(), requiredExtensions.end(), [core13](const char* extension) {
+  requiredExtensions.erase(std::remove_if(requiredExtensions.begin(), requiredExtensions.end(), [core12, core13](const char* extension) {
     const std::string name(extension);
-    return name == VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME ||
-      name == VK_KHR_16BIT_STORAGE_EXTENSION_NAME || name == VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME ||
+    return name == VK_KHR_16BIT_STORAGE_EXTENSION_NAME ||
+      (core12 && (name == VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME || name == VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME)) ||
       (core13 && (name == "VK_EXT_subgroup_size_control" || name == "VK_KHR_maintenance4"));
   }), requiredExtensions.end());
   auto enableExtension = [&requiredExtensions, &deviceInfo](const char* name) {
@@ -706,11 +707,23 @@ VulkanDevice* vk_helper::createVulkanDevice(
   }
   if(hasDeviceExtension(deviceInfo, "VK_KHR_portability_subset"))
     enableExtension("VK_KHR_portability_subset");
+  const bool shaderFloat16Available = core12 ||
+    hasDeviceExtension(deviceInfo, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+  const bool enableShaderFloat16 = shaderFloat16Available &&
+    deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
+  if(enableShaderFloat16 && !core12)
+    enableExtension(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+  const bool vulkanMemoryModelAvailable = core12 ||
+    hasDeviceExtension(deviceInfo, VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+  const bool enableVulkanMemoryModel = vulkanMemoryModelAvailable &&
+    deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE;
+  if(enableVulkanMemoryModel && !core12)
+    enableExtension(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
 #if defined(VK_KHR_cooperative_matrix)
   const bool enableCooperativeMatrix =
     hasDeviceExtension(deviceInfo, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) &&
     deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE &&
-    deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE;
+    enableVulkanMemoryModel;
   if(enableCooperativeMatrix)
     enableExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 #endif
@@ -767,10 +780,10 @@ VulkanDevice* vk_helper::createVulkanDevice(
   storage16BitFeatures.uniformAndStorageBuffer16BitAccess = deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess;
   VkPhysicalDeviceShaderFloat16Int8Features f16Feat = {};
   f16Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
-  f16Feat.shaderFloat16 = deviceInfo.shaderFloat16Int8Features.shaderFloat16;
+  f16Feat.shaderFloat16 = enableShaderFloat16 ? VK_TRUE : VK_FALSE;
   VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
   vulkanMemoryModelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
-  vulkanMemoryModelFeatures.vulkanMemoryModel = deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel;
+  vulkanMemoryModelFeatures.vulkanMemoryModel = enableVulkanMemoryModel ? VK_TRUE : VK_FALSE;
 #if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmFeatures = {};
   cmFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
@@ -805,8 +818,10 @@ VulkanDevice* vk_helper::createVulkanDevice(
     requestedFeatures.pNext = &feature;
   };
   addFeature(storage16BitFeatures);
-  addFeature(f16Feat);
-  addFeature(vulkanMemoryModelFeatures);
+  if(core12 || enableShaderFloat16)
+    addFeature(f16Feat);
+  if(core12 || enableVulkanMemoryModel)
+    addFeature(vulkanMemoryModelFeatures);
 #if defined(VK_KHR_cooperative_matrix)
   if(enableCooperativeMatrix)
     addFeature(cmFeatures);

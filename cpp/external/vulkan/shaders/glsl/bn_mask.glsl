@@ -1,13 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* @brief BatchNorm (Mask) + Activation compute shader
-* Format: NCHW or NHWC, selected by USE_NHWC specialization
-* Thread mapping optimized for memory coalescing:
-*   x -> spatial
-*   y -> channel
-*   z -> batch
-*/
-
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Apply batch normalization, activation and masking.
+ */
 #include "common.glsl"
 #include "functions.glsl"
 

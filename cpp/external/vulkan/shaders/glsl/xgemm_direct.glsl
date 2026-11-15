@@ -1,9 +1,9 @@
 /**
-* @author: dhkim92.dev
-* This code is based on clblast project. and translate version for GLSL compute shader(vulkan)
-* Ignore complex number.
-* Apache License
-*/
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Define direct matrix multiplication helpers.
+ */
 #include "common.glsl"
 
 #ifndef WGD 

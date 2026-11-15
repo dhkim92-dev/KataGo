@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Compute tiled scaled dot-product attention.
+ */
 #include "common.glsl"
 #include "transformer_rope.glsl"
 

@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Define rotary position embedding helpers.
+ */
 #ifndef TRANSFORMER_ROPE_GLSL
 #define TRANSFORMER_ROPE_GLSL
 

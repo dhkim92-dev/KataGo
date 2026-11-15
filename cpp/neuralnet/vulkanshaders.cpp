@@ -7,6 +7,7 @@
 #include "../neuralnet/vulkanshaders.h"
 
 #include <iostream>
+#include <cstring>
 
 using namespace vk_shader;
 using namespace vk_shader::push;
@@ -636,6 +637,8 @@ namespace vk_shader {
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
       shaderModuleFields.push_back(shader.module);
+    const uint32_t maxSpirvVersion = deviceInfo.apiVersion >= VK_MAKE_VERSION(1, 3, 0) ? 0x00010600u :
+      deviceInfo.apiVersion >= VK_API_VERSION_1_2 ? 0x00010500u : 0x00010300u;
     for(const ShaderSource& shader: shaders) {
       if(shader.requiresFP16 &&
          (deviceInfo.shaderFloat16Int8Features.shaderFloat16 != VK_TRUE ||
@@ -644,7 +647,9 @@ namespace vk_shader {
       if(shader.requiresCooperativeMatrix) {
 #if defined(VK_KHR_cooperative_matrix)
         if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
-           deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel != VK_TRUE)
+           deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel != VK_TRUE ||
+           (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0 ||
+           (deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) == 0)
           continue;
 #else
         continue;
@@ -662,8 +667,14 @@ namespace vk_shader {
          ((deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) == 0 ||
           (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0))
         continue;
-      if(shader.size % 4 != 0)
+      if(shader.size < 5 * sizeof(uint32_t) || shader.size % sizeof(uint32_t) != 0)
         return VK_ERROR_INITIALIZATION_FAILED;
+      uint32_t header[2];
+      std::memcpy(header, shader.bytes, sizeof(header));
+      if(header[0] != 0x07230203u)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      if(header[1] > maxSpirvVersion)
+        continue;
       const std::vector<unsigned char> spirvBytes(shader.bytes, shader.bytes + shader.size);
       VkResult result = VK_ERROR_UNKNOWN;
       *shader.module = vk_helper::createShaderModuleFromSPIRVBytes(device, spirvBytes, &result);

@@ -1,7 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* transform input to winograd domain
-*/
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Fuse normalization and activation with the Winograd input transform.
+ */
 #include "common.glsl"
 
 layout(constant_id = 3) const int INTILE_YSIZE = 4;
