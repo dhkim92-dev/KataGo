@@ -33,7 +33,11 @@ namespace {
       VkResult res = enumerateVersion(&version);
       CHECK_VK(res);
     }
+#if defined(VK_VERSION_1_3)
     return std::min(version, uint32_t(VK_API_VERSION_1_3));
+#else
+    return std::min(version, uint32_t(VK_API_VERSION_1_2));
+#endif
   }
 
   template<typename Property, typename Enumerate>
@@ -360,45 +364,72 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
       return vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, count, data);
     });
     const bool core12 = deviceInfo.apiVersion >= VK_API_VERSION_1_2;
-    const bool core13 = deviceInfo.apiVersion >= VK_API_VERSION_1_3;
+    const bool core13 = deviceInfo.apiVersion >= VK_MAKE_VERSION(1, 3, 0);
+#if defined(VK_KHR_cooperative_matrix)
     const bool hasCooperativeMatrix = hasDeviceExtension(deviceInfo, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     const bool hasMatrix2 = core13 && hasCooperativeMatrix &&
       hasDeviceExtension(deviceInfo, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     const bool hasSubgroupSizeControl = core13 || hasDeviceExtension(deviceInfo, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+#endif
+#if defined(VK_KHR_maintenance4)
     const bool hasMaintenance4 = core13 || hasDeviceExtension(deviceInfo, VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     deviceInfo.cooperativeMatrixPropertiesFn = hasCooperativeMatrix ?
       reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
         vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR")
       ) : nullptr;
+#endif
 
     // Get device properties
     VkPhysicalDeviceProperties2 properties2 = {};
     properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     VkPhysicalDeviceSubgroupProperties subgroupProperties = {};
     subgroupProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-    VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeProperties = {};
-    subgroupSizeProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+#if defined(VK_EXT_subgroup_size_control)
+    VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroupSizeProperties = {};
+    subgroupSizeProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperativeMatrixProperties = {};
     cooperativeMatrixProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     VkPhysicalDeviceCooperativeMatrix2PropertiesNV matrix2Properties = {};
     matrix2Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_PROPERTIES_NV;
+#endif
     auto addProperty = [&properties2](auto& property) {
       property.pNext = properties2.pNext;
       properties2.pNext = &property;
     };
     if(deviceInfo.apiVersion >= VK_API_VERSION_1_1)
       addProperty(subgroupProperties);
+#if defined(VK_EXT_subgroup_size_control)
     if(hasSubgroupSizeControl)
       addProperty(subgroupSizeProperties);
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     if(hasCooperativeMatrix)
       addProperty(cooperativeMatrixProperties);
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     if(hasMatrix2)
       addProperty(matrix2Properties);
+#endif
     vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);
     deviceInfo.properties = properties2.properties;
     deviceInfo.subgroupProperties = subgroupProperties;
+#if defined(VK_EXT_subgroup_size_control)
     deviceInfo.subgroupSizeProperties = subgroupSizeProperties;
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     deviceInfo.cooopertavieMatrixProperties = cooperativeMatrixProperties;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     deviceInfo.cooperativeMatrix2Properties = matrix2Properties;
     auto flexibleProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV>(
       vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV")
@@ -415,6 +446,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
           deviceInfo.flexibleMatrixProperties.resize(count);
       }
     }
+#endif
     deviceInfo.deviceType = deviceInfo.properties.deviceType;
 
     // Get device name
@@ -434,17 +466,33 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     VkPhysicalDevice16BitStorageFeatures storage16BitFeatures = {};
     VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features = {};
     VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
+#if defined(VK_KHR_cooperative_matrix)
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperativeMatrix2Features = {};
+#endif
+#if defined(VK_KHR_maintenance4)
     VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features = {};
-    VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures = {};
+#endif
+#if defined(VK_EXT_subgroup_size_control)
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroupSizeControlFeatures = {};
+#endif
     storage16BitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
     shaderFloat16Int8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
     vulkanMemoryModelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+#if defined(VK_KHR_cooperative_matrix)
     cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+#endif
+#if defined(VK_KHR_maintenance4)
     maintenance4Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
-    subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
+    subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     cooperativeMatrix2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
+#endif
     auto addFeature = [&features2](auto& feature) {
       feature.pNext = features2.pNext;
       features2.pNext = &feature;
@@ -455,20 +503,31 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
       addFeature(shaderFloat16Int8Features);
     if(core12 || hasDeviceExtension(deviceInfo, VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME))
       addFeature(vulkanMemoryModelFeatures);
+#if defined(VK_KHR_cooperative_matrix)
     if(hasCooperativeMatrix)
       addFeature(cooperativeMatrixFeatures);
+#endif
+#if defined(VK_KHR_maintenance4)
     if(hasMaintenance4)
       addFeature(maintenance4Features);
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     if(hasSubgroupSizeControl)
       addFeature(subgroupSizeControlFeatures);
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     if(hasMatrix2)
       addFeature(cooperativeMatrix2Features);
+#endif
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
     deviceInfo.features = features2.features;
     deviceInfo.storage16BitFeatures = storage16BitFeatures;
     deviceInfo.shaderFloat16Int8Features = shaderFloat16Int8Features;
     deviceInfo.vulkanMemoryModelFeatures = vulkanMemoryModelFeatures;
+#if defined(VK_KHR_cooperative_matrix)
     deviceInfo.cooperativeMatrixFeatures = cooperativeMatrixFeatures;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2) && defined(VK_KHR_maintenance4)
     deviceInfo.cooperativeMatrix2Features = cooperativeMatrix2Features;
     deviceInfo.canUseRegisterAttentionNHWC =
       VULKAN_HAS_NV2_SHADER &&
@@ -479,8 +538,13 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
       cooperativeMatrix2Features.cooperativeMatrixReductions &&
       cooperativeMatrix2Features.cooperativeMatrixConversions &&
       cooperativeMatrix2Features.cooperativeMatrixPerElementOperations;
+#endif
+#if defined(VK_KHR_maintenance4)
     deviceInfo.maintenance4Features = maintenance4Features;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     deviceInfo.subgroupSizeControlFeatures = subgroupSizeControlFeatures;
+#endif
 
     auto writeFeatureSupport = [logger](const std::string& message) {
       if(logger != nullptr)
@@ -493,11 +557,22 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     writeFeatureSupport("  Shader Int8 Support: " + std::string(deviceInfo.shaderFloat16Int8Features.shaderInt8 == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Storage Buffer 16Bit Support: " + std::string(deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ? "Yes" : "No"));
     writeFeatureSupport("  Vulkan Memory Model Support: " + std::string(deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE ? "Yes" : "No"));
+#if defined(VK_KHR_cooperative_matrix)
     writeFeatureSupport("  Cooperative Matrix Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE ? "Yes" : "No"));
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     writeFeatureSupport("  Cooperative Matrix Robust Buffer Access Support: " + std::string(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrixRobustBufferAccess == VK_TRUE ? "Yes" : "No"));
+#endif
+#if defined(VK_KHR_maintenance4)
     writeFeatureSupport("  Maintenance4 Support: " + std::string(deviceInfo.maintenance4Features.maintenance4 == VK_TRUE ? "Yes" : "No"));
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     writeFeatureSupport("  Subgroup Size Control Support: " + std::string(deviceInfo.subgroupSizeControlFeatures.subgroupSizeControl == VK_TRUE ? "Yes" : "No"));
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     writeFeatureSupport("  Compute Full Subgroups Support: " + std::string(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE ? "Yes" : "No"));
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE) {
       const auto componentTypeName = [](VkComponentTypeKHR type) {
         switch(type) {
@@ -553,7 +628,7 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
         );
       }
     }
-
+#endif
 
     // Get memory properties2
     VkPhysicalDeviceMemoryProperties2 memoryProperties2 = {};
@@ -565,16 +640,30 @@ std::vector<VulkanDeviceInfo> vk_helper::enumerateVulkanDevices(VkInstance insta
     
     // Query chains point to stack storage and must not escape enumeration.
     deviceInfo.subgroupProperties.pNext = nullptr;
+#if defined(VK_EXT_subgroup_size_control)
     deviceInfo.subgroupSizeProperties.pNext = nullptr;
+#endif
+#if defined(VK_KHR_cooperative_matrix)
     deviceInfo.cooopertavieMatrixProperties.pNext = nullptr;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     deviceInfo.cooperativeMatrix2Properties.pNext = nullptr;
+#endif
     deviceInfo.storage16BitFeatures.pNext = nullptr;
     deviceInfo.shaderFloat16Int8Features.pNext = nullptr;
     deviceInfo.vulkanMemoryModelFeatures.pNext = nullptr;
+#if defined(VK_KHR_cooperative_matrix)
     deviceInfo.cooperativeMatrixFeatures.pNext = nullptr;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
     deviceInfo.cooperativeMatrix2Features.pNext = nullptr;
+#endif
+#if defined(VK_KHR_maintenance4)
     deviceInfo.maintenance4Features.pNext = nullptr;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
     deviceInfo.subgroupSizeControlFeatures.pNext = nullptr;
+#endif
 
     deviceInfos.push_back(deviceInfo);
   }
@@ -595,13 +684,13 @@ VulkanDevice* vk_helper::createVulkanDevice(
   VkPhysicalDevice physicalDevice = deviceInfo.physicalDevice;
   if(deviceInfo.apiVersion < VK_API_VERSION_1_2)
     throw StringError("Device " + deviceInfo.deviceName + " does not support the Vulkan 1.2 shader target");
-  const bool core13 = deviceInfo.apiVersion >= VK_API_VERSION_1_3;
+  const bool core13 = deviceInfo.apiVersion >= VK_MAKE_VERSION(1, 3, 0);
   // Existing callers may request names for features promoted into core Vulkan.
   requiredExtensions.erase(std::remove_if(requiredExtensions.begin(), requiredExtensions.end(), [core13](const char* extension) {
     const std::string name(extension);
     return name == VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME ||
       name == VK_KHR_16BIT_STORAGE_EXTENSION_NAME || name == VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME ||
-      (core13 && (name == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME || name == VK_KHR_MAINTENANCE_4_EXTENSION_NAME));
+      (core13 && (name == "VK_EXT_subgroup_size_control" || name == "VK_KHR_maintenance4"));
   }), requiredExtensions.end());
   auto enableExtension = [&requiredExtensions, &deviceInfo](const char* name) {
     if(!hasDeviceExtension(deviceInfo, name))
@@ -617,26 +706,36 @@ VulkanDevice* vk_helper::createVulkanDevice(
   }
   if(hasDeviceExtension(deviceInfo, "VK_KHR_portability_subset"))
     enableExtension("VK_KHR_portability_subset");
+#if defined(VK_KHR_cooperative_matrix)
   const bool enableCooperativeMatrix =
     hasDeviceExtension(deviceInfo, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) &&
     deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE &&
     deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE;
   if(enableCooperativeMatrix)
     enableExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2) && defined(VK_KHR_maintenance4)
   const bool enableRegisterAttentionNHWC = enableCooperativeMatrix && core13 &&
     deviceInfo.canUseRegisterAttentionNHWC && deviceInfo.maintenance4Features.maintenance4 == VK_TRUE &&
     hasDeviceExtension(deviceInfo, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
   if(enableRegisterAttentionNHWC)
     enableExtension(VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
+#else
+  const bool enableRegisterAttentionNHWC = false;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
   const bool enableComputeFullSubgroups =
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE &&
     (core13 || hasDeviceExtension(deviceInfo, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME));
   if(enableComputeFullSubgroups && !core13)
     enableExtension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+#endif
+#if defined(VK_KHR_maintenance4)
   const bool enableMaintenance4 = deviceInfo.maintenance4Features.maintenance4 == VK_TRUE &&
     (core13 || hasDeviceExtension(deviceInfo, VK_KHR_MAINTENANCE_4_EXTENSION_NAME));
   if(enableMaintenance4 && !core13)
     enableExtension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+#endif
 
   const float queuePriorities[2] = {1.0f, dummyQueuePriority};
   uint32_t queueFamilyPropertyCount = 0;
@@ -672,18 +771,25 @@ VulkanDevice* vk_helper::createVulkanDevice(
   VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures = {};
   vulkanMemoryModelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
   vulkanMemoryModelFeatures.vulkanMemoryModel = deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel;
+#if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmFeatures = {};
   cmFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
   cmFeatures.cooperativeMatrix = enableCooperativeMatrix ? VK_TRUE : VK_FALSE;
+#endif
+#if defined(VK_KHR_maintenance4)
   VkPhysicalDeviceMaintenance4FeaturesKHR m4Features = {};
   m4Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES_KHR;
   m4Features.maintenance4 = enableMaintenance4 ? VK_TRUE : VK_FALSE;
-  VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures = {};
-  subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
+  VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroupSizeControlFeatures = {};
+  subgroupSizeControlFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
   if(enableComputeFullSubgroups) {
     subgroupSizeControlFeatures.subgroupSizeControl = deviceInfo.subgroupSizeControlFeatures.subgroupSizeControl;
     subgroupSizeControlFeatures.computeFullSubgroups = VK_TRUE;
   }
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   VkPhysicalDeviceCooperativeMatrix2FeaturesNV cm2Features = {};
   cm2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
   if(enableRegisterAttentionNHWC) {
@@ -693,6 +799,7 @@ VulkanDevice* vk_helper::createVulkanDevice(
     cm2Features.cooperativeMatrixConversions = VK_TRUE;
     cm2Features.cooperativeMatrixPerElementOperations = VK_TRUE;
   }
+#endif
   auto addFeature = [&requestedFeatures](auto& feature) {
     feature.pNext = requestedFeatures.pNext;
     requestedFeatures.pNext = &feature;
@@ -700,14 +807,22 @@ VulkanDevice* vk_helper::createVulkanDevice(
   addFeature(storage16BitFeatures);
   addFeature(f16Feat);
   addFeature(vulkanMemoryModelFeatures);
+#if defined(VK_KHR_cooperative_matrix)
   if(enableCooperativeMatrix)
     addFeature(cmFeatures);
+#endif
+#if defined(VK_KHR_maintenance4)
   if(enableMaintenance4)
     addFeature(m4Features);
+#endif
+#if defined(VK_EXT_subgroup_size_control)
   if(enableComputeFullSubgroups)
     addFeature(subgroupSizeControlFeatures);
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   if(enableRegisterAttentionNHWC)
     addFeature(cm2Features);
+#endif
 
   VkDeviceCreateInfo deviceCI = {};
   deviceCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -738,14 +853,22 @@ VulkanDevice* vk_helper::createVulkanDevice(
   vulkanDevice->info.shaderFloat16Int8Features.pNext = nullptr;
   vulkanDevice->info.vulkanMemoryModelFeatures = vulkanMemoryModelFeatures;
   vulkanDevice->info.vulkanMemoryModelFeatures.pNext = nullptr;
+#if defined(VK_KHR_cooperative_matrix)
   vulkanDevice->info.cooperativeMatrixFeatures = cmFeatures;
   vulkanDevice->info.cooperativeMatrixFeatures.pNext = nullptr;
+#endif
+#if defined(VK_KHR_maintenance4)
   vulkanDevice->info.maintenance4Features = m4Features;
   vulkanDevice->info.maintenance4Features.pNext = nullptr;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
   vulkanDevice->info.subgroupSizeControlFeatures = subgroupSizeControlFeatures;
   vulkanDevice->info.subgroupSizeControlFeatures.pNext = nullptr;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   vulkanDevice->info.cooperativeMatrix2Features = cm2Features;
   vulkanDevice->info.cooperativeMatrix2Features.pNext = nullptr;
+#endif
   vulkanDevice->device = device;
   vulkanDevice->queue = queue;
   if(queueCount >= 2)

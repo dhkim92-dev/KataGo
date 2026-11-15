@@ -16,6 +16,13 @@ using namespace vk_shader::tune;
 namespace vk_shader {
 
   namespace {
+#if defined(VK_EXT_subgroup_size_control)
+    constexpr VkPipelineShaderStageCreateFlags fullSubgroupStageFlags =
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT;
+#else
+    constexpr VkPipelineShaderStageCreateFlags fullSubgroupStageFlags = 0;
+#endif
+
     int vectorWidthSlot(uint32_t width) {
       return width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : -1;
     }
@@ -392,7 +399,7 @@ namespace vk_shader {
   size_t spirv_transformer_scale_dot_product_cooperative_p16s16_size = _binary_transformer_scale_dot_product_cooperative_p16s16_size;
   const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16 = _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_start;
   size_t spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size = _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size;
-#if VULKAN_HAS_NV2_SHADER
+#if VULKAN_HAS_NV2_SHADER && defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16 = _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_start;
   size_t spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size = _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size;
 #else
@@ -634,10 +641,15 @@ namespace vk_shader {
          (deviceInfo.shaderFloat16Int8Features.shaderFloat16 != VK_TRUE ||
           deviceInfo.storage16BitFeatures.storageBuffer16BitAccess != VK_TRUE))
         continue;
-      if(shader.requiresCooperativeMatrix &&
-         (deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
-          deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel != VK_TRUE))
+      if(shader.requiresCooperativeMatrix) {
+#if defined(VK_KHR_cooperative_matrix)
+        if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
+           deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel != VK_TRUE)
+          continue;
+#else
         continue;
+#endif
+      }
       if((shader.module == &shaderModule_transformer_rms_norm_subgroup_p16s16 ||
           shader.module == &shaderModule_transformer_residual_rms_norm_subgroup_p16s16) &&
          !canUseTransformerRMSNormSubgroup(deviceInfo, TransformerRMSNormTuneParms{
@@ -1231,7 +1243,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1268,7 +1280,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1437,7 +1449,7 @@ namespace vk_shader {
     return createPipeline(
       name, shaderModules[variant], 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
       &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1490,7 +1502,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1550,7 +1562,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1841,7 +1853,7 @@ namespace vk_shader {
       return createPipeline(residualAdd ? "transformer_residual_rms_norm_subgroup_p16s16_nhwc" : "transformer_rms_norm_subgroup_p16s16_nhwc",
         residualAdd ? shaderModule_transformer_residual_rms_norm_subgroup_p16s16 : shaderModule_transformer_rms_norm_subgroup_p16s16,
         5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT);
+        fullSubgroupStageFlags);
     if(residualAdd) {
       if(!useNHWC || !vulkanParams.canUseFP16Storage || !vulkanParams.canUseFP16Compute ||
          !vulkanParams.shouldUseFP16Storage || !vulkanParams.shouldUseFP16Compute)
@@ -1927,7 +1939,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
 
@@ -1937,7 +1949,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_p16s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
     if(useNHWC && spec.COOP_KV_STAGES > 1) {
@@ -1956,7 +1968,7 @@ namespace vk_shader {
           shaderModule_transformer_scale_dot_product_cooperative_nhwc_block_p32s16,
           7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
           spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-          VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+          fullSubgroupStageFlags
         );
       }
     }
@@ -1968,7 +1980,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
     return createPipeline(
@@ -1976,7 +1988,7 @@ namespace vk_shader {
       shaderModule_transformer_scale_dot_product_cooperative_p32s16,
       7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
       spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 

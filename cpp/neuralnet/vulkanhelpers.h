@@ -29,21 +29,33 @@ struct VulkanDeviceInfo {
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memoryProperties;
   VkPhysicalDeviceSubgroupProperties subgroupProperties;
-  VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeProperties;
+#if defined(VK_EXT_subgroup_size_control)
+  VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroupSizeProperties;
+#endif
+#if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooopertavieMatrixProperties;
   PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR cooperativeMatrixPropertiesFn = nullptr;
+#endif
 
   VkPhysicalDeviceFeatures features;
   VkPhysicalDevice16BitStorageFeatures storage16BitFeatures;
   VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures;
+#if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperativeMatrix2Features = {};
   VkPhysicalDeviceCooperativeMatrix2PropertiesNV cooperativeMatrix2Properties = {};
   std::vector<VkCooperativeMatrixFlexibleDimensionsPropertiesNV> flexibleMatrixProperties;
+#endif
   bool canUseRegisterAttentionNHWC = false;
+#if defined(VK_KHR_maintenance4)
   VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
-  VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
+  VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroupSizeControlFeatures;
+#endif
 };
 
 struct VulkanDevice {

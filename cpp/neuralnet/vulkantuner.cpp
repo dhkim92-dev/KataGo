@@ -192,6 +192,7 @@ namespace {
     return value > 0 && (value & (value - 1)) == 0;
   }
 
+#if defined(VK_KHR_cooperative_matrix)
   bool supportsCooperativeMatrixType(const VkCooperativeMatrixPropertiesKHR& property, int accType) {
     const VkComponentTypeKHR expectedType = accType == 16
       ? VK_COMPONENT_TYPE_FLOAT16_KHR
@@ -272,6 +273,7 @@ namespace {
     return !properties.empty();
   }
 
+#endif
   struct CooperativeMatrixTuneShape {
     int accType;
     int MSize;
@@ -281,6 +283,7 @@ namespace {
   };
 
   vector<CooperativeMatrixTuneShape> getCooperativeMatrixTuneShapes(const VulkanDevice* device) {
+#if defined(VK_KHR_cooperative_matrix)
     vector<CooperativeMatrixTuneShape> shapes;
     if(device == nullptr)
       return shapes;
@@ -318,9 +321,15 @@ namespace {
       }
     }
     return shapes;
+
+#else
+    (void)device;
+    return {};
+#endif
   }
 
   bool supportsCooperativeMatrix(const VulkanDeviceInfo& deviceInfo) {
+#if defined(VK_KHR_cooperative_matrix)
     vector<VkCooperativeMatrixPropertiesKHR> properties;
     return getSupportedCooperativeMatrixProperties(
       deviceInfo.physicalDevice,
@@ -328,6 +337,11 @@ namespace {
       deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix,
       properties
     );
+
+#else
+    (void)deviceInfo;
+    return false;
+#endif
   }
 
   bool isSupportedCooperativeMatrixShape(
@@ -338,6 +352,7 @@ namespace {
     int kSize,
     uint32_t subgroupSize
   ) {
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_subgroup_size_control)
     if(deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups != VK_TRUE ||
        (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0)
       return false;
@@ -357,6 +372,16 @@ namespace {
                static_cast<int>(property.KSize) == kSize;
       }
     );
+
+#else
+    (void)deviceInfo;
+    (void)accType;
+    (void)mSize;
+    (void)nSize;
+    (void)kSize;
+    (void)subgroupSize;
+    return false;
+#endif
   }
 
   bool isWithinCooperativeMatrixDeviceLimits(
@@ -460,9 +485,13 @@ VulkanParams VulkanTuner::getHardwareParams(const VulkanDeviceInfo& deviceInfo) 
     deviceInfo.storage16BitFeatures.storageBuffer16BitAccess == VK_TRUE ||
     deviceInfo.storage16BitFeatures.uniformAndStorageBuffer16BitAccess == VK_TRUE;
   params.canUseFP16Compute = deviceInfo.shaderFloat16Int8Features.shaderFloat16 == VK_TRUE;
+#if defined(VK_EXT_subgroup_size_control)
   params.canUseSubgroup =
     (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+#else
+  params.canUseSubgroup = false;
+#endif
   params.canUseCooperativeMatrix =
     params.canUseSubgroup &&
     deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel == VK_TRUE &&
@@ -516,6 +545,7 @@ bool vk_shader::tune::canUseRegisterAttentionNHWC(
   int qHeadDim,
   int vHeadDim
 ) {
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   const auto& limits = deviceInfo.cooperativeMatrix2Properties;
   if(params.COOP_USE_NV2 != 1 || !deviceInfo.canUseRegisterAttentionNHWC || qHeadDim != 32 || vHeadDim != 32 ||
      params.COOP_M_SIZE != 16 || params.COOP_N_SIZE != 16 || params.COOP_K_SIZE != 16 ||
@@ -534,6 +564,13 @@ bool vk_shader::tune::canUseRegisterAttentionNHWC(
        32 % p.KGranularity == 0 && 32 % p.NGranularity == 0 && params.ATTN_BLOCK_KV % p.KGranularity == 0)
       return true;
   return false;
+#else
+  (void)deviceInfo;
+  (void)params;
+  (void)qHeadDim;
+  (void)vHeadDim;
+  return false;
+#endif
 }
 
 bool vk_shader::tune::isValidCooperativeMatrixConfig(
@@ -573,6 +610,7 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
   const int vHeadDimPad = ((vHeadDim + params.COOP_PV_N_SIZE - 1) / params.COOP_PV_N_SIZE) * params.COOP_PV_N_SIZE;
   const int qBlock = params.COOP_M_SIZE * static_cast<int>(params.COOP_Q_TILES_PER_WORKGROUP);
   const int kvStages = params.ATTN_BLOCK_KV / params.COOP_N_SIZE;
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   if(useNHWC && canUseRegisterAttentionNHWC(deviceInfo, params, qHeadDim, vHeadDim)) {
     const uint64_t shared = 4 * 16ull + 2ull * qBlock * 32 + 4ull * params.ATTN_BLOCK_KV * 32 +
       4ull * qBlock * 32 + 4ull * (qBlock + params.ATTN_BLOCK_KV) +
@@ -582,6 +620,7 @@ bool vk_shader::tune::isValidCooperativeMatrixConfig(
       params.getLocalSizeX() <= limits.maxComputeWorkGroupInvocations &&
       shared <= limits.maxComputeSharedMemorySize;
   }
+#endif
   const uint64_t localSize = params.getLocalSizeX();
   const uint64_t sharedBytes =
     6 * 16ull +
@@ -918,6 +957,7 @@ bool vk_shader::tune::canUseTransformerRMSNormSubgroup(
   const VulkanDeviceInfo& deviceInfo,
   const TransformerRMSNormTuneParms& params
 ) {
+#if defined(VK_EXT_subgroup_size_control)
   const auto& properties = deviceInfo.subgroupProperties;
   const auto required = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
   const auto& limits = deviceInfo.properties.limits;
@@ -929,6 +969,11 @@ bool vk_shader::tune::canUseTransformerRMSNormSubgroup(
     (properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
     (properties.supportedOperations & required) == required &&
     deviceInfo.subgroupSizeControlFeatures.computeFullSubgroups == VK_TRUE;
+#else
+  (void)deviceInfo;
+  (void)params;
+  return false;
+#endif
 }
 
 bool TransformerRMSNormTuneParms::isValid() const {
@@ -1783,6 +1828,7 @@ namespace {
     HGemmCooperativeMatrixNCHWTuneParams& params,
     int accType
   ) {
+#if defined(VK_KHR_cooperative_matrix)
     if(device == nullptr)
       return false;
 
@@ -1821,6 +1867,13 @@ namespace {
       }
     }
     return false;
+
+#else
+    (void)device;
+    (void)params;
+    (void)accType;
+    return false;
+#endif
   }
 
   bool selectHgemmCooperativeMatrixProperties(
@@ -1838,6 +1891,7 @@ namespace {
     HGemmCooperativeMatrixTuneParams& params,
     int accType
   ) {
+#if defined(VK_KHR_cooperative_matrix)
     if(device == nullptr)
       return false;
 
@@ -1877,6 +1931,13 @@ namespace {
       }
     }
     return false;
+
+#else
+    (void)device;
+    (void)params;
+    (void)accType;
+    return false;
+#endif
   }
 
   bool selectHgemmCooperativeMatrixProperties(
