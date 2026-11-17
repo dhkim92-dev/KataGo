@@ -2665,7 +2665,18 @@ namespace {
   class VulkanTimestampTimer {
    public:
     explicit VulkanTimestampTimer(const VulkanDevice* device)
-    : device(device), timestampPeriod(device->info.properties.limits.timestampPeriod) {}
+    : device(device), timestampPeriod(device->info.properties.limits.timestampPeriod) {
+      VkResult result;
+      commandPool = vk_helper::createCommandPool(device, &result);
+      if(result != VK_SUCCESS)
+        throw StringError("could not create tuning command pool: " + vk_helper::vkErrorToString(result));
+    }
+
+    ~VulkanTimestampTimer() {
+      // Cached fixtures must release their command buffers before the pool.
+      dualGemmResources.reset();
+      vkDestroyCommandPool(device->device, commandPool, nullptr);
+    }
 
     bool isUsable() const {
       return device->info.properties.limits.timestampComputeAndGraphics == VK_TRUE && timestampPeriod > 0.0f;
@@ -2758,7 +2769,7 @@ namespace {
         return false;
       }
 
-      ReusableResources resources(device);
+      ReusableResources resources(device, commandPool);
       activeResources = &resources;
       const auto activeResourcesGuard = makeScopeGuard([&]() { activeResources = nullptr; });
 
@@ -4797,14 +4808,14 @@ namespace {
           if(useFP16) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, gemmValidationBuffers[caseIndex], count * sizeof(half_t), halves.data(), true, &result
+              device, gemmValidationBuffers[caseIndex], count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, gemmValidationBuffers[caseIndex], count * sizeof(float), output.data(), true, &result
+              device, gemmValidationBuffers[caseIndex], count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -4837,14 +4848,14 @@ namespace {
           if(useFP16) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -4871,14 +4882,14 @@ namespace {
           if(useFP16) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -4902,14 +4913,14 @@ namespace {
           if(halfBinding(outputPipeline, binding)) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -4933,14 +4944,14 @@ namespace {
           if(halfBinding(applyPipeline, binding)) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -4971,14 +4982,14 @@ namespace {
             if(halfBinding(pipeline, binding)) {
               vector<half_t> halves(count);
               vk_helper::copyDeviceBufferToHost(
-                device, pointwiseValidationBuffers[validationIndex], count * sizeof(half_t), halves.data(), true, &result
+                device, pointwiseValidationBuffers[validationIndex], count * sizeof(half_t), halves.data(), true, &result, commandPool
               );
               for(size_t j = 0; j < count; j++)
                 output[j] = half_float::half_cast<float>(halves[j]);
             }
             else {
               vk_helper::copyDeviceBufferToHost(
-                device, pointwiseValidationBuffers[validationIndex], count * sizeof(float), output.data(), true, &result
+                device, pointwiseValidationBuffers[validationIndex], count * sizeof(float), output.data(), true, &result, commandPool
               );
             }
             if(result != VK_SUCCESS) {
@@ -5010,14 +5021,14 @@ namespace {
           if(halfBinding(pipelines[0], binding)) {
             vector<half_t> halves(count);
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result
+              device, validationBuffer, count * sizeof(half_t), halves.data(), true, &result, commandPool
             );
             for(size_t j = 0; j < count; j++)
               output[j] = half_float::half_cast<float>(halves[j]);
           }
           else {
             vk_helper::copyDeviceBufferToHost(
-              device, validationBuffer, count * sizeof(float), output.data(), true, &result
+              device, validationBuffer, count * sizeof(float), output.data(), true, &result, commandPool
             );
           }
           if(result != VK_SUCCESS) {
@@ -5083,14 +5094,14 @@ namespace {
         if(halfBinding(pipeline, binding)) {
           vector<half_t> halves(count);
           vk_helper::copyDeviceBufferToHost(
-            device, tuningBuffers[firstBuffer + binding], count * sizeof(half_t), halves.data(), true, &result
+            device, tuningBuffers[firstBuffer + binding], count * sizeof(half_t), halves.data(), true, &result, commandPool
           );
           for(size_t j = 0; j < count; j++)
             output[j] = half_float::half_cast<float>(halves[j]);
         }
         else {
           vk_helper::copyDeviceBufferToHost(
-            device, tuningBuffers[firstBuffer + binding], count * sizeof(float), output.data(), true, &result
+            device, tuningBuffers[firstBuffer + binding], count * sizeof(float), output.data(), true, &result, commandPool
           );
         }
         if(result != VK_SUCCESS) {
@@ -5198,7 +5209,7 @@ namespace {
         channelAlignment, legacyNHWC, legacyStorageHalf
       };
       if(dualGemmFixtureKey != fixtureKey) {
-        dualGemmResources = std::make_unique<ReusableResources>(device);
+        dualGemmResources = std::make_unique<ReusableResources>(device, commandPool);
         dualGemmFixtureKey.clear();
         dualGemmReference.clear();
       }
@@ -5275,7 +5286,7 @@ namespace {
           VulkanBuffer* destination,
           const string& name
         ) {
-          vk_helper::copyHostToDeviceBuffer(device, data, destination, bytes, false, &result);
+          vk_helper::copyHostToDeviceBuffer(device, data, destination, bytes, false, &result, commandPool);
           if(result != VK_SUCCESS) {
             error = "could not upload " + name + ": " + vk_helper::vkErrorToString(result);
             return false;
@@ -5486,7 +5497,7 @@ namespace {
 
       vector<half_t> outputHalf(candidateOutputNHWCElements);
       vk_helper::copyDeviceBufferToHost(
-        device, buffers[3], candidateOutputNHWCBytes, outputHalf.data(), true, &result
+        device, buffers[3], candidateOutputNHWCBytes, outputHalf.data(), true, &result, commandPool
       );
       if(result != VK_SUCCESS) {
         error = "could not read Transformer dual-GEMM output: " + vk_helper::vkErrorToString(result);
@@ -5503,7 +5514,7 @@ namespace {
       errorProp = VulkanTuner::computeErrorProp(reference, readback);
       if(legacyNHWC) {
         vk_helper::copyDeviceBufferToHost(
-          device, buffers[7], legacyOutputBytes, outputHalf.data(), true, &result
+          device, buffers[7], legacyOutputBytes, outputHalf.data(), true, &result, commandPool
         );
         if(result != VK_SUCCESS) {
           error = "could not read NHWC packed-GEMM plus SwiGLU output";
@@ -5546,7 +5557,7 @@ namespace {
         return false;
       }
       VkResult result = VK_SUCCESS;
-      ReusableResources resources(device);
+      ReusableResources resources(device, commandPool);
       activeResources = &resources;
       const auto resourceGuard = makeScopeGuard([&]() { activeResources = nullptr; });
       auto& buffers = resources.tuningBuffers;
@@ -5584,7 +5595,7 @@ namespace {
         const void* source,
         VkDeviceSize size
       ) {
-        vk_helper::copyHostToDeviceBuffer(device, source, buffers[index], size, false, &result);
+        vk_helper::copyHostToDeviceBuffer(device, source, buffers[index], size, false, &result, commandPool);
         return result == VK_SUCCESS;
       };
       if(!upload(0, trunk.data(), bytes) || !upload(1, delta.data(), bytes) ||
@@ -5679,7 +5690,7 @@ namespace {
       vector<half_t> values(elements);
       vector<vector<float>> outputs(4, vector<float>(elements));
       for(int i = 0; i < 4; i++) {
-        vk_helper::copyDeviceBufferToHost(device, buffers[i + 2], bytes, values.data(), true, &result);
+        vk_helper::copyDeviceBufferToHost(device, buffers[i + 2], bytes, values.data(), true, &result, commandPool);
         if(result != VK_SUCCESS) { error = "could not read residual RMSNorm outputs";
         return false; }
         for(size_t j = 0; j < elements; j++) outputs[i][j] = float(values[j]);
@@ -5705,11 +5716,12 @@ namespace {
 
    private:
     struct ReusableResources {
-      explicit ReusableResources(const VulkanDevice* device): device(device) {}
+      ReusableResources(const VulkanDevice* device, VkCommandPool commandPool_)
+      : device(device), commandPool(commandPool_) {}
 
       ~ReusableResources() {
         if(commandBuffer != VK_NULL_HANDLE)
-          vkFreeCommandBuffers(device->device, device->commandPool, 1, &commandBuffer);
+          vkFreeCommandBuffers(device->device, commandPool, 1, &commandBuffer);
         if(fence != VK_NULL_HANDLE)
           vkDestroyFence(device->device, fence, nullptr);
         if(queryPool != VK_NULL_HANDLE)
@@ -5739,6 +5751,7 @@ namespace {
       }
 
       const VulkanDevice* device;
+      VkCommandPool commandPool;
       vector<VulkanBuffer*> tuningBuffers;
       vector<VulkanBuffer*> uploadStagingBuffers;
       VulkanBuffer* pointwiseAccumulatorInitialBuffer = nullptr;
@@ -6016,7 +6029,7 @@ namespace {
         }
       }
       if(activeResources->commandBuffer == VK_NULL_HANDLE) {
-        activeResources->commandBuffer = vk_helper::allocateCommandBuffer(device, &result);
+        activeResources->commandBuffer = vk_helper::allocateCommandBuffer(device, &result, commandPool);
         if(result != VK_SUCCESS) {
           error = "could not allocate tuning command buffer: " + vk_helper::vkErrorToString(result);
           activeResources->commandBuffer = VK_NULL_HANDLE;
@@ -6033,6 +6046,7 @@ namespace {
 
     const VulkanDevice* device;
     float timestampPeriod;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
   };
 
   class VulkanDummyThread {
@@ -6198,29 +6212,29 @@ namespace {
           return vector<float>(size, 0.0f);
         };
         matrixA = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(otherElements, 1.2 / kSize), false, &result
+          device, makeRandomVector(otherElements, 1.2 / kSize), false, &result, commandPool
         );
         if(result != VK_SUCCESS || matrixA == nullptr)
           throw StringError("could not create dummy matrix A: " + vk_helper::vkErrorToString(result));
         matrixB = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(otherElements, 1.2 / kSize), false, &result
+          device, makeRandomVector(otherElements, 1.2 / kSize), false, &result, commandPool
         );
         if(result != VK_SUCCESS || matrixB == nullptr)
           throw StringError("could not create dummy matrix B: " + vk_helper::vkErrorToString(result));
         matrixC = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(outputElements, 1.0), false, &result
+          device, makeRandomVector(outputElements, 1.0), false, &result, commandPool
         );
         if(result != VK_SUCCESS || matrixC == nullptr)
           throw StringError("could not create dummy matrix C: " + vk_helper::vkErrorToString(result));
         matrixD = vk_helper::createReadOnlyBuffer(
-          device, makeRandomVector(outputElements, 1.0), false, &result
+          device, makeRandomVector(outputElements, 1.0), false, &result, commandPool
         );
         if(result != VK_SUCCESS || matrixD == nullptr)
           throw StringError("could not create dummy matrix D: " + vk_helper::vkErrorToString(result));
-        buffer = vk_helper::createReadWriteBuffer(device, makeZeroVector(inputElements), false, &result);
+        buffer = vk_helper::createReadWriteBuffer(device, makeZeroVector(inputElements), false, &result, commandPool);
         if(result != VK_SUCCESS || buffer == nullptr)
           throw StringError("could not create dummy buffer: " + vk_helper::vkErrorToString(result));
-        buffer2 = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result);
+        buffer2 = vk_helper::createReadWriteBuffer(device, makeZeroVector(outputElements), false, &result, commandPool);
         if(result != VK_SUCCESS || buffer2 == nullptr)
           throw StringError("could not create second dummy buffer: " + vk_helper::vkErrorToString(result));
         readbackBuffer = vk_helper::createReadbackBuffer(device, outputElements * sizeof(float), &result);

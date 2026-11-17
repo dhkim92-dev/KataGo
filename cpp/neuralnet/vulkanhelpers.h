@@ -64,8 +64,6 @@ struct VulkanDevice {
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   VkQueue dummyQueue = VK_NULL_HANDLE;
-  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-  VkCommandPool commandPool = VK_NULL_HANDLE;
   VmaAllocator allocator = VK_NULL_HANDLE;
   // vkQueueSubmit is externally synchronized for each VkQueue handle. Keep
   // submits serialized when the tuner and dummy thread share a device.
@@ -240,7 +238,8 @@ namespace vk_helper {
   VkDescriptorSet allocateDescriptorSet(
     const VulkanDevice *device,
     VkDescriptorSetLayout descriptorSetLayout,
-    VkResult *result
+    VkResult *result,
+    VkDescriptorPool descriptorPool
   );
 
   VkResult updateDescriptorSets(
@@ -255,7 +254,8 @@ namespace vk_helper {
 
   VkCommandBuffer allocateCommandBuffer(
     const VulkanDevice *device,
-    VkResult* result = nullptr
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VkResult beginCommandBuffer(
@@ -273,12 +273,14 @@ namespace vk_helper {
   );
 
   VkCommandBuffer beginSingleTimeCommandBuffer(
-    const VulkanDevice *device
+    const VulkanDevice *device,
+    VkCommandPool commandPool
   );
 
   void submitSingleTimeCommandBufferAndWaitIdle(
     const VulkanDevice *device,
-    VkCommandBuffer commandBuffer
+    VkCommandBuffer commandBuffer,
+    VkCommandPool commandPool
   );
 
 
@@ -286,14 +288,16 @@ namespace vk_helper {
     const VulkanDevice* device,
     const std::vector<float>& data,
     const bool useFP16,
-    VkResult* result
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createReadWriteBuffer(
     const VulkanDevice* device,
     const std::vector<float>& data,
     const bool useFP16,
-    VkResult* result
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createDeviceBuffer(
@@ -308,7 +312,8 @@ namespace vk_helper {
     size_t size,
     const void* data,
     bool readOnly,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createStagingBuffer(
@@ -356,7 +361,8 @@ namespace vk_helper {
     VkDeviceSize copySize,
     void* hostPtr,
     bool waitForIdle,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   void copyHostToDeviceBuffer(
@@ -365,7 +371,8 @@ namespace vk_helper {
     VulkanBuffer* deviceBuffer,
     VkDeviceSize copySize,
     bool waitForIdle,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   void releaseVulkanBuffer(
