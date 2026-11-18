@@ -1818,7 +1818,12 @@ struct LocalDimHash {
     };
 
     struct VulkanTuneParams : VulkanTuningProfile {
+      struct TuningRecord {
+        bool completed = false;
+      };
+
       VulkanParams vulkan;
+      std::map<std::string, TuningRecord> tuningRecords;
       VulkanTuneParams() = default;
       VulkanTuneParams(const VulkanTuneParams& other) = default;
       VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;

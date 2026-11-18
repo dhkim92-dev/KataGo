@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "../core/logger.h"
+#include "../core/commontypes.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
@@ -205,8 +206,12 @@ namespace VulkanTuner {
     const ModelInfoForTuning& modelInfo,
     const VulkanDevice* device,
     Logger* logger,
-    bool* didAutoTune = nullptr
+    bool* didAutoTune = nullptr,
+    enabled_t useFP16Mode = enabled_t::Auto,
+    enabled_t useNHWCMode = enabled_t::Auto
   );
+
+  void testTuningCache();
 }  // namespace VulkanTuner
 
 #endif

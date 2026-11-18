@@ -9,6 +9,8 @@
 #include <memory>
 #include <numeric>
 #include <chrono>
+#include <cstdlib>
+#include <limits>
 #include <iostream>
 #include "../core/global.h"
 #include "../core/simpleallocator.h"
@@ -452,7 +454,7 @@ struct ComputeContext {
           if(modelInfo != nullptr) {
             tuneParams = VulkanTuner::loadOrAutoTune(
               tunerFile,homeDataDirOverride,deviceInfo.deviceName,
-              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr
+              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr,usingFP16Mode,usingNHWCMode
             );
           }
           if(modelInfo == nullptr && useNHWCMode_ == enabled_t::True) {
@@ -5289,6 +5291,11 @@ static ComputeContext* createComputeContextForTesting(
   bool useNHWC
 ) {
   // std::cout << "[createComputeContextForTesting] create Compute Context with GPUs: ";
+  static const bool testedTuningCache = []() {
+    VulkanTuner::testTuningCache();
+    return true;
+  }();
+  (void)testedTuningCache;
   return new ComputeContext(
     nnXLen,
     nnYLen,
@@ -5517,6 +5524,7 @@ struct ComputeHandle {
   const int policySize;
   const bool inputsUseNHWC;
   const bool inputUsingNHWC;
+  size_t verificationCalls = 0;
 
   static bool shouldUseNHWC(const ComputeContext* context, int gpuIdx) {
     const uint32_t normalizedGpuIdx = gpuIdx < 0 ? 0u : static_cast<uint32_t>(gpuIdx);
@@ -5576,7 +5584,10 @@ struct ComputeHandle {
     // buffers.reset(ptr);
   }
 
-  ~ComputeHandle() {}
+  ~ComputeHandle() {
+    if(verificationCalls > 0)
+      std::cerr << "Vulkan forward verification completed: calls=" << verificationCalls << std::endl;
+  }
   ComputeHandle() = delete;
   ComputeHandle(const ComputeHandle&) = delete;
   ComputeHandle& operator=(const ComputeHandle&) = delete;
@@ -6216,9 +6227,11 @@ void NeuralNet::getOutput(
       paddedOwnershipElts * (useFP16Storage ? sizeof(half_t) : sizeof(float))
     );
 
-    const auto submitAndWait = [&](VkCommandBuffer commandBuffer) {
-      res = vk_helper::endCommandBuffer(commandBuffer);
-      CHECK_VK_MSG("End model evaluation command buffer", res);
+    const auto submitAndWait = [&](VkCommandBuffer commandBuffer, bool finishRecording = true) {
+      if(finishRecording) {
+        res = vk_helper::endCommandBuffer(commandBuffer);
+        CHECK_VK_MSG("End model evaluation command buffer", res);
+      }
       res = vkResetFences(handle->vulkanDevice->device, 1, &computeHandle->model->fence);
       CHECK_VK_MSG("Reset model evaluation fence", res);
       res = vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, computeHandle->model->fence);
@@ -6289,6 +6302,32 @@ void NeuralNet::getOutput(
       buffers->convWorkspace2
     );
 
+    const char* verificationDirectory = std::getenv("KATAGO_VULKAN_VERIFY_FORWARD");
+    VulkanBuffer* verificationReadback = nullptr;
+    if(verificationDirectory != nullptr) {
+      verificationReadback = vk_helper::createReadbackBuffer(
+        handle->vulkanDevice, buffers->uploadBuffer->requestedSize, &res
+      );
+      CHECK_VK_MSG("Allocate input verification readback", res);
+      const auto recordInputVerification = [&](VulkanBuffer* input, VkDeviceSize offset, VkDeviceSize bytes) {
+        vk_helper::barrierCommandBufferForBuffer(
+          evaluationCB, input,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+        );
+        vk_helper::recordBufferCopy(evaluationCB, input, verificationReadback, 0, offset, bytes);
+      };
+      recordInputVerification(uploadedInput, buffers->inputUploadOffset, spatialInputBytes);
+      recordInputVerification(buffers->inputGlobal, buffers->inputGlobalUploadOffset, inputGlobalBytes);
+      if(numMetaFeatures > 0)
+        recordInputVerification(buffers->inputMeta, buffers->inputMetaUploadOffset, inputMetaBytes);
+      vk_helper::barrierCommandBufferForBuffer(
+        evaluationCB, verificationReadback,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+      );
+    }
+
     for(VulkanBuffer* outputBuffer: {
       buffers->policyPass, buffers->policy, buffers->value, buffers->scoreValue, buffers->ownership
     }) {
@@ -6318,6 +6357,11 @@ void NeuralNet::getOutput(
       evaluationCB, buffers->ownership, buffers->readbackBuffer,
       0, buffers->ownershipReadbackOffset, ownershipBytes
     );
+    vk_helper::barrierCommandBufferForBuffer(
+      evaluationCB, buffers->readbackBuffer,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+    );
     submitAndWait(evaluationCB);
 
     vk_helper::copyReadbackBufferToHost(
@@ -6345,6 +6389,71 @@ void NeuralNet::getOutput(
       ownershipBytes, useFP16Storage ? static_cast<void*>(inputBuffers->ownershipResultsHalf) : inputBuffers->ownershipResults, &res
     );
     CHECK_VK_MSG("Copy ownership results from persistent readback buffer", res);
+
+    if(verificationReadback != nullptr) {
+      const size_t call = ++computeHandle->verificationCalls;
+      const auto saveVerification = [&](const std::string& name, const void* data, size_t bytes) {
+        std::ofstream file(std::string(verificationDirectory) + "/" + name, std::ios::binary);
+        file.write(static_cast<const char*>(data), bytes);
+        if(!file)
+          throw StringError("Could not save Vulkan forward verification: " + name);
+      };
+      const auto verifyInput = [&](const char* name, const void* expected, VkDeviceSize offset, VkDeviceSize bytes) {
+        std::vector<unsigned char> actual(bytes);
+        vk_helper::copyReadbackBufferToHost(
+          handle->vulkanDevice, verificationReadback, offset, bytes, actual.data(), &res
+        );
+        CHECK_VK_MSG("Read input verification bytes", res);
+        if(std::memcmp(expected, actual.data(), bytes) != 0) {
+          saveVerification(std::string(name) + "-expected.bin", expected, bytes);
+          saveVerification(std::string(name) + "-gpu.bin", actual.data(), bytes);
+          throw StringError("Vulkan input verification mismatch: " + std::string(name));
+        }
+      };
+      verifyInput("spatial", spatialInputData, buffers->inputUploadOffset, spatialInputBytes);
+      verifyInput("global", inputBuffers->userInputGlobalBuffer, buffers->inputGlobalUploadOffset, inputGlobalBytes);
+      if(numMetaFeatures > 0)
+        verifyInput("meta", inputBuffers->userInputMetaBuffer, buffers->inputMetaUploadOffset, inputMetaBytes);
+
+      submitAndWait(evaluationCB, false);
+      std::vector<float> repeatedValue(valueBytes / sizeof(float));
+      std::vector<float> repeatedScore(scoreValueBytes / sizeof(float));
+      vk_helper::copyReadbackBufferToHost(
+        handle->vulkanDevice, buffers->readbackBuffer, buffers->valueReadbackOffset,
+        valueBytes, repeatedValue.data(), &res
+      );
+      CHECK_VK_MSG("Read repeated value output", res);
+      vk_helper::copyReadbackBufferToHost(
+        handle->vulkanDevice, buffers->readbackBuffer, buffers->scoreValueReadbackOffset,
+        scoreValueBytes, repeatedScore.data(), &res
+      );
+      CHECK_VK_MSG("Read repeated score output", res);
+      float valueDifference = 0.0f;
+      float scoreDifference = 0.0f;
+      for(size_t i = 0; i < repeatedValue.size(); i++) {
+        const float difference = std::abs(repeatedValue[i] - inputBuffers->valueResults[i]);
+        valueDifference = std::isfinite(difference) ? std::max(valueDifference, difference) : std::numeric_limits<float>::infinity();
+      }
+      for(size_t i = 0; i < repeatedScore.size(); i++) {
+        const float difference = std::abs(repeatedScore[i] - inputBuffers->scoreValueResults[i]);
+        scoreDifference = std::isfinite(difference) ? std::max(scoreDifference, difference) : std::numeric_limits<float>::infinity();
+      }
+      if(call == 1 || call % 128 == 0 || valueDifference > 0 || scoreDifference > 0) {
+        std::cerr << "Vulkan forward verification: call=" << call << " batch=" << batchSize
+                  << " input=exact valueMaxDiff=" << valueDifference
+                  << " scoreMaxDiff=" << scoreDifference << std::endl;
+      }
+      if(valueDifference > 0.001f || scoreDifference > 0.001f) {
+        saveVerification("spatial.bin", spatialInputData, spatialInputBytes);
+        saveVerification("global.bin", inputBuffers->userInputGlobalBuffer, inputGlobalBytes);
+        saveVerification("value-first.bin", inputBuffers->valueResults, valueBytes);
+        saveVerification("value-repeat.bin", repeatedValue.data(), valueBytes);
+        saveVerification("score-first.bin", inputBuffers->scoreValueResults, scoreValueBytes);
+        saveVerification("score-repeat.bin", repeatedScore.data(), scoreValueBytes);
+        throw StringError("Vulkan identical-forward verification mismatch");
+      }
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, verificationReadback);
+    }
 
     bool hasNonfiniteValueHeadOutput = false;
     for(size_t i = 0; i < static_cast<size_t>(batchSize) * inputBuffers->singleValueResultElts; i++) {

@@ -1300,6 +1300,11 @@ VulkanBuffer* vk_helper::createDeviceBufferWithData(
     1,
     &copyRegion
   );
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer, deviceBuffer,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
+  );
   vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer,
@@ -1477,6 +1482,11 @@ void vk_helper::copyDeviceBufferToHost(
     1,
     &copyRegion
   );
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer, readbackBuffer,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+  );
   vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
     commandBuffer,
@@ -1537,6 +1547,11 @@ void vk_helper::copyHostToDeviceBuffer(
     deviceBuffer->buffer,
     1,
     &copyRegion
+  );
+  vk_helper::barrierCommandBufferForBuffer(
+    commandBuffer, deviceBuffer,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
   );
   vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
     device,
