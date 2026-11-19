@@ -1,8 +1,9 @@
-
 /**
-* @brief Add Point Wise FP32 compute shader
-* Accumulates value into accum: accum[i] += value[i]
-*/
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Add tensors element by element.
+ */
 #include "common.glsl"
 
 layout(constant_id=3) const int ELTS_PER_THREAD = 1;

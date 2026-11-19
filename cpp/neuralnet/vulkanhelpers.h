@@ -23,35 +23,48 @@ struct VulkanDeviceInfo {
   std::string vendor;
   VkPhysicalDeviceType deviceType;
   std::string deviceName;
+  uint32_t apiVersion = VK_API_VERSION_1_0;
+  std::vector<VkExtensionProperties> extensions;
 
   VkPhysicalDeviceProperties properties;
   VkPhysicalDeviceMemoryProperties memoryProperties;
   VkPhysicalDeviceSubgroupProperties subgroupProperties;
-  VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeProperties;
+#if defined(VK_EXT_subgroup_size_control)
+  VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroupSizeProperties;
+#endif
+#if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooopertavieMatrixProperties;
   PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR cooperativeMatrixPropertiesFn = nullptr;
+#endif
 
   VkPhysicalDeviceFeatures features;
   VkPhysicalDevice16BitStorageFeatures storage16BitFeatures;
   VkPhysicalDeviceShaderFloat16Int8Features shaderFloat16Int8Features;
   VkPhysicalDeviceVulkanMemoryModelFeatures vulkanMemoryModelFeatures;
+#if defined(VK_KHR_cooperative_matrix)
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures;
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperativeMatrix2Features = {};
   VkPhysicalDeviceCooperativeMatrix2PropertiesNV cooperativeMatrix2Properties = {};
   std::vector<VkCooperativeMatrixFlexibleDimensionsPropertiesNV> flexibleMatrixProperties;
+#endif
   bool canUseRegisterAttentionNHWC = false;
+#if defined(VK_KHR_maintenance4)
   VkPhysicalDeviceMaintenance4FeaturesKHR maintenance4Features;
-  VkPhysicalDeviceSubgroupSizeControlFeatures subgroupSizeControlFeatures;
+#endif
+#if defined(VK_EXT_subgroup_size_control)
+  VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroupSizeControlFeatures;
+#endif
 };
 
 struct VulkanDevice {
   VulkanDeviceInfo info;
-  VkDevice device;
-  VkQueue queue;
+  VkDevice device = VK_NULL_HANDLE;
+  VkQueue queue = VK_NULL_HANDLE;
+  uint32_t queueFamilyIndex = 0;
   VkQueue dummyQueue = VK_NULL_HANDLE;
-  VkDescriptorPool descriptorPool;
-  VkCommandPool commandPool;
-  VmaAllocator allocator;
+  VmaAllocator allocator = VK_NULL_HANDLE;
   // vkQueueSubmit is externally synchronized for each VkQueue handle. Keep
   // submits serialized when the tuner and dummy thread share a device.
   mutable std::mutex queueSubmitMutex;
@@ -225,7 +238,8 @@ namespace vk_helper {
   VkDescriptorSet allocateDescriptorSet(
     const VulkanDevice *device,
     VkDescriptorSetLayout descriptorSetLayout,
-    VkResult *result
+    VkResult *result,
+    VkDescriptorPool descriptorPool
   );
 
   VkResult updateDescriptorSets(
@@ -240,7 +254,8 @@ namespace vk_helper {
 
   VkCommandBuffer allocateCommandBuffer(
     const VulkanDevice *device,
-    VkResult* result = nullptr
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VkResult beginCommandBuffer(
@@ -258,12 +273,14 @@ namespace vk_helper {
   );
 
   VkCommandBuffer beginSingleTimeCommandBuffer(
-    const VulkanDevice *device
+    const VulkanDevice *device,
+    VkCommandPool commandPool
   );
 
   void submitSingleTimeCommandBufferAndWaitIdle(
     const VulkanDevice *device,
-    VkCommandBuffer commandBuffer
+    VkCommandBuffer commandBuffer,
+    VkCommandPool commandPool
   );
 
 
@@ -271,14 +288,16 @@ namespace vk_helper {
     const VulkanDevice* device,
     const std::vector<float>& data,
     const bool useFP16,
-    VkResult* result
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createReadWriteBuffer(
     const VulkanDevice* device,
     const std::vector<float>& data,
     const bool useFP16,
-    VkResult* result
+    VkResult* result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createDeviceBuffer(
@@ -293,7 +312,8 @@ namespace vk_helper {
     size_t size,
     const void* data,
     bool readOnly,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   VulkanBuffer* createStagingBuffer(
@@ -341,7 +361,8 @@ namespace vk_helper {
     VkDeviceSize copySize,
     void* hostPtr,
     bool waitForIdle,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   void copyHostToDeviceBuffer(
@@ -350,7 +371,8 @@ namespace vk_helper {
     VulkanBuffer* deviceBuffer,
     VkDeviceSize copySize,
     bool waitForIdle,
-    VkResult *result
+    VkResult *result,
+    VkCommandPool commandPool
   );
 
   void releaseVulkanBuffer(
@@ -369,7 +391,7 @@ namespace vk_helper {
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
     VkAccessFlags srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
   );
 
   void barrierCommandBufferForBuffer(
@@ -378,7 +400,7 @@ namespace vk_helper {
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
     VkAccessFlags srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+    VkAccessFlags dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
   );
 
   std::vector<int32_t> createSpecData(void* data, size_t dataSize);

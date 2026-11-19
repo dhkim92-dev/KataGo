@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Pool channels for value-head outputs.
+ */
 #include "common.glsl"
 #include "functions.glsl"
 

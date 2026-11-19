@@ -1,15 +1,9 @@
-
 /**
- * @author dhkim92.dev@gmail.com
- * @brief Extract Channel 0 compute shader
- * Extracts the first channel (channel 0) from an NCHW or NHWC input tensor.
- * Input: N, C, H*W (NCHW) or N, H*W, C (NHWC)
- * Output: N, H*W (first channel only)
- * 
- * This kernel extracts the spatial data from channel 0 for each batch,
- * effectively reducing the tensor from (N, C, H, W) to (N, H, W).
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Extract the first spatial channel.
  */
-
 #include "common.glsl"
 
 layout(constant_id = 3) const int USE_NHWC = 0;

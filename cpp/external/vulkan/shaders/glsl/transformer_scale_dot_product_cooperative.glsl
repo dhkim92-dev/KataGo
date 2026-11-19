@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1 (KHR), 1.3 (NV2)
+ * SPIR-V: 1.3 (KHR), 1.6 (NV2)
+ * Compute attention with KHR or NV2 cooperative matrices.
+ */
 #ifndef ATTENTION_USE_NV2
 #define ATTENTION_USE_NV2 0
 #endif

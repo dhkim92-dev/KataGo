@@ -1,7 +1,9 @@
 /**
-* Vulkan ported transformer RMSNorm kernel.
-* Based on openclkernels.cpp, transformerRMSNorm kernel function
-*/
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Apply RMS normalization with optional residual addition.
+ */
 #ifndef RMSNORM_SUBGROUP
 #define RMSNORM_SUBGROUP 0
 #endif

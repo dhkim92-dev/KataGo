@@ -97,6 +97,9 @@ struct ComputeHandleInternal {
   const vk_shader::tune::VulkanTuneParams& tuneParams;
   VkDevice device;
   VkQueue queue;
+  VkCommandPool commandPool = VK_NULL_HANDLE;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+  VkCommandBuffer evaluationCommandBuffer = VK_NULL_HANDLE;
 
   int nnXLen;
   int nnYLen;
@@ -273,20 +276,9 @@ struct ComputeHandleInternal {
     queryIdx = 0;
   }
 
-  ~ComputeHandleInternal() {
-#ifdef VK_BENCHMARK
-    if(queryPool != VK_NULL_HANDLE)
-      vkDestroyQueryPool(device, queryPool, nullptr);
 #endif
-#ifdef VK_DUMP_BUFFER
-    for(const VulkanLayerBufferDumpInfo& info : layerBufferDumpInfos) {
-      if(info.buffer != nullptr)
-        vk_helper::releaseVulkanBuffer(vulkanDevice, info.buffer);
-    }
-#endif
-  }
 
-#endif
+  ~ComputeHandleInternal();
 
   ComputeHandleInternal(
     ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC

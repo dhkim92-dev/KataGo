@@ -7,6 +7,7 @@
 #include "../neuralnet/vulkanshaders.h"
 
 #include <iostream>
+#include <cstring>
 
 using namespace vk_shader;
 using namespace vk_shader::push;
@@ -16,6 +17,13 @@ using namespace vk_shader::tune;
 namespace vk_shader {
 
   namespace {
+#if defined(VK_EXT_subgroup_size_control)
+    constexpr VkPipelineShaderStageCreateFlags fullSubgroupStageFlags =
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT;
+#else
+    constexpr VkPipelineShaderStageCreateFlags fullSubgroupStageFlags = 0;
+#endif
+
     int vectorWidthSlot(uint32_t width) {
       return width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : -1;
     }
@@ -222,6 +230,7 @@ namespace vk_shader {
   DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
   DEFINE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
   DEFINE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+  DEFINE_XGEMM_WIDTH_VARIANTS(transformer_xgemm, vwmd, vwnd)
 #undef DEFINE_XGEMM_DIRECT_WIDTH_VARIANTS
 #undef DEFINE_XGEMM_WIDTH_VARIANTS
 #undef DEFINE_XGEMM_VARIANT
@@ -392,8 +401,13 @@ namespace vk_shader {
   size_t spirv_transformer_scale_dot_product_cooperative_p16s16_size = _binary_transformer_scale_dot_product_cooperative_p16s16_size;
   const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16 = _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_start;
   size_t spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size = _binary_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size;
+#if VULKAN_HAS_NV2_SHADER && defined(VK_KHR_cooperative_matrix) && defined(VK_NV_cooperative_matrix2)
   const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16 = _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_start;
   size_t spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size = _binary_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size;
+#else
+  const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16 = nullptr;
+  size_t spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size = 0;
+#endif
   const unsigned char* spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16 = _binary_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_start;
   size_t spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size = _binary_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size;
 
@@ -442,6 +456,8 @@ namespace vk_shader {
       const unsigned char* bytes;
       size_t size;
       VkShaderModule* module;
+      bool requiresFP16 = false;
+      bool requiresCooperativeMatrix = false;
     };
 #define XGEMM_WIDTH_SOURCES(base, mp, np, modules) \
       {spirv_##base##_##mp##1_##np##1_p32s32, spirv_##base##_##mp##1_##np##1_p32s32_size, &modules[0]}, \
@@ -453,24 +469,24 @@ namespace vk_shader {
       {spirv_##base##_##mp##4_##np##1_p32s32, spirv_##base##_##mp##4_##np##1_p32s32_size, &modules[6]}, \
       {spirv_##base##_##mp##4_##np##2_p32s32, spirv_##base##_##mp##4_##np##2_p32s32_size, &modules[7]}, \
       {spirv_##base##_##mp##4_##np##4_p32s32, spirv_##base##_##mp##4_##np##4_p32s32_size, &modules[8]}, \
-      {spirv_##base##_##mp##1_##np##1_p32s16, spirv_##base##_##mp##1_##np##1_p32s16_size, &modules[9]}, \
-      {spirv_##base##_##mp##1_##np##2_p32s16, spirv_##base##_##mp##1_##np##2_p32s16_size, &modules[10]}, \
-      {spirv_##base##_##mp##1_##np##4_p32s16, spirv_##base##_##mp##1_##np##4_p32s16_size, &modules[11]}, \
-      {spirv_##base##_##mp##2_##np##1_p32s16, spirv_##base##_##mp##2_##np##1_p32s16_size, &modules[12]}, \
-      {spirv_##base##_##mp##2_##np##2_p32s16, spirv_##base##_##mp##2_##np##2_p32s16_size, &modules[13]}, \
-      {spirv_##base##_##mp##2_##np##4_p32s16, spirv_##base##_##mp##2_##np##4_p32s16_size, &modules[14]}, \
-      {spirv_##base##_##mp##4_##np##1_p32s16, spirv_##base##_##mp##4_##np##1_p32s16_size, &modules[15]}, \
-      {spirv_##base##_##mp##4_##np##2_p32s16, spirv_##base##_##mp##4_##np##2_p32s16_size, &modules[16]}, \
-      {spirv_##base##_##mp##4_##np##4_p32s16, spirv_##base##_##mp##4_##np##4_p32s16_size, &modules[17]}, \
-      {spirv_##base##_##mp##1_##np##1_p16s16, spirv_##base##_##mp##1_##np##1_p16s16_size, &modules[18]}, \
-      {spirv_##base##_##mp##1_##np##2_p16s16, spirv_##base##_##mp##1_##np##2_p16s16_size, &modules[19]}, \
-      {spirv_##base##_##mp##1_##np##4_p16s16, spirv_##base##_##mp##1_##np##4_p16s16_size, &modules[20]}, \
-      {spirv_##base##_##mp##2_##np##1_p16s16, spirv_##base##_##mp##2_##np##1_p16s16_size, &modules[21]}, \
-      {spirv_##base##_##mp##2_##np##2_p16s16, spirv_##base##_##mp##2_##np##2_p16s16_size, &modules[22]}, \
-      {spirv_##base##_##mp##2_##np##4_p16s16, spirv_##base##_##mp##2_##np##4_p16s16_size, &modules[23]}, \
-      {spirv_##base##_##mp##4_##np##1_p16s16, spirv_##base##_##mp##4_##np##1_p16s16_size, &modules[24]}, \
-      {spirv_##base##_##mp##4_##np##2_p16s16, spirv_##base##_##mp##4_##np##2_p16s16_size, &modules[25]}, \
-      {spirv_##base##_##mp##4_##np##4_p16s16, spirv_##base##_##mp##4_##np##4_p16s16_size, &modules[26]},
+      {spirv_##base##_##mp##1_##np##1_p32s16, spirv_##base##_##mp##1_##np##1_p32s16_size, &modules[9], true}, \
+      {spirv_##base##_##mp##1_##np##2_p32s16, spirv_##base##_##mp##1_##np##2_p32s16_size, &modules[10], true}, \
+      {spirv_##base##_##mp##1_##np##4_p32s16, spirv_##base##_##mp##1_##np##4_p32s16_size, &modules[11], true}, \
+      {spirv_##base##_##mp##2_##np##1_p32s16, spirv_##base##_##mp##2_##np##1_p32s16_size, &modules[12], true}, \
+      {spirv_##base##_##mp##2_##np##2_p32s16, spirv_##base##_##mp##2_##np##2_p32s16_size, &modules[13], true}, \
+      {spirv_##base##_##mp##2_##np##4_p32s16, spirv_##base##_##mp##2_##np##4_p32s16_size, &modules[14], true}, \
+      {spirv_##base##_##mp##4_##np##1_p32s16, spirv_##base##_##mp##4_##np##1_p32s16_size, &modules[15], true}, \
+      {spirv_##base##_##mp##4_##np##2_p32s16, spirv_##base##_##mp##4_##np##2_p32s16_size, &modules[16], true}, \
+      {spirv_##base##_##mp##4_##np##4_p32s16, spirv_##base##_##mp##4_##np##4_p32s16_size, &modules[17], true}, \
+      {spirv_##base##_##mp##1_##np##1_p16s16, spirv_##base##_##mp##1_##np##1_p16s16_size, &modules[18], true}, \
+      {spirv_##base##_##mp##1_##np##2_p16s16, spirv_##base##_##mp##1_##np##2_p16s16_size, &modules[19], true}, \
+      {spirv_##base##_##mp##1_##np##4_p16s16, spirv_##base##_##mp##1_##np##4_p16s16_size, &modules[20], true}, \
+      {spirv_##base##_##mp##2_##np##1_p16s16, spirv_##base##_##mp##2_##np##1_p16s16_size, &modules[21], true}, \
+      {spirv_##base##_##mp##2_##np##2_p16s16, spirv_##base##_##mp##2_##np##2_p16s16_size, &modules[22], true}, \
+      {spirv_##base##_##mp##2_##np##4_p16s16, spirv_##base##_##mp##2_##np##4_p16s16_size, &modules[23], true}, \
+      {spirv_##base##_##mp##4_##np##1_p16s16, spirv_##base##_##mp##4_##np##1_p16s16_size, &modules[24], true}, \
+      {spirv_##base##_##mp##4_##np##2_p16s16, spirv_##base##_##mp##4_##np##2_p16s16_size, &modules[25], true}, \
+      {spirv_##base##_##mp##4_##np##4_p16s16, spirv_##base##_##mp##4_##np##4_p16s16_size, &modules[26], true},
 #define XGEMM_DIRECT_WIDTH_SOURCES(base, mp, np, modules) \
       {spirv_##base##_##mp##1_##np##1_p32s32, spirv_##base##_##mp##1_##np##1_p32s32_size, &modules[0]}, \
       {spirv_##base##_##mp##1_##np##2_p32s32, spirv_##base##_##mp##1_##np##2_p32s32_size, &modules[1]}, \
@@ -482,25 +498,25 @@ namespace vk_shader {
       {spirv_##base##_##mp##4_##np##2_p32s32, spirv_##base##_##mp##4_##np##2_p32s32_size, &modules[7]}, \
       {spirv_##base##_##mp##4_##np##4_p32s32, spirv_##base##_##mp##4_##np##4_p32s32_size, &modules[8]},
 #define HGEMM_WIDTH_SOURCES(stem, suffix, base) \
-      {spirv_##stem##_vwm1_vwn1##suffix, spirv_##stem##_vwm1_vwn1##suffix##_size, &shaderModule_##base##_variants[0]}, \
-      {spirv_##stem##_vwm1_vwn2##suffix, spirv_##stem##_vwm1_vwn2##suffix##_size, &shaderModule_##base##_variants[1]}, \
-      {spirv_##stem##_vwm1_vwn4##suffix, spirv_##stem##_vwm1_vwn4##suffix##_size, &shaderModule_##base##_variants[2]}, \
-      {spirv_##stem##_vwm2_vwn1##suffix, spirv_##stem##_vwm2_vwn1##suffix##_size, &shaderModule_##base##_variants[3]}, \
-      {spirv_##stem##_vwm2_vwn2##suffix, spirv_##stem##_vwm2_vwn2##suffix##_size, &shaderModule_##base##_variants[4]}, \
-      {spirv_##stem##_vwm2_vwn4##suffix, spirv_##stem##_vwm2_vwn4##suffix##_size, &shaderModule_##base##_variants[5]}, \
-      {spirv_##stem##_vwm4_vwn1##suffix, spirv_##stem##_vwm4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
-      {spirv_##stem##_vwm4_vwn2##suffix, spirv_##stem##_vwm4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
-      {spirv_##stem##_vwm4_vwn4##suffix, spirv_##stem##_vwm4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
+      {spirv_##stem##_vwm1_vwn1##suffix, spirv_##stem##_vwm1_vwn1##suffix##_size, &shaderModule_##base##_variants[0], true, true}, \
+      {spirv_##stem##_vwm1_vwn2##suffix, spirv_##stem##_vwm1_vwn2##suffix##_size, &shaderModule_##base##_variants[1], true, true}, \
+      {spirv_##stem##_vwm1_vwn4##suffix, spirv_##stem##_vwm1_vwn4##suffix##_size, &shaderModule_##base##_variants[2], true, true}, \
+      {spirv_##stem##_vwm2_vwn1##suffix, spirv_##stem##_vwm2_vwn1##suffix##_size, &shaderModule_##base##_variants[3], true, true}, \
+      {spirv_##stem##_vwm2_vwn2##suffix, spirv_##stem##_vwm2_vwn2##suffix##_size, &shaderModule_##base##_variants[4], true, true}, \
+      {spirv_##stem##_vwm2_vwn4##suffix, spirv_##stem##_vwm2_vwn4##suffix##_size, &shaderModule_##base##_variants[5], true, true}, \
+      {spirv_##stem##_vwm4_vwn1##suffix, spirv_##stem##_vwm4_vwn1##suffix##_size, &shaderModule_##base##_variants[6], true, true}, \
+      {spirv_##stem##_vwm4_vwn2##suffix, spirv_##stem##_vwm4_vwn2##suffix##_size, &shaderModule_##base##_variants[7], true, true}, \
+      {spirv_##stem##_vwm4_vwn4##suffix, spirv_##stem##_vwm4_vwn4##suffix##_size, &shaderModule_##base##_variants[8], true, true},
 #define HGEMM_NHWC_WIDTH_SOURCES(stem, suffix, base) \
-      {spirv_##stem##_vwk1_vwn1##suffix, spirv_##stem##_vwk1_vwn1##suffix##_size, &shaderModule_##base##_variants[0]}, \
-      {spirv_##stem##_vwk1_vwn2##suffix, spirv_##stem##_vwk1_vwn2##suffix##_size, &shaderModule_##base##_variants[1]}, \
-      {spirv_##stem##_vwk1_vwn4##suffix, spirv_##stem##_vwk1_vwn4##suffix##_size, &shaderModule_##base##_variants[2]}, \
-      {spirv_##stem##_vwk2_vwn1##suffix, spirv_##stem##_vwk2_vwn1##suffix##_size, &shaderModule_##base##_variants[3]}, \
-      {spirv_##stem##_vwk2_vwn2##suffix, spirv_##stem##_vwk2_vwn2##suffix##_size, &shaderModule_##base##_variants[4]}, \
-      {spirv_##stem##_vwk2_vwn4##suffix, spirv_##stem##_vwk2_vwn4##suffix##_size, &shaderModule_##base##_variants[5]}, \
-      {spirv_##stem##_vwk4_vwn1##suffix, spirv_##stem##_vwk4_vwn1##suffix##_size, &shaderModule_##base##_variants[6]}, \
-      {spirv_##stem##_vwk4_vwn2##suffix, spirv_##stem##_vwk4_vwn2##suffix##_size, &shaderModule_##base##_variants[7]}, \
-      {spirv_##stem##_vwk4_vwn4##suffix, spirv_##stem##_vwk4_vwn4##suffix##_size, &shaderModule_##base##_variants[8]},
+      {spirv_##stem##_vwk1_vwn1##suffix, spirv_##stem##_vwk1_vwn1##suffix##_size, &shaderModule_##base##_variants[0], true, true}, \
+      {spirv_##stem##_vwk1_vwn2##suffix, spirv_##stem##_vwk1_vwn2##suffix##_size, &shaderModule_##base##_variants[1], true, true}, \
+      {spirv_##stem##_vwk1_vwn4##suffix, spirv_##stem##_vwk1_vwn4##suffix##_size, &shaderModule_##base##_variants[2], true, true}, \
+      {spirv_##stem##_vwk2_vwn1##suffix, spirv_##stem##_vwk2_vwn1##suffix##_size, &shaderModule_##base##_variants[3], true, true}, \
+      {spirv_##stem##_vwk2_vwn2##suffix, spirv_##stem##_vwk2_vwn2##suffix##_size, &shaderModule_##base##_variants[4], true, true}, \
+      {spirv_##stem##_vwk2_vwn4##suffix, spirv_##stem##_vwk2_vwn4##suffix##_size, &shaderModule_##base##_variants[5], true, true}, \
+      {spirv_##stem##_vwk4_vwn1##suffix, spirv_##stem##_vwk4_vwn1##suffix##_size, &shaderModule_##base##_variants[6], true, true}, \
+      {spirv_##stem##_vwk4_vwn2##suffix, spirv_##stem##_vwk4_vwn2##suffix##_size, &shaderModule_##base##_variants[7], true, true}, \
+      {spirv_##stem##_vwk4_vwn4##suffix, spirv_##stem##_vwk4_vwn4##suffix##_size, &shaderModule_##base##_variants[8], true, true},
     const ShaderSource shaders[] = {
       {spirv_add_channel_bias_nc_identity_fp32, spirv_add_channel_bias_nc_identity_fp32_size, &shaderModule_add_channel_bias_nc_identity_fp32},
       {spirv_add_channel_bias_nc_mish_fp32, spirv_add_channel_bias_nc_mish_fp32_size, &shaderModule_add_channel_bias_nc_mish_fp32},
@@ -508,34 +524,34 @@ namespace vk_shader {
       {spirv_add_channel_bias_nc_relu_fp32, spirv_add_channel_bias_nc_relu_fp32_size, &shaderModule_add_channel_bias_nc_relu_fp32},
       {spirv_add_channel_bias_nc_silu_fp32, spirv_add_channel_bias_nc_silu_fp32_size, &shaderModule_add_channel_bias_nc_silu_fp32},
       {spirv_add_channel_bias_fp32, spirv_add_channel_bias_fp32_size, &shaderModule_add_channel_bias_fp32},
-      {spirv_add_channel_bias_p16s16, spirv_add_channel_bias_p16s16_size, &shaderModule_add_channel_bias_p16s16},
-      {spirv_add_channel_bias_p32s16, spirv_add_channel_bias_p32s16_size, &shaderModule_add_channel_bias_p32s16},
+      {spirv_add_channel_bias_p16s16, spirv_add_channel_bias_p16s16_size, &shaderModule_add_channel_bias_p16s16, true},
+      {spirv_add_channel_bias_p32s16, spirv_add_channel_bias_p32s16_size, &shaderModule_add_channel_bias_p32s16, true},
       {spirv_add_pointwise_fp32, spirv_add_pointwise_fp32_size, &shaderModule_add_pointwise_fp32},
-      {spirv_add_pointwise_p16s16, spirv_add_pointwise_p16s16_size, &shaderModule_add_pointwise_p16s16},
-      {spirv_add_pointwise_p32s16, spirv_add_pointwise_p32s16_size, &shaderModule_add_pointwise_p32s16},
+      {spirv_add_pointwise_p16s16, spirv_add_pointwise_p16s16_size, &shaderModule_add_pointwise_p16s16, true},
+      {spirv_add_pointwise_p32s16, spirv_add_pointwise_p32s16_size, &shaderModule_add_pointwise_p32s16, true},
       {spirv_bn_mask_identity_fp32, spirv_bn_mask_identity_fp32_size, &shaderModule_bn_mask_identity_fp32},
-      {spirv_bn_mask_identity_p16s16, spirv_bn_mask_identity_p16s16_size, &shaderModule_bn_mask_identity_p16s16},
-      {spirv_bn_mask_identity_p32s16, spirv_bn_mask_identity_p32s16_size, &shaderModule_bn_mask_identity_p32s16},
+      {spirv_bn_mask_identity_p16s16, spirv_bn_mask_identity_p16s16_size, &shaderModule_bn_mask_identity_p16s16, true},
+      {spirv_bn_mask_identity_p32s16, spirv_bn_mask_identity_p32s16_size, &shaderModule_bn_mask_identity_p32s16, true},
       {spirv_bn_mask_mish_fp32, spirv_bn_mask_mish_fp32_size, &shaderModule_bn_mask_mish_fp32},
-      {spirv_bn_mask_mish_p16s16, spirv_bn_mask_mish_p16s16_size, &shaderModule_bn_mask_mish_p16s16},
-      {spirv_bn_mask_mish_p32s16, spirv_bn_mask_mish_p32s16_size, &shaderModule_bn_mask_mish_p32s16},
+      {spirv_bn_mask_mish_p16s16, spirv_bn_mask_mish_p16s16_size, &shaderModule_bn_mask_mish_p16s16, true},
+      {spirv_bn_mask_mish_p32s16, spirv_bn_mask_mish_p32s16_size, &shaderModule_bn_mask_mish_p32s16, true},
       {spirv_bn_mask_mish_scale8_fp32, spirv_bn_mask_mish_scale8_fp32_size, &shaderModule_bn_mask_mish_scale8_fp32},
-      {spirv_bn_mask_mish_scale8_p16s16, spirv_bn_mask_mish_scale8_p16s16_size, &shaderModule_bn_mask_mish_scale8_p16s16},
-      {spirv_bn_mask_mish_scale8_p32s16, spirv_bn_mask_mish_scale8_p32s16_size, &shaderModule_bn_mask_mish_scale8_p32s16},
+      {spirv_bn_mask_mish_scale8_p16s16, spirv_bn_mask_mish_scale8_p16s16_size, &shaderModule_bn_mask_mish_scale8_p16s16, true},
+      {spirv_bn_mask_mish_scale8_p32s16, spirv_bn_mask_mish_scale8_p32s16_size, &shaderModule_bn_mask_mish_scale8_p32s16, true},
       {spirv_bn_mask_relu_fp32, spirv_bn_mask_relu_fp32_size, &shaderModule_bn_mask_relu_fp32},
-      {spirv_bn_mask_relu_p16s16, spirv_bn_mask_relu_p16s16_size, &shaderModule_bn_mask_relu_p16s16},
-      {spirv_bn_mask_relu_p32s16, spirv_bn_mask_relu_p32s16_size, &shaderModule_bn_mask_relu_p32s16},
+      {spirv_bn_mask_relu_p16s16, spirv_bn_mask_relu_p16s16_size, &shaderModule_bn_mask_relu_p16s16, true},
+      {spirv_bn_mask_relu_p32s16, spirv_bn_mask_relu_p32s16_size, &shaderModule_bn_mask_relu_p32s16, true},
       {spirv_bn_mask_silu_fp32, spirv_bn_mask_silu_fp32_size, &shaderModule_bn_mask_silu_fp32},
-      {spirv_bn_mask_silu_p16s16, spirv_bn_mask_silu_p16s16_size, &shaderModule_bn_mask_silu_p16s16},
-      {spirv_bn_mask_silu_p32s16, spirv_bn_mask_silu_p32s16_size, &shaderModule_bn_mask_silu_p32s16},
+      {spirv_bn_mask_silu_p16s16, spirv_bn_mask_silu_p16s16_size, &shaderModule_bn_mask_silu_p16s16, true},
+      {spirv_bn_mask_silu_p32s16, spirv_bn_mask_silu_p32s16_size, &shaderModule_bn_mask_silu_p32s16, true},
       {spirv_conv2d_fp32, spirv_conv2d_fp32_size, &shaderModule_conv2d_fp32},
-      {spirv_conv2d_p16s16, spirv_conv2d_p16s16_size, &shaderModule_conv2d_p16s16},
-      {spirv_conv2d_p32s16, spirv_conv2d_p32s16_size, &shaderModule_conv2d_p32s16},
-      {spirv_nchw_to_nhwc_p16s16, spirv_nchw_to_nhwc_p16s16_size, &shaderModule_nchw_to_nhwc_p16s16},
-      {spirv_nhwc_to_nchw_p16s16, spirv_nhwc_to_nchw_p16s16_size, &shaderModule_nhwc_to_nchw_p16s16},
-      {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16},
-      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16},
-      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32},
+      {spirv_conv2d_p16s16, spirv_conv2d_p16s16_size, &shaderModule_conv2d_p16s16, true},
+      {spirv_conv2d_p32s16, spirv_conv2d_p32s16_size, &shaderModule_conv2d_p32s16, true},
+      {spirv_nchw_to_nhwc_p16s16, spirv_nchw_to_nhwc_p16s16_size, &shaderModule_nchw_to_nhwc_p16s16, true},
+      {spirv_nhwc_to_nchw_p16s16, spirv_nhwc_to_nchw_p16s16_size, &shaderModule_nhwc_to_nchw_p16s16, true},
+      {spirv_nhwc_matrix_to_nchw_p16s16, spirv_nhwc_matrix_to_nchw_p16s16_size, &shaderModule_nhwc_matrix_to_nchw_p16s16, true},
+      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp16, spirv_hgemm_cooperative_matrix_nhwc_acc_fp16_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp16, true, true},
+      {spirv_hgemm_cooperative_matrix_nhwc_acc_fp32, spirv_hgemm_cooperative_matrix_nhwc_acc_fp32_size, &shaderModule_hgemm_cooperative_matrix_nhwc_acc_fp32, true, true},
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb0, hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb0)
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa0_sb1, hgemm_cooperative_matrix_nhwc_acc_fp16_sa0_sb1)
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp16, _sa1_sb0, hgemm_cooperative_matrix_nhwc_acc_fp16_sa1_sb0)
@@ -545,10 +561,10 @@ namespace vk_shader {
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb0, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb0)
       HGEMM_NHWC_WIDTH_SOURCES(hgemm_cooperative_matrix_nhwc_acc_fp32, _sa1_sb1, hgemm_cooperative_matrix_nhwc_acc_fp32_sa1_sb1)
       {spirv_extract_channel0_fp32, spirv_extract_channel0_fp32_size, &shaderModule_extract_channel0_fp32},
-      {spirv_extract_channel0_p16s16, spirv_extract_channel0_p16s16_size, &shaderModule_extract_channel0_p16s16},
-      {spirv_extract_channel0_p32s16, spirv_extract_channel0_p32s16_size, &shaderModule_extract_channel0_p32s16},
+      {spirv_extract_channel0_p16s16, spirv_extract_channel0_p16s16_size, &shaderModule_extract_channel0_p16s16, true},
+      {spirv_extract_channel0_p32s16, spirv_extract_channel0_p32s16_size, &shaderModule_extract_channel0_p32s16, true},
       {spirv_global_pooling_channels_fp32, spirv_global_pooling_channels_fp32_size, &shaderModule_global_pooling_channels_fp32},
-      {spirv_global_pooling_channels_p32s16, spirv_global_pooling_channels_p32s16_size, &shaderModule_global_pooling_channels_p32s16},
+      {spirv_global_pooling_channels_p32s16, spirv_global_pooling_channels_p32s16_size, &shaderModule_global_pooling_channels_p32s16, true},
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp16, _sa0_sb0, hgemm_cooperative_matrix_acc_fp16_sa0_sb0)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp16, _sa0_sb1, hgemm_cooperative_matrix_acc_fp16_sa0_sb1)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp16, _sa1_sb0, hgemm_cooperative_matrix_acc_fp16_sa1_sb0)
@@ -561,58 +577,59 @@ namespace vk_shader {
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_acc_fp32, _sa1_sb1, hgemm_cooperative_matrix_acc_fp32_sa1_sb1)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_acc_fp32, _sb0, hgemm_cooperative_matrix_nchw_acc_fp32_sb0)
       HGEMM_WIDTH_SOURCES(hgemm_cooperative_matrix_nchw_acc_fp32, _sb1, hgemm_cooperative_matrix_nchw_acc_fp32_sb1)
-      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0},
-      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1},
-      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0},
-      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb0, true, true},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp16_vwm1_vwn1_sb1, true, true},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb0, true, true},
+      {spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1, spirv_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1_size, &shaderModule_transformer_dual_gemm_swiglu_acc_fp32_vwm1_vwn1_sb1, true, true},
       {spirv_sum_channels_fp32, spirv_sum_channels_fp32_size, &shaderModule_sum_channels_fp32},
-      {spirv_sum_channels_p32s16, spirv_sum_channels_p32s16_size, &shaderModule_sum_channels_p32s16},
+      {spirv_sum_channels_p32s16, spirv_sum_channels_p32s16_size, &shaderModule_sum_channels_p32s16, true},
       {spirv_transformer_apply_rope_fp32, spirv_transformer_apply_rope_fp32_size, &shaderModule_transformer_apply_rope_fp32},
-      {spirv_transformer_apply_rope_p16s16, spirv_transformer_apply_rope_p16s16_size, &shaderModule_transformer_apply_rope_p16s16},
-      {spirv_transformer_apply_rope_p32s16, spirv_transformer_apply_rope_p32s16_size, &shaderModule_transformer_apply_rope_p32s16},
-      {spirv_transformer_rms_norm_subgroup_p16s16, spirv_transformer_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_rms_norm_subgroup_p16s16},
-      {spirv_transformer_residual_rms_norm_subgroup_p16s16, spirv_transformer_residual_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_residual_rms_norm_subgroup_p16s16},
+      {spirv_transformer_apply_rope_p16s16, spirv_transformer_apply_rope_p16s16_size, &shaderModule_transformer_apply_rope_p16s16, true},
+      {spirv_transformer_apply_rope_p32s16, spirv_transformer_apply_rope_p32s16_size, &shaderModule_transformer_apply_rope_p32s16, true},
+      {spirv_transformer_rms_norm_subgroup_p16s16, spirv_transformer_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_rms_norm_subgroup_p16s16, true},
+      {spirv_transformer_residual_rms_norm_subgroup_p16s16, spirv_transformer_residual_rms_norm_subgroup_p16s16_size, &shaderModule_transformer_residual_rms_norm_subgroup_p16s16, true},
       {spirv_transformer_rms_norm_fp32, spirv_transformer_rms_norm_fp32_size, &shaderModule_transformer_rms_norm_fp32},
-      {spirv_transformer_rms_norm_p16s16, spirv_transformer_rms_norm_p16s16_size, &shaderModule_transformer_rms_norm_p16s16},
-      {spirv_transformer_residual_rms_norm_p16s16, spirv_transformer_residual_rms_norm_p16s16_size, &shaderModule_transformer_residual_rms_norm_p16s16},
-      {spirv_transformer_rms_norm_p32s16, spirv_transformer_rms_norm_p32s16_size, &shaderModule_transformer_rms_norm_p32s16},
+      {spirv_transformer_rms_norm_p16s16, spirv_transformer_rms_norm_p16s16_size, &shaderModule_transformer_rms_norm_p16s16, true},
+      {spirv_transformer_residual_rms_norm_p16s16, spirv_transformer_residual_rms_norm_p16s16_size, &shaderModule_transformer_residual_rms_norm_p16s16, true},
+      {spirv_transformer_rms_norm_p32s16, spirv_transformer_rms_norm_p32s16_size, &shaderModule_transformer_rms_norm_p32s16, true},
       {spirv_transformer_scale_dot_product_fp32, spirv_transformer_scale_dot_product_fp32_size, &shaderModule_transformer_scale_dot_product_fp32},
       {spirv_transformer_scale_dot_product_naive_fp32, spirv_transformer_scale_dot_product_naive_fp32_size, &shaderModule_transformer_scale_dot_product_naive_fp32},
-      {spirv_transformer_scale_dot_product_naive_p16s16, spirv_transformer_scale_dot_product_naive_p16s16_size, &shaderModule_transformer_scale_dot_product_naive_p16s16},
-      {spirv_transformer_scale_dot_product_naive_p32s16, spirv_transformer_scale_dot_product_naive_p32s16_size, &shaderModule_transformer_scale_dot_product_naive_p32s16},
-      {spirv_transformer_scale_dot_product_p16s16, spirv_transformer_scale_dot_product_p16s16_size, &shaderModule_transformer_scale_dot_product_p16s16},
-      {spirv_transformer_scale_dot_product_p32s16, spirv_transformer_scale_dot_product_p32s16_size, &shaderModule_transformer_scale_dot_product_p32s16},
-      {spirv_transformer_scale_dot_product_cooperative_p16s16, spirv_transformer_scale_dot_product_cooperative_p16s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p16s16},
-      {spirv_transformer_scale_dot_product_cooperative_p32s16, spirv_transformer_scale_dot_product_cooperative_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p32s16},
-      {spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16},
-      {spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16},
-      {spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_block_p32s16},
+      {spirv_transformer_scale_dot_product_naive_p16s16, spirv_transformer_scale_dot_product_naive_p16s16_size, &shaderModule_transformer_scale_dot_product_naive_p16s16, true},
+      {spirv_transformer_scale_dot_product_naive_p32s16, spirv_transformer_scale_dot_product_naive_p32s16_size, &shaderModule_transformer_scale_dot_product_naive_p32s16, true},
+      {spirv_transformer_scale_dot_product_p16s16, spirv_transformer_scale_dot_product_p16s16_size, &shaderModule_transformer_scale_dot_product_p16s16, true},
+      {spirv_transformer_scale_dot_product_p32s16, spirv_transformer_scale_dot_product_p32s16_size, &shaderModule_transformer_scale_dot_product_p32s16, true},
+      {spirv_transformer_scale_dot_product_cooperative_p16s16, spirv_transformer_scale_dot_product_cooperative_p16s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p16s16, true, true},
+      {spirv_transformer_scale_dot_product_cooperative_p32s16, spirv_transformer_scale_dot_product_cooperative_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_p32s16, true, true},
+      {spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16, true, true},
+      {spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_register_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16, true, true},
+      {spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16, spirv_transformer_scale_dot_product_cooperative_nhwc_block_p32s16_size, &shaderModule_transformer_scale_dot_product_cooperative_nhwc_block_p32s16, true, true},
       {spirv_transformer_spatial_rms_norm_apply_fp32, spirv_transformer_spatial_rms_norm_apply_fp32_size, &shaderModule_transformer_spatial_rms_norm_apply_fp32},
-      {spirv_transformer_spatial_rms_norm_apply_p16s16, spirv_transformer_spatial_rms_norm_apply_p16s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p16s16},
-      {spirv_transformer_spatial_rms_norm_apply_p32s16, spirv_transformer_spatial_rms_norm_apply_p32s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p32s16},
+      {spirv_transformer_spatial_rms_norm_apply_p16s16, spirv_transformer_spatial_rms_norm_apply_p16s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p16s16, true},
+      {spirv_transformer_spatial_rms_norm_apply_p32s16, spirv_transformer_spatial_rms_norm_apply_p32s16_size, &shaderModule_transformer_spatial_rms_norm_apply_p32s16, true},
       {spirv_transformer_spatial_rms_norm_reduce_fp32, spirv_transformer_spatial_rms_norm_reduce_fp32_size, &shaderModule_transformer_spatial_rms_norm_reduce_fp32},
-      {spirv_transformer_spatial_rms_norm_reduce_p16s16, spirv_transformer_spatial_rms_norm_reduce_p16s16_size, &shaderModule_transformer_spatial_rms_norm_reduce_p16s16},
-      {spirv_transformer_spatial_rms_norm_reduce_p32s16, spirv_transformer_spatial_rms_norm_reduce_p32s16_size, &shaderModule_transformer_spatial_rms_norm_reduce_p32s16},
+      {spirv_transformer_spatial_rms_norm_reduce_p16s16, spirv_transformer_spatial_rms_norm_reduce_p16s16_size, &shaderModule_transformer_spatial_rms_norm_reduce_p16s16, true},
+      {spirv_transformer_spatial_rms_norm_reduce_p32s16, spirv_transformer_spatial_rms_norm_reduce_p32s16_size, &shaderModule_transformer_spatial_rms_norm_reduce_p32s16, true},
       {spirv_transformer_spatial_rms_norm_sum_sq_fp32, spirv_transformer_spatial_rms_norm_sum_sq_fp32_size, &shaderModule_transformer_spatial_rms_norm_sum_sq_fp32},
-      {spirv_transformer_spatial_rms_norm_sum_sq_p16s16, spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size, &shaderModule_transformer_spatial_rms_norm_sum_sq_p16s16},
-      {spirv_transformer_spatial_rms_norm_sum_sq_p32s16, spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size, &shaderModule_transformer_spatial_rms_norm_sum_sq_p32s16},
+      {spirv_transformer_spatial_rms_norm_sum_sq_p16s16, spirv_transformer_spatial_rms_norm_sum_sq_p16s16_size, &shaderModule_transformer_spatial_rms_norm_sum_sq_p16s16, true},
+      {spirv_transformer_spatial_rms_norm_sum_sq_p32s16, spirv_transformer_spatial_rms_norm_sum_sq_p32s16_size, &shaderModule_transformer_spatial_rms_norm_sum_sq_p32s16, true},
       {spirv_transformer_swiglu_fp32, spirv_transformer_swiglu_fp32_size, &shaderModule_transformer_swiglu_fp32},
-      {spirv_transformer_swiglu_p16s16, spirv_transformer_swiglu_p16s16_size, &shaderModule_transformer_swiglu_p16s16},
-      {spirv_transformer_swiglu_p32s16, spirv_transformer_swiglu_p32s16_size, &shaderModule_transformer_swiglu_p32s16},
+      {spirv_transformer_swiglu_p16s16, spirv_transformer_swiglu_p16s16_size, &shaderModule_transformer_swiglu_p16s16, true},
+      {spirv_transformer_swiglu_p32s16, spirv_transformer_swiglu_p32s16_size, &shaderModule_transformer_swiglu_p32s16, true},
       {spirv_value_head_pool_channels_fp32, spirv_value_head_pool_channels_fp32_size, &shaderModule_value_head_pool_channels_fp32},
-      {spirv_value_head_pool_channels_p32s16, spirv_value_head_pool_channels_p32s16_size, &shaderModule_value_head_pool_channels_p32s16},
+      {spirv_value_head_pool_channels_p32s16, spirv_value_head_pool_channels_p32s16_size, &shaderModule_value_head_pool_channels_p32s16, true},
       {spirv_winograd_input_transform_bnact_fp32, spirv_winograd_input_transform_bnact_fp32_size, &shaderModule_winograd_input_transform_bnact_fp32},
-      {spirv_winograd_input_transform_bnact_p16s16, spirv_winograd_input_transform_bnact_p16s16_size, &shaderModule_winograd_input_transform_bnact_p16s16},
-      {spirv_winograd_input_transform_bnact_p32s16, spirv_winograd_input_transform_bnact_p32s16_size, &shaderModule_winograd_input_transform_bnact_p32s16},
+      {spirv_winograd_input_transform_bnact_p16s16, spirv_winograd_input_transform_bnact_p16s16_size, &shaderModule_winograd_input_transform_bnact_p16s16, true},
+      {spirv_winograd_input_transform_bnact_p32s16, spirv_winograd_input_transform_bnact_p32s16_size, &shaderModule_winograd_input_transform_bnact_p32s16, true},
       {spirv_winograd_input_transform_fp32, spirv_winograd_input_transform_fp32_size, &shaderModule_winograd_input_transform_fp32},
-      {spirv_winograd_input_transform_p16s16, spirv_winograd_input_transform_p16s16_size, &shaderModule_winograd_input_transform_p16s16},
-      {spirv_winograd_input_transform_p32s16, spirv_winograd_input_transform_p32s16_size, &shaderModule_winograd_input_transform_p32s16},
+      {spirv_winograd_input_transform_p16s16, spirv_winograd_input_transform_p16s16_size, &shaderModule_winograd_input_transform_p16s16, true},
+      {spirv_winograd_input_transform_p32s16, spirv_winograd_input_transform_p32s16_size, &shaderModule_winograd_input_transform_p32s16, true},
       {spirv_winograd_output_transform_fp32, spirv_winograd_output_transform_fp32_size, &shaderModule_winograd_output_transform_fp32},
-      {spirv_winograd_output_transform_p16s16, spirv_winograd_output_transform_p16s16_size, &shaderModule_winograd_output_transform_p16s16},
-      {spirv_winograd_output_transform_p32s16, spirv_winograd_output_transform_p32s16_size, &shaderModule_winograd_output_transform_p32s16},
+      {spirv_winograd_output_transform_p16s16, spirv_winograd_output_transform_p16s16_size, &shaderModule_winograd_output_transform_p16s16, true},
+      {spirv_winograd_output_transform_p32s16, spirv_winograd_output_transform_p32s16_size, &shaderModule_winograd_output_transform_p32s16, true},
       XGEMM_WIDTH_SOURCES(xgemm_batched, vwm, vwn, shaderModule_xgemm_batched_variants)
       XGEMM_DIRECT_WIDTH_SOURCES(xgemm_direct_batched_tt, vwmd, vwnd, shaderModule_xgemm_direct_batched_tt_variants)
       XGEMM_WIDTH_SOURCES(xgemm_strided_batched_nn, vwmd, vwnd, shaderModule_xgemm_strided_batched_nn_variants)
+      XGEMM_WIDTH_SOURCES(transformer_xgemm, vwmd, vwnd, shaderModule_transformer_xgemm_variants)
     };
 #undef XGEMM_DIRECT_WIDTH_SOURCES
 #undef XGEMM_WIDTH_SOURCES
@@ -622,7 +639,24 @@ namespace vk_shader {
     shaderModuleFields.reserve(sizeof(shaders) / sizeof(shaders[0]));
     for(const ShaderSource& shader: shaders)
       shaderModuleFields.push_back(shader.module);
+    const uint32_t maxSpirvVersion = deviceInfo.apiVersion >= VK_MAKE_VERSION(1, 3, 0) ? 0x00010600u :
+      deviceInfo.apiVersion >= VK_API_VERSION_1_2 ? 0x00010500u : 0x00010300u;
     for(const ShaderSource& shader: shaders) {
+      if(shader.requiresFP16 &&
+         (deviceInfo.shaderFloat16Int8Features.shaderFloat16 != VK_TRUE ||
+          deviceInfo.storage16BitFeatures.storageBuffer16BitAccess != VK_TRUE))
+        continue;
+      if(shader.requiresCooperativeMatrix) {
+#if defined(VK_KHR_cooperative_matrix)
+        if(deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix != VK_TRUE ||
+           deviceInfo.vulkanMemoryModelFeatures.vulkanMemoryModel != VK_TRUE ||
+           (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0 ||
+           (deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) == 0)
+          continue;
+#else
+        continue;
+#endif
+      }
       if((shader.module == &shaderModule_transformer_rms_norm_subgroup_p16s16 ||
           shader.module == &shaderModule_transformer_residual_rms_norm_subgroup_p16s16) &&
          !canUseTransformerRMSNormSubgroup(deviceInfo, TransformerRMSNormTuneParms{
@@ -635,8 +669,14 @@ namespace vk_shader {
          ((deviceInfo.subgroupProperties.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) == 0 ||
           (deviceInfo.subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0))
         continue;
-      if(shader.size % 4 != 0)
+      if(shader.size < 5 * sizeof(uint32_t) || shader.size % sizeof(uint32_t) != 0)
         return VK_ERROR_INITIALIZATION_FAILED;
+      uint32_t header[2];
+      std::memcpy(header, shader.bytes, sizeof(header));
+      if(header[0] != 0x07230203u)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      if(header[1] > maxSpirvVersion)
+        continue;
       const std::vector<unsigned char> spirvBytes(shader.bytes, shader.bytes + shader.size);
       VkResult result = VK_ERROR_UNKNOWN;
       *shader.module = vk_helper::createShaderModuleFromSPIRVBytes(device, spirvBytes, &result);
@@ -789,6 +829,7 @@ namespace vk_shader {
     }
     if((result = createXgemmBatched(xgemmBatchedFp32, tuneParams.xgemm, tuneParams.xgemm16, tuneParams.vulkan)) != VK_SUCCESS) return result;
     if((result = createXgemmStridedBatched(xgemmStridedBatchedFp32, tuneParams.xgemmDirect, tuneParams.vulkan)) != VK_SUCCESS) return result;
+    if((result = createTransformerXgemm(transformerXgemm, tuneParams.transformerXgemm, tuneParams.vulkan)) != VK_SUCCESS) return result;
     const bool buildNHWCPipelines = supportsNHWC;
     if((result = createBatchNormMaskIdentity(batchNormMaskIdentity, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
     if((result = createBatchNormMaskRelu(batchNormMaskRelu, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
@@ -860,7 +901,7 @@ namespace vk_shader {
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
       if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
-      if(tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
+      if(supportsNHWC && tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformerCooperativeMatrixNCHW, qHeadDim, vHeadDim, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
       }
       if(buildTransformerAttentionNHWC) {
@@ -911,6 +952,7 @@ namespace vk_shader {
     destroyPipeline(winogradOutputTransform5x5NHWC);
     destroyPipeline(xgemmDirectBatchedTT);
     destroyPipeline(xgemmStridedBatchedFp32);
+    destroyPipeline(transformerXgemm);
     destroyPipeline(xgemmBatchedFp32);
     destroyPipeline(batchNormMaskIdentity);
     destroyPipeline(batchNormMaskIdentityNHWC);
@@ -1216,7 +1258,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1253,7 +1295,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1422,7 +1464,7 @@ namespace vk_shader {
     return createPipeline(
       name, shaderModules[variant], 3, sizeof(HGemmCooperativeMatrixParams), pipeline,
       &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1475,7 +1517,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1535,7 +1577,7 @@ namespace vk_shader {
       spec.localSizeX,
       spec.localSizeY,
       spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 
@@ -1628,6 +1670,58 @@ namespace vk_shader {
     return createPipeline(
       xgemmVariantName("xgemm_strided_batched_nn", "vwmd", "vwnd", tuneParams.VWMD, tuneParams.VWND, precision),
       shaderModule_xgemm_strided_batched_nn_variants[variant], 3, sizeof(XgemmStridedBatchedFp32Params), pipeline,
+      &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ
+    );
+  }
+
+  VkResult ComputePipelines::createTransformerXgemm(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+    static_assert(sizeof(XgemmDirectSpec) == 44 &&
+      offsetof(XgemmDirectSpec, localSizeX) == 0 && offsetof(XgemmDirectSpec, localSizeY) == 4 &&
+      offsetof(XgemmDirectSpec, localSizeZ) == 8 && offsetof(XgemmDirectSpec, WGD) == 12 &&
+      offsetof(XgemmDirectSpec, MDIMCD) == 16 && offsetof(XgemmDirectSpec, NDIMCD) == 20 &&
+      offsetof(XgemmDirectSpec, MDIMAD) == 24 && offsetof(XgemmDirectSpec, NDIMBD) == 28 &&
+      offsetof(XgemmDirectSpec, KWID) == 32 && offsetof(XgemmDirectSpec, PADA) == 36 &&
+      offsetof(XgemmDirectSpec, PADB) == 40, "Transformer XGEMM specialization ABI");
+    static_assert(sizeof(XgemmStridedBatchedFp32Params) == 40 &&
+      offsetof(XgemmStridedBatchedFp32Params, kSizeM) == 0 && offsetof(XgemmStridedBatchedFp32Params, kSizeN) == 4 &&
+      offsetof(XgemmStridedBatchedFp32Params, kSizeK) == 8 && offsetof(XgemmStridedBatchedFp32Params, aLead) == 12 &&
+      offsetof(XgemmStridedBatchedFp32Params, aStride) == 16 && offsetof(XgemmStridedBatchedFp32Params, bLead) == 20 &&
+      offsetof(XgemmStridedBatchedFp32Params, bStride) == 24 && offsetof(XgemmStridedBatchedFp32Params, cLead) == 28 &&
+      offsetof(XgemmStridedBatchedFp32Params, cStride) == 32 && offsetof(XgemmStridedBatchedFp32Params, cTranspose) == 36,
+      "Transformer XGEMM push-constant ABI");
+    const bool useFP16Compute = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute &&
+      vulkanParams.shouldUseFP16Storage && vulkanParams.shouldUseFP16Compute;
+    const uint64_t sharedBytes = static_cast<uint64_t>(tuneParams.WGD) *
+      (2ull * tuneParams.WGD + tuneParams.PADA + tuneParams.PADB) * (useFP16Compute ? 2 : 4);
+    const auto& limits = deviceInfo.properties.limits;
+    if(!tuneParams.isValid() || tuneParams.MDIMCD > limits.maxComputeWorkGroupSize[0] ||
+       tuneParams.NDIMCD > limits.maxComputeWorkGroupSize[1] ||
+       static_cast<uint64_t>(tuneParams.MDIMCD) * tuneParams.NDIMCD > limits.maxComputeWorkGroupInvocations ||
+       sharedBytes > limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    auto spec = XgemmDirectSpec();
+    spec.localSizeX = tuneParams.MDIMCD;
+    spec.localSizeY = tuneParams.NDIMCD;
+    spec.localSizeZ = 1;
+    spec.WGD = static_cast<int>(tuneParams.WGD);
+    spec.MDIMCD = static_cast<int>(tuneParams.MDIMCD);
+    spec.NDIMCD = static_cast<int>(tuneParams.NDIMCD);
+    spec.MDIMAD = static_cast<int>(tuneParams.MDIMAD);
+    spec.NDIMBD = static_cast<int>(tuneParams.NDIMBD);
+    spec.KWID = static_cast<int>(tuneParams.KWID);
+    spec.PADA = static_cast<int>(tuneParams.PADA);
+    spec.PADB = static_cast<int>(tuneParams.PADB);
+    auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
+    auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
+    VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
+    const int precision = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage
+      ? (vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Compute ? 2 : 1) : 0;
+    const int variant = xgemmVariantIndex(tuneParams.VWMD, tuneParams.VWND, precision);
+    if(variant < 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    return createPipeline(
+      xgemmVariantName("transformer_xgemm", "vwmd", "vwnd", tuneParams.VWMD, tuneParams.VWND, precision),
+      shaderModule_transformer_xgemm_variants[variant], 3, sizeof(XgemmStridedBatchedFp32Params), pipeline,
       &specializationInfo, spec.localSizeX, spec.localSizeY, spec.localSizeZ
     );
   }
@@ -1826,7 +1920,7 @@ namespace vk_shader {
       return createPipeline(residualAdd ? "transformer_residual_rms_norm_subgroup_p16s16_nhwc" : "transformer_rms_norm_subgroup_p16s16_nhwc",
         residualAdd ? shaderModule_transformer_residual_rms_norm_subgroup_p16s16 : shaderModule_transformer_rms_norm_subgroup_p16s16,
         5, sizeof(TransformerRMSNormPushParams), pipeline, &specData.info, spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT);
+        fullSubgroupStageFlags);
     if(residualAdd) {
       if(!useNHWC || !vulkanParams.canUseFP16Storage || !vulkanParams.canUseFP16Compute ||
          !vulkanParams.shouldUseFP16Storage || !vulkanParams.shouldUseFP16Compute)
@@ -1912,7 +2006,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_nhwc_register_p32s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
 
@@ -1922,7 +2016,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_p16s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
     if(useNHWC && spec.COOP_KV_STAGES > 1) {
@@ -1941,7 +2035,7 @@ namespace vk_shader {
           shaderModule_transformer_scale_dot_product_cooperative_nhwc_block_p32s16,
           7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
           spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-          VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+          fullSubgroupStageFlags
         );
       }
     }
@@ -1953,7 +2047,7 @@ namespace vk_shader {
         shaderModule_transformer_scale_dot_product_cooperative_nhwc_pair_p32s16,
         7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
         spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-        VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+        fullSubgroupStageFlags
       );
     }
     return createPipeline(
@@ -1961,7 +2055,7 @@ namespace vk_shader {
       shaderModule_transformer_scale_dot_product_cooperative_p32s16,
       7, sizeof(ScaleDotProductCooperativePushParam), pipeline, &specData.info,
       spec.localSizeX, spec.localSizeY, spec.localSizeZ,
-      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+      fullSubgroupStageFlags
     );
   }
 

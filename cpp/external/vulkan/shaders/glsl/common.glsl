@@ -1,10 +1,11 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Define shared precision types and dispatch constants.
+ */
 #ifndef COMMON_GLSL_H
 #define COMMON_GLSL_H
-/**
-* @author dhkim92.dev@gmail.com
-* @brief common.glsl defined parameters
-*/
-
 #define SPECIALIZATION_CONSTANT(__id, __type, __name, __default) layout(constant_id = __id) const __type __name = __default
 #define SPEC(__id, __type, __name, __default) layout(constant_id = __id) const __type __name = __default
 

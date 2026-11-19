@@ -389,6 +389,20 @@ namespace vkcompute {
     VkResult *result
   );
 
+  void transformerXgemmStridedBatchedNN(
+    ComputeHandleInternal* handle,
+    const VulkanDevice* device,
+    const vk_shader::tune::VulkanTuneParams& tuneParams,
+    const Pipeline* pipeline,
+    const VkCommandBuffer cb,
+    const VkDescriptorSet descriptorSet,
+    const uint32_t kSizeM, const uint32_t kSizeN, const uint32_t kSizeK,
+    const uint32_t aStride, const uint32_t bStride, const uint32_t cStride,
+    const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+    uint32_t numBatchElts,
+    VkResult *result
+  );
+
   void batchedXGemmDirect_MK_NK_MN(
     ComputeHandleInternal* handle,
     const VulkanDevice* device,

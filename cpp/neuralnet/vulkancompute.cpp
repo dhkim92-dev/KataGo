@@ -1295,6 +1295,64 @@ void xgemmStridedBatchedNN(
   vk_helper::barrierCommandBufferForBuffer(cb, C);
 }
 
+void transformerXgemmStridedBatchedNN(
+  ComputeHandleInternal* handle,
+  const VulkanDevice* device,
+  const vk_shader::tune::VulkanTuneParams& tuneParams,
+  const Pipeline* pipeline,
+  const VkCommandBuffer cb,
+  const VkDescriptorSet descriptorSet,
+  const uint32_t kSizeM, const uint32_t kSizeN, const uint32_t kSizeK,
+  const uint32_t aStride, const uint32_t bStride, const uint32_t cStride,
+  const VulkanBuffer* A, const VulkanBuffer* B, VulkanBuffer* C,
+  uint32_t numBatchElts,
+  VkResult *result
+) {
+  assert( device != nullptr );
+  assert( cb != VK_NULL_HANDLE );
+  assert( pipeline != nullptr );
+  assert( descriptorSet != VK_NULL_HANDLE );
+
+  std::vector<WriteDescriptorSet> writeDescriptorSets = {
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 0, A),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 1, B),
+    vk_helper::writeDescriptorSetBuffer(descriptorSet, 2, C)
+  };
+  *result = vk_helper::updateDescriptorSets(device, writeDescriptorSets);
+  CHECK_VK_MSG("Update Descriptor Sets for Transformer XGEMM", *result);
+
+  auto params = vk_shader::push::XgemmStridedBatchedFp32Params();
+  params.kSizeM = kSizeM;
+  params.kSizeN = kSizeN;
+  params.kSizeK = kSizeK;
+  params.aLead = kSizeM;
+  params.aStride = aStride;
+  params.bLead = kSizeN;
+  params.bStride = bStride;
+  params.cLead = kSizeM;
+  params.cStride = cStride;
+  params.cTranspose = 0;
+
+  size_t mCeiled = vk_helper::roundUpToMultiple(kSizeM, tuneParams.transformerXgemm.WGD);
+  size_t nCeiled = vk_helper::roundUpToMultiple(kSizeN, tuneParams.transformerXgemm.WGD);
+  uint32_t global[3] = {
+    static_cast<uint32_t>(mCeiled * pipeline->localSizeX / tuneParams.transformerXgemm.WGD),
+    static_cast<uint32_t>(nCeiled * pipeline->localSizeY / tuneParams.transformerXgemm.WGD),
+    static_cast<uint32_t>(numBatchElts)
+  };
+  uint32_t wgCountX = global[0] / pipeline->localSizeX;
+  uint32_t wgCountY = global[1] / pipeline->localSizeY;
+  uint32_t wgCountZ = global[2] / pipeline->localSizeZ;
+  wgCountX = (wgCountX == 0) ? 1 : wgCountX;
+  wgCountY = (wgCountY == 0) ? 1 : wgCountY;
+  wgCountZ = (wgCountZ == 0) ? 1 : wgCountZ;
+  dispatchPipeline(
+    handle, device, pipeline, cb, descriptorSet, &params, sizeof(params),
+    wgCountX, wgCountY, wgCountZ, "TRANSFORMER_XGEMM"
+  );
+  vk_helper::barrierCommandBufferForBuffer(cb, C);
+}
+
 void batchedXGemmDirect_MK_NK_MN(
   ComputeHandleInternal* handle,
   const VulkanDevice* device,

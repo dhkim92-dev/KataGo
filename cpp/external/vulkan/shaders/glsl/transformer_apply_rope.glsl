@@ -1,3 +1,9 @@
+/**
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Apply rotary position embeddings in place.
+ */
 #include "common.glsl"
 
 layout(set=0, binding=0) buffer input_buffer{

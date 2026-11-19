@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "../core/logger.h"
+#include "../core/commontypes.h"
 #include "../neuralnet/desc.h"
 #include "../neuralnet/vulkanhelpers.h"
 #include "../neuralnet/vulkanshaders.h"
@@ -91,6 +92,12 @@ namespace VulkanTuner {
     };
     std::vector<TransformerProjection> transformerProjections;
     std::vector<GemmTuneCase> gemmLayers;
+    std::vector<int> residualChannels;
+    std::vector<int> globalPoolChannels;
+    std::vector<int> channelBiasChannels;
+    std::vector<int> rmsNormChannels;
+    std::vector<int> swiGLUChannels;
+    std::vector<std::pair<int, int>> attentionHeadCounts;
     int numInputChannels = 0;
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;
@@ -205,8 +212,12 @@ namespace VulkanTuner {
     const ModelInfoForTuning& modelInfo,
     const VulkanDevice* device,
     Logger* logger,
-    bool* didAutoTune = nullptr
+    bool* didAutoTune = nullptr,
+    enabled_t useFP16Mode = enabled_t::Auto,
+    enabled_t useNHWCMode = enabled_t::Auto
   );
+
+  void testTuningCache();
 }  // namespace VulkanTuner
 
 #endif

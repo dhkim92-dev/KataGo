@@ -9,6 +9,8 @@
 #include <memory>
 #include <numeric>
 #include <chrono>
+#include <cstdlib>
+#include <limits>
 #include <iostream>
 #include "../core/global.h"
 #include "../core/simpleallocator.h"
@@ -182,7 +184,7 @@ static void dumpLayerBufferSnapshots(ComputeHandleInternal* handle) {
         info.numElts * sizeof(half_t),
         halfValues.data(),
         true,
-        &res
+        &res, handle->commandPool
       );
       CHECK_VK_MSG("Read layer dump snapshot", res);
       for(size_t i = 0; i < halfValues.size(); ++i)
@@ -194,7 +196,7 @@ static void dumpLayerBufferSnapshots(ComputeHandleInternal* handle) {
         info.numElts * sizeof(float),
         values.data(),
         true,
-        &res
+        &res, handle->commandPool
       );
       CHECK_VK_MSG("Read layer dump snapshot", res);
     }
@@ -254,6 +256,7 @@ private:
 static void printDeviceBuffer(
   std::string prefix,
   const VulkanDevice* device,
+  VkCommandPool commandPool,
   VulkanBuffer* buffer,
   size_t numElts,
   bool summarized = true
@@ -269,7 +272,7 @@ if ( globalBatchCount > 1 ) {
     numElts * sizeof(float),
     hostBuffer.data(),
     true,
-    &res
+    &res, commandPool
   );
   CHECK_VK_MSG("printDeviceBuffer copyDeviceToHostBuffer", res);
 
@@ -297,6 +300,7 @@ if ( globalBatchCount > 1 ) {
 static void printDeviceBufferIndices(
   std::string prefix,
   const VulkanDevice* device,
+  VkCommandPool commandPool,
   VulkanBuffer* buffer,
   size_t numElts,
   const std::vector<size_t>& indices
@@ -310,7 +314,7 @@ static void printDeviceBufferIndices(
     numElts * sizeof(float),
     hostBuffer.data(),
     true,
-    &res
+    &res, commandPool
   );
   CHECK_VK_MSG("printDeviceBufferIndices copyDeviceToHostBuffer", res);
 
@@ -395,8 +399,18 @@ struct ComputeContext {
       }
 
       VkInstance instance = vk_helper::createVulkanInstance();
+      std::vector<VulkanDevice *> vulkanDevices;
+      bool initialized = false;
+      Global::CustomScopeGuard cleanup([&]() {
+        if(initialized)
+          return;
+        for(auto& entry: pipelinesPerDev)
+          delete entry.second;
+        for(VulkanDevice* device: vulkanDevices)
+          delete device;
+        vkDestroyInstance(instance, nullptr);
+      });
       std::vector<VulkanDeviceInfo> allDeviceInfos = vk_helper::enumerateVulkanDevices(instance, logger);
-      std::vector<VulkanDevice *> vulkanDevices = {};
 
       if ( gpuIdxsToUse.size() == 1 && gpuIdxsToUse[0] == UINT32_MAX ) {
         if ( logger ) {
@@ -428,23 +442,6 @@ struct ComputeContext {
           throw StringError("Requested FP16 mode but device " + deviceInfo.deviceName + " does not support FP16 storage and compute");
         }
 
-        // The tuner probes hardware FP16 capability independently of whether
-        // this run will use FP16. Actual use is controlled by shouldUseFP16*.
-        if ( supportsFP16Compute ) {
-          requiredExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-        }
-        if (
-          supportsFP16Storage &&
-          VK_VERSION_MAJOR(deviceInfo.properties.apiVersion) == 1 &&
-          VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
-        ) {
-          requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
-        }
-
-        if (deviceInfo.cooperativeMatrixFeatures.cooperativeMatrix == VK_TRUE) {
-          requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
-        }
-
         VulkanDevice* vulkanDevice = vk_helper::createVulkanDevice(
           instance,
           deviceInfo,
@@ -457,7 +454,7 @@ struct ComputeContext {
           if(modelInfo != nullptr) {
             tuneParams = VulkanTuner::loadOrAutoTune(
               tunerFile,homeDataDirOverride,deviceInfo.deviceName,
-              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr
+              nnXLen,nnYLen,*modelInfo,vulkanDevice,logger,nullptr,usingFP16Mode,usingNHWCMode
             );
           }
           if(modelInfo == nullptr && useNHWCMode_ == enabled_t::True) {
@@ -534,6 +531,7 @@ struct ComputeContext {
         vulkanDevices,
         logger
       );
+      initialized = true;
   }
 
   ~ComputeContext() {
@@ -674,7 +672,7 @@ struct MatmulLayer {
         sizeof(float) * weights.size(),
         weights.data(),
         true,
-        &res
+        &res, handle->commandPool
       );
       CHECK_VK_MSG("Create MatmulLayer: " + name + " buffer", res);
     }
@@ -722,7 +720,7 @@ private:
       descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         pipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for BatchedXGEMMDirectFP32_MK_NK_MN MatmulLayer: " + name, res);
     }
@@ -810,7 +808,7 @@ struct BatchNormLayer {
       handle->vulkanDevice,
       mergedBias,
       useFP16,
-      &res
+      &res, handle->commandPool
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged bias buffer", res);
 
@@ -818,7 +816,7 @@ struct BatchNormLayer {
       handle->vulkanDevice,
       mergedScale,
       useFP16,
-      &res
+      &res, handle->commandPool
     );
     CHECK_VK_MSG("Create BatchNormLayer: " + name + " merged scale buffer", res);
     const vk_shader::ComputePipelines* pipelines = this->handle->pipelines;
@@ -847,17 +845,17 @@ struct BatchNormLayer {
       default:
         Global::fatalError("Unsupported activation in BatchNormLayer: " + name);
     }
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("Allocate descriptor set for BatchNormLayer: " + name, res);
     if(nhwcPipeline.pipeline != VK_NULL_HANDLE) {
-      nhwcDescriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, nhwcPipeline.descriptorSetLayout, &res);
+      nhwcDescriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, nhwcPipeline.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("Allocate NHWC descriptor set for BatchNormLayer: " + name, res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate NCHW-to-NHWC descriptor set for BatchNormLayer: " + name, res);
       nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate NHWC-to-NCHW descriptor set for BatchNormLayer: " + name, res);
     }
@@ -1113,11 +1111,11 @@ struct ConvLayer {
     if(usingNHWC && !handle_->usingNHWC) {
       VkResult descriptorResult = VK_ERROR_UNKNOWN;
       nchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle_->vulkanDevice, handle_->pipelines->nchwToNhwc.descriptorSetLayout, &descriptorResult
+        handle_->vulkanDevice, handle_->pipelines->nchwToNhwc.descriptorSetLayout, &descriptorResult, handle_->descriptorPool
       );
       CHECK_VK_MSG("Allocate ConvLayer NCHW-to-NHWC descriptor set: " + name, descriptorResult);
       nhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle_->vulkanDevice, handle_->pipelines->nhwcToNchw.descriptorSetLayout, &descriptorResult
+        handle_->vulkanDevice, handle_->pipelines->nhwcToNchw.descriptorSetLayout, &descriptorResult, handle_->descriptorPool
       );
       CHECK_VK_MSG("Allocate ConvLayer NHWC-to-NCHW descriptor set: " + name, descriptorResult);
     }
@@ -1185,7 +1183,7 @@ struct ConvLayer {
         std::vector<float> nhwcGemmWeights = vkcompute::convWeightsToNHWC1x1Gemm(
           desc->weights, inChannels, outChannels, nhwcKSize, nhwcNSize
         );
-        filterBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, nhwcGemmWeights, true, &res);
+        filterBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, nhwcGemmWeights, true, &res, handle->commandPool);
       } else {
         std::vector<float> transWeights(inChannels * outChannels);
         for (int oc = 0; oc < outChannels; oc++) {
@@ -1197,7 +1195,7 @@ struct ConvLayer {
           handle->vulkanDevice,
           transWeights,
           usingHgemmCooperativeMatrixNCHW || useFP16,
-          &res
+          &res, handle->commandPool
         );
       }
     } else if(nhwcConvPath == NhwcConvPath::Winograd) {
@@ -1211,7 +1209,7 @@ struct ConvLayer {
         convXSize == 3 ? handle_->tuneParams.conv3x3.inTileXSize : handle_->tuneParams.conv5x5.inTileXSize
       );
       filterBuf = vk_helper::createReadOnlyBuffer(
-        handle->vulkanDevice, winogradWeights, true, &res
+        handle->vulkanDevice, winogradWeights, true, &res, handle->commandPool
       );
     } else if( (convXSize == 3 && convYSize == 3) || (convXSize==5 &&convYSize == 5)) {
       // outTilesY = handle->tuneParams.conv3x3.outTileYSize;
@@ -1248,7 +1246,7 @@ struct ConvLayer {
         handle->vulkanDevice,
         winogradWeights,
         useFP16 || usingHgemmCooperativeMatrix,
-        &res
+        &res, handle->commandPool
       );
     } else {
       // For larger convolutions, use weights as-is
@@ -1256,7 +1254,7 @@ struct ConvLayer {
         handle->vulkanDevice,
         desc->weights,
         useFP16,
-        &res
+        &res, handle->commandPool
       );
     }
     CHECK_VK_MSG("Create ConvLayer: " + name + " filter buffer", res);
@@ -1412,7 +1410,7 @@ struct ConvLayer {
     const Pipeline& pipeline = handle->pipelines->hgemmCooperativeMatrixNHWC;
     if(hgemmCooperativeMatrixNHWCDS == VK_NULL_HANDLE) {
       hgemmCooperativeMatrixNHWCDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, pipeline.descriptorSetLayout, &res
+        handle->vulkanDevice, pipeline.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate direct NHWC 1x1 descriptor set for ConvLayer: " + name, res);
     }
@@ -1440,7 +1438,7 @@ struct ConvLayer {
       descriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         targetPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
     }
@@ -1549,20 +1547,20 @@ struct ConvLayer {
     VkResult res = VK_ERROR_UNKNOWN;
     if(winogradInputTransformDS == VK_NULL_HANDLE) {
       winogradInputTransformDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, inputPipeline.descriptorSetLayout, &res
+        handle->vulkanDevice, inputPipeline.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate NHWC Winograd input descriptor set for ConvLayer: " + name, res);
     }
     if(winogradOutputTransformDS == VK_NULL_HANDLE) {
       winogradOutputTransformDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, outputPipeline.descriptorSetLayout, &res
+        handle->vulkanDevice, outputPipeline.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate NHWC Winograd output descriptor set for ConvLayer: " + name, res);
     }
     const Pipeline& gemmPipeline = pipelines->hgemmCooperativeMatrixNHWC;
     if(hgemmCooperativeMatrixNHWCDS == VK_NULL_HANDLE) {
       hgemmCooperativeMatrixNHWCDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, gemmPipeline.descriptorSetLayout, &res
+        handle->vulkanDevice, gemmPipeline.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate NHWC Winograd GEMM descriptor set for ConvLayer: " + name, res);
     }
@@ -1691,7 +1689,7 @@ struct ConvLayer {
       winogradInputTransformDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         winogradInputTransformBnActMaskPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
     }
@@ -1700,7 +1698,7 @@ struct ConvLayer {
       winogradOutputTransformDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         winogradOutputTransformPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
     }
@@ -1709,7 +1707,7 @@ struct ConvLayer {
       gemmDescriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         xgemmBatchedPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for ConvLayer: " + name, res);
     }
@@ -1825,7 +1823,7 @@ struct ConvLayer {
       winogradInputTransformDS = vk_helper::allocateDescriptorSet(
         device,
         inputTransformPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for Winograd input transform in ConvLayer: " + name, res);
     }
@@ -1834,7 +1832,7 @@ struct ConvLayer {
       winogradOutputTransformDS = vk_helper::allocateDescriptorSet(
         device,
         outputTransformPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for Winograd output transform in ConvLayer: " + name, res);
     }
@@ -1844,7 +1842,7 @@ struct ConvLayer {
       gemmDescriptorSet = vk_helper::allocateDescriptorSet(
         device,
         xgemmPipeline.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate descriptor set for Winograd GEMM in ConvLayer: " + name, res);
     }
@@ -2057,7 +2055,7 @@ struct MatBiasLayer {
         sizeof(float) * weights.size(),
         weights.data(),
         true,
-        &res
+        &res, handle->commandPool
       );
       CHECK_VK_MSG("Create MatBiasLayer: " + name + " bias buffer", res);
     } else {
@@ -2094,7 +2092,7 @@ struct MatBiasLayer {
     }
 
     if ( descriptorSet == VK_NULL_HANDLE ) {
-      descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res);
+      descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, targetPipeline.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("Allocate descriptor set for MatBiasLayer: " + name, res);
     }
     vkcompute::doMatBiasNC(
@@ -2268,24 +2266,24 @@ struct TransformerMatMulLayer {
       outChannels % hgemmParams.NWG == 0;
     bool useFP16 = handle->usingFP16Storage || usingHgemmCooperativeMatrixNHWC;
     VkResult res = VK_ERROR_UNKNOWN;
-    filter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, useFP16, &res);
+    filter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatmulLayer()] create filter vulkan buffer", res);
 
     descriptorSet = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->xgemmStridedBatchedFp32.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->transformerXgemm.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate descriptorSet", res);
     if(nhwcPipeline->pipeline != VK_NULL_HANDLE) {
       nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, nhwcPipeline->descriptorSetLayout, &res
+        handle->vulkanDevice, nhwcPipeline->descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate NHWC descriptorSet", res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate nchwToNhwcDescriptorSet", res);
       nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerMatMulLayer::TransformerMatMulLayer()] allocate nhwcToNchwDescriptorSet", res);
     }
@@ -2318,9 +2316,9 @@ struct TransformerMatMulLayer {
       int filterStride = 0;
       int inputStride = paddedNNXYLen * inChannels;
       int outputStride = paddedNNXYLen * outChannels;
-      Pipeline pipeline = handle->pipelines->xgemmStridedBatchedFp32;
+      Pipeline pipeline = handle->pipelines->transformerXgemm;
 
-    vkcompute::xgemmStridedBatchedNN(
+    vkcompute::transformerXgemmStridedBatchedNN(
       handle,
       handle->vulkanDevice,
         handle->tuneParams,
@@ -2421,24 +2419,24 @@ struct TransformerApplyRoPELayer {
     descriptorSet = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       pipeline.descriptorSetLayout,
-      &res
+      &res, handle->descriptorPool
     );
     CHECK_VK_MSG("[TransformerApplyRoPE] allocate ropeDescriptorSet", res);
     if(handle->pipelines->transformerApplyRoPENHWC.pipeline != VK_NULL_HANDLE) {
       nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->transformerApplyRoPENHWC.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->transformerApplyRoPENHWC.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerApplyRoPE] allocate NHWC descriptorSet", res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         handle->pipelines->nchwToNhwc.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerApplyRoPE] allocate NCHW to NHWC descriptorSet", res);
       nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         handle->pipelines->nhwcToNchw.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerApplyRoPE] allocate NHWC to NCHW descriptorSet", res);
     }
@@ -2562,26 +2560,26 @@ struct TransformerAttentionLayer {
       pipeline = scalarPipeline;
     }
     VkResult res = VK_SUCCESS;
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline.descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create descriptor set", res);
     if(useCooperativeNCHW || useCooperativeNHWC) {
       if(useCooperativeNHWC && pipelines->transformerScaleDotProductCooperativeNHWC.pipeline != VK_NULL_HANDLE) {
         nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-          handle->vulkanDevice, pipelines->transformerScaleDotProductCooperativeNHWC.descriptorSetLayout, &res
+          handle->vulkanDevice, pipelines->transformerScaleDotProductCooperativeNHWC.descriptorSetLayout, &res, handle->descriptorPool
         );
         CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create NHWC descriptor set", res);
       }
       scalarDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, scalarPipeline.descriptorSetLayout, &res
+        handle->vulkanDevice, scalarPipeline.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create scalar fallback descriptor set", res);
       if(useCooperativeNHWC && pipelines->nchwToNhwc.pipeline != VK_NULL_HANDLE && pipelines->nhwcToNchw.pipeline != VK_NULL_HANDLE) {
         nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-          handle->vulkanDevice, pipelines->nchwToNhwc.descriptorSetLayout, &res
+          handle->vulkanDevice, pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
         );
         CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create NCHW-to-NHWC descriptor set", res);
         nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
-          handle->vulkanDevice, pipelines->nhwcToNchw.descriptorSetLayout, &res
+          handle->vulkanDevice, pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
         );
         CHECK_VK_MSG("[TransformerAttentionLayer::TransformerAttentionLayer] create NHWC-to-NCHW descriptor set", res);
       }
@@ -2793,24 +2791,24 @@ struct TransformerRMSNormLayer {
     vector<float> weight = desc->weight;
     bool useFP16 = false;
     VkResult res;
-    weightBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weight, useFP16, &res);
+    weightBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weight, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] create weight buf", res);
     vector<float> zeroBeta(numChannels, 0.0f);
-    zeroBetaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeroBeta, useFP16, &res);
+    zeroBetaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeroBeta, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] create zeroBeta buf", res);
-    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline->descriptorSetLayout, &res);
+    descriptorSet = vk_helper::allocateDescriptorSet(handle->vulkanDevice, pipeline->descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate descriptor set.", res);
     if(handle->pipelines->transformerPreNormNHWC.pipeline != VK_NULL_HANDLE) {
       nhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->transformerPreNormNHWC.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->transformerPreNormNHWC.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NHWC descriptor set", res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NCHW-to-NHWC descriptor set", res);
       nhwcToNchwDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerRMSNormLayer::TransformerRMSNormLayer()] allocate NHWC-to-NCHW descriptor set", res);
     }
@@ -2943,33 +2941,33 @@ struct RMSNormLayer {
     vector<float> beta = desc->beta;
     bool useFP16 = false;
     VkResult res;
-    gammaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, gamma, useFP16, &res);
+    gammaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, gamma, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate gammaBuf",res);
-    betaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, beta, useFP16, &res);
+    betaBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, beta, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate betaBuf",res);
 
     if(spatial) {
       int tileSize = handle->tuneParams.spatialRMSNorm.TILE_SIZE;
       int chwSize = numChannels * paddedNNXYLen;
       sizing = vkcompute::computeSpatialRMSNormSizing(tileSize, chwSize);
-      rmsNormSumSqDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormSumSq.descriptorSetLayout, &res);
+      rmsNormSumSqDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormSumSq.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate rmsNormSumSqDS",res);
-      rmsNormReduceDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormReduce.descriptorSetLayout, &res);
+      rmsNormReduceDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormReduce.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate rmsNormReduce",res);
-      rmsNormApplyDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormApply.descriptorSetLayout, &res);
+      rmsNormApplyDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSpatialRMSNormApply.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate rmsNormApplyDS",res);
     } else {
-      rmsNormDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerRmsNorm.descriptorSetLayout, &res);
+      rmsNormDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerRmsNorm.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate rmsNormDS",res);
     }
 
     if(handle->pipelines->nchwToNhwc.pipeline != VK_NULL_HANDLE && handle->pipelines->nhwcToNchw.pipeline != VK_NULL_HANDLE) {
       nchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate nchwToNhwcDS",res);
       nhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate nhwcToNchwDS",res);
     }
@@ -2982,10 +2980,10 @@ struct RMSNormLayer {
       vector<float> zeros(numChannels, 0.0f);
       bool useFP16Act = handle->usingFP16Storage;
       VkResult res;
-      actOnesBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, ones, useFP16Act, &res);
-      actZerosBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeros, useFP16Act, &res);
+      actOnesBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, ones, useFP16Act, &res, handle->commandPool);
+      actZerosBuf = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, zeros, useFP16Act, &res, handle->commandPool);
       const Pipeline& scaleBiasMaskPipeline = handle->pipelines->batchNormMaskSilu;
-      scaleBiasMaskDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, scaleBiasMaskPipeline.descriptorSetLayout, &res);
+      scaleBiasMaskDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, scaleBiasMaskPipeline.descriptorSetLayout, &res, handle->descriptorPool);
       CHECK_VK_MSG("[RMSNormLayer::RMSNormLayer()] allocate scaleBiasMaskDS",res);
     }
   }
@@ -3420,12 +3418,12 @@ struct TransformerAttentionBlock {
     }
     bool useFP16 = false;
     VkResult res;
-    ropeCosTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, cosTableData, useFP16, &res);
+    ropeCosTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, cosTableData, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeCosTable", res);
-    ropeSinTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, sinTableData, useFP16, &res);
+    ropeSinTable = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, sinTableData, useFP16, &res, handle->commandPool);
     CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock()] allocate ropeSinTable", res);
 
-    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
+    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("[TransformerAttentionBlock::TransformerAttentionBlock() allocate pointwise descriptorset]", res);
   }
 
@@ -3641,9 +3639,9 @@ struct TransformerFFNBlock {
     linear2->usingNHWC = usingNHWC;
     packedLinearDesc.releaseWeights();
     VkResult res;
-    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res);
+    pointwiseDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate pointwiseDS", res);
-    swigluDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSwiGLU.descriptorSetLayout, &res);
+    swigluDS = vk_helper::allocateDescriptorSet(handle->vulkanDevice, handle->pipelines->transformerSwiGLU.descriptorSetLayout, &res, handle->descriptorPool);
     CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate swigluDS", res);
 
     const auto& dualParams = handle->tuneParams.transformerDualGemmSwiGLU;
@@ -3661,23 +3659,23 @@ struct TransformerFFNBlock {
       handle->pipelines->transformerDualGemmSwiGLU.pipeline != VK_NULL_HANDLE;
     if(handle->pipelines->nchwToNhwc.pipeline != VK_NULL_HANDLE && handle->pipelines->nhwcToNchw.pipeline != VK_NULL_HANDLE) {
       nchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate nchwToNhwcDS", res);
       nhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate nhwcToNchwDS", res);
     }
     if(usingTransformerDualGemmSwiGLU) {
       const auto weights = VulkanTuner::packTransformerDualGemmSwiGLUFilterForNHWC(
         desc->linear1.weights, desc->linearGate.weights, numChannels, ffnChannels);
-      fusedFilter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, true, &res);
+      fusedFilter = vk_helper::createReadOnlyBuffer(handle->vulkanDevice, weights, true, &res, handle->commandPool);
       CHECK_VK_MSG("Create fused NHWC FFN weights", res);
       transformerDualGemmSwiGLUDS = vk_helper::allocateDescriptorSet(
         handle->vulkanDevice,
         handle->pipelines->transformerDualGemmSwiGLU.descriptorSetLayout,
-        &res
+        &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[TransformerFFNBlock::TransformerFFNBlock()] allocate transformerDualGemmSwiGLUDS", res);
     }
@@ -3885,7 +3883,7 @@ struct ResidualBlock {
     );
     VkResult res = VK_SUCCESS;
     addPointWiseDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate ResidualBlock pointwise descriptor set", res);
   }
@@ -3984,31 +3982,31 @@ struct GlobalPoolingResidualBlock {
     normActConv2 = new NormActConv(handle, &desc->finalConv, &desc->midBN, &desc->midActivation, nnXLen, nnYLen, useFP16);
     VkResult res = VK_SUCCESS;
     gpoolDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->globalPoolingChannelsFp32.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->globalPoolingChannelsFp32.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock pooling descriptor set", res);
     if(handle->pipelines->globalPoolingChannelsFp32NHWC.pipeline != VK_NULL_HANDLE) {
       gpoolNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock pooling conversion set", res);
     }
     addChannelDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock channel-bias descriptor set", res);
     if(handle->pipelines->addChannelBiasNHWC.pipeline != VK_NULL_HANDLE) {
       addChannelNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock NCHW-to-NHWC set", res);
       addChannelNhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock NHWC-to-NCHW set", res);
     }
     addPointWiseDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate GlobalPoolingResidualBlock pointwise descriptor set", res);
   }
@@ -4151,7 +4149,7 @@ struct NestedResidualBlock {
     normActConv2 = new NormActConv(handle, &desc->postConv, &desc->postBN, &desc->postActivation, nnXLen, nnYLen, useFP16);
     VkResult res = VK_SUCCESS;
     addPointWiseDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addPointWise.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate NestedResidualBlock pointwise descriptor set", res);
   }
@@ -4519,22 +4517,22 @@ struct Trunk {
 
     VkResult res = VK_SUCCESS;
     addChannelBiasDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate Trunk channel-bias descriptor set", res);
     if(handle->pipelines->addChannelBiasNHWC.pipeline != VK_NULL_HANDLE) {
       addChannelBiasNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate Trunk NCHW-to-NHWC set", res);
       addChannelBiasNhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate Trunk NHWC-to-NCHW set", res);
     }
     if(sgfMetadataEncoder != nullptr) {
       addChannelBiasDS2 = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate Trunk metadata channel-bias descriptor set", res);
     }
@@ -4733,26 +4731,26 @@ struct PolicyHead {
     gpoolToPassMul2 = std::make_unique<MatmulLayer>(handle, &desc->gpoolToPassMul2);
     VkResult res = VK_SUCCESS;
     gpoolDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->globalPoolingChannelsFp32.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->globalPoolingChannelsFp32.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate PolicyHead pooling descriptor set", res);
     if(handle->pipelines->globalPoolingChannelsFp32NHWC.pipeline != VK_NULL_HANDLE) {
       gpoolNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate PolicyHead pooling conversion set", res);
     }
     addChannelBiasDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->addChannelBias.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate PolicyHead channel-bias descriptor set", res);
     if(handle->pipelines->addChannelBiasNHWC.pipeline != VK_NULL_HANDLE) {
       addChannelBiasNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate PolicyHead NCHW-to-NHWC set", res);
       addChannelBiasNhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate PolicyHead NHWC-to-NCHW set", res);
     }
@@ -4934,12 +4932,12 @@ struct ValueHead {
     gpoolDS = vk_helper::allocateDescriptorSet(
       handle->vulkanDevice,
       handle->pipelines->valueHeadPoolingChannels.begin()->second.descriptorSetLayout,
-      &res
+      &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate ValueHead pooling descriptor set", res);
     if(!handle->pipelines->valueHeadPoolingChannelsNHWC.empty()) {
       gpoolNchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("Allocate ValueHead pooling conversion set", res);
     }
@@ -5140,7 +5138,7 @@ struct Model {
 
     VkResult res = VK_SUCCESS;
     extractChannel0DS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, handle->pipelines->extractChannel0Fp32.descriptorSetLayout, &res
+      handle->vulkanDevice, handle->pipelines->extractChannel0Fp32.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate model ExtractChannel0 descriptor set", res);
     const LocalDim maskSumDim = {
@@ -5153,7 +5151,7 @@ struct Model {
     };
     const Pipeline& maskSumPipeline = handle->pipelines->sumChannels.at(maskSumDim);
     computeMaskSumDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, maskSumPipeline.descriptorSetLayout, &res
+      handle->vulkanDevice, maskSumPipeline.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("Allocate model mask sum descriptor set", res);
     fence = vk_helper::createFence(handle->vulkanDevice, &res);
@@ -5293,6 +5291,11 @@ static ComputeContext* createComputeContextForTesting(
   bool useNHWC
 ) {
   // std::cout << "[createComputeContextForTesting] create Compute Context with GPUs: ";
+  static const bool testedTuningCache = []() {
+    VulkanTuner::testTuningCache();
+    return true;
+  }();
+  (void)testedTuningCache;
   return new ComputeContext(
     nnXLen,
     nnYLen,
@@ -5407,7 +5410,7 @@ struct Buffers {
       );
       CHECK_VK_MSG("[Buffers::Buffers] Create NCHW input buffer", res);
       nchwToNhwcDescriptorSet = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[Buffers::Buffers] Allocate NCHW-to-NHWC input descriptor set", res);
     }
@@ -5521,6 +5524,7 @@ struct ComputeHandle {
   const int policySize;
   const bool inputsUseNHWC;
   const bool inputUsingNHWC;
+  size_t verificationCalls = 0;
 
   static bool shouldUseNHWC(const ComputeContext* context, int gpuIdx) {
     const uint32_t normalizedGpuIdx = gpuIdx < 0 ? 0u : static_cast<uint32_t>(gpuIdx);
@@ -5580,7 +5584,10 @@ struct ComputeHandle {
     // buffers.reset(ptr);
   }
 
-  ~ComputeHandle() {}
+  ~ComputeHandle() {
+    if(verificationCalls > 0)
+      std::cerr << "Vulkan forward verification completed: calls=" << verificationCalls << std::endl;
+  }
   ComputeHandle() = delete;
   ComputeHandle(const ComputeHandle&) = delete;
   ComputeHandle& operator=(const ComputeHandle&) = delete;
@@ -5678,7 +5685,34 @@ ComputeHandleInternal::ComputeHandleInternal(
   CHECK_VK_MSG("Create query pool", res);
   benchmarkDispatchInfos.reserve(4096);
   #endif
+
+  VkResult poolResult;
+  commandPool = vk_helper::createCommandPool(vulkanDevice, &poolResult);
+  CHECK_VK_MSG("Create handle command pool", poolResult);
+  descriptorPool = vk_helper::createDescriptorPool(
+    vulkanDevice, {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384}}, 4096, &poolResult
+  );
+  CHECK_VK_MSG("Create handle descriptor pool", poolResult);
+  evaluationCommandBuffer = vk_helper::allocateCommandBuffer(vulkanDevice, &poolResult, commandPool);
+  CHECK_VK_MSG("Allocate handle evaluation command buffer", poolResult);
 };
+
+ComputeHandleInternal::~ComputeHandleInternal() {
+#ifdef VK_BENCHMARK
+  if(queryPool != VK_NULL_HANDLE)
+    vkDestroyQueryPool(device, queryPool, nullptr);
+#endif
+#ifdef VK_DUMP_BUFFER
+  for(const VulkanLayerBufferDumpInfo& info : layerBufferDumpInfos) {
+    if(info.buffer != nullptr)
+      vk_helper::releaseVulkanBuffer(vulkanDevice, info.buffer);
+  }
+#endif
+  if(descriptorPool != VK_NULL_HANDLE)
+    vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+  if(commandPool != VK_NULL_HANDLE)
+    vkDestroyCommandPool(device, commandPool, nullptr);
+}
 
 void NeuralNet::globalInitialize() {
   static_assert(sizeof(int) >= 4, "");
@@ -5689,6 +5723,7 @@ void NeuralNet::globalCleanup() {
 
 void NeuralNet::printDevices() {
   VkInstance inst = vk_helper::createVulkanInstance();
+  Global::CustomScopeGuard cleanup([&]() { vkDestroyInstance(inst, nullptr); });
   auto infos = vk_helper::enumerateVulkanDevices(inst, nullptr);
 
   for ( const auto& info : infos ) {
@@ -6192,9 +6227,11 @@ void NeuralNet::getOutput(
       paddedOwnershipElts * (useFP16Storage ? sizeof(half_t) : sizeof(float))
     );
 
-    const auto submitAndWait = [&](VkCommandBuffer commandBuffer) {
-      res = vk_helper::endCommandBuffer(commandBuffer);
-      CHECK_VK_MSG("End model evaluation command buffer", res);
+    const auto submitAndWait = [&](VkCommandBuffer commandBuffer, bool finishRecording = true) {
+      if(finishRecording) {
+        res = vk_helper::endCommandBuffer(commandBuffer);
+        CHECK_VK_MSG("End model evaluation command buffer", res);
+      }
       res = vkResetFences(handle->vulkanDevice->device, 1, &computeHandle->model->fence);
       CHECK_VK_MSG("Reset model evaluation fence", res);
       res = vk_helper::submitCommandBuffers(handle->vulkanDevice, {commandBuffer}, computeHandle->model->fence);
@@ -6205,7 +6242,7 @@ void NeuralNet::getOutput(
       CHECK_VK_MSG("Wait for model evaluation fence", res);
     };
 
-    VkCommandBuffer evaluationCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer evaluationCB = handle->evaluationCommandBuffer;
     res = vk_helper::beginCommandBuffer(evaluationCB);
     CHECK_VK_MSG("Begin model evaluation command buffer", res);
   #ifdef VK_BENCHMARK
@@ -6265,6 +6302,32 @@ void NeuralNet::getOutput(
       buffers->convWorkspace2
     );
 
+    const char* verificationDirectory = std::getenv("KATAGO_VULKAN_VERIFY_FORWARD");
+    VulkanBuffer* verificationReadback = nullptr;
+    if(verificationDirectory != nullptr) {
+      verificationReadback = vk_helper::createReadbackBuffer(
+        handle->vulkanDevice, buffers->uploadBuffer->requestedSize, &res
+      );
+      CHECK_VK_MSG("Allocate input verification readback", res);
+      const auto recordInputVerification = [&](VulkanBuffer* input, VkDeviceSize offset, VkDeviceSize bytes) {
+        vk_helper::barrierCommandBufferForBuffer(
+          evaluationCB, input,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT
+        );
+        vk_helper::recordBufferCopy(evaluationCB, input, verificationReadback, 0, offset, bytes);
+      };
+      recordInputVerification(uploadedInput, buffers->inputUploadOffset, spatialInputBytes);
+      recordInputVerification(buffers->inputGlobal, buffers->inputGlobalUploadOffset, inputGlobalBytes);
+      if(numMetaFeatures > 0)
+        recordInputVerification(buffers->inputMeta, buffers->inputMetaUploadOffset, inputMetaBytes);
+      vk_helper::barrierCommandBufferForBuffer(
+        evaluationCB, verificationReadback,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+      );
+    }
+
     for(VulkanBuffer* outputBuffer: {
       buffers->policyPass, buffers->policy, buffers->value, buffers->scoreValue, buffers->ownership
     }) {
@@ -6294,6 +6357,11 @@ void NeuralNet::getOutput(
       evaluationCB, buffers->ownership, buffers->readbackBuffer,
       0, buffers->ownershipReadbackOffset, ownershipBytes
     );
+    vk_helper::barrierCommandBufferForBuffer(
+      evaluationCB, buffers->readbackBuffer,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
+    );
     submitAndWait(evaluationCB);
 
     vk_helper::copyReadbackBufferToHost(
@@ -6322,6 +6390,71 @@ void NeuralNet::getOutput(
     );
     CHECK_VK_MSG("Copy ownership results from persistent readback buffer", res);
 
+    if(verificationReadback != nullptr) {
+      const size_t call = ++computeHandle->verificationCalls;
+      const auto saveVerification = [&](const std::string& name, const void* data, size_t bytes) {
+        std::ofstream file(std::string(verificationDirectory) + "/" + name, std::ios::binary);
+        file.write(static_cast<const char*>(data), bytes);
+        if(!file)
+          throw StringError("Could not save Vulkan forward verification: " + name);
+      };
+      const auto verifyInput = [&](const char* name, const void* expected, VkDeviceSize offset, VkDeviceSize bytes) {
+        std::vector<unsigned char> actual(bytes);
+        vk_helper::copyReadbackBufferToHost(
+          handle->vulkanDevice, verificationReadback, offset, bytes, actual.data(), &res
+        );
+        CHECK_VK_MSG("Read input verification bytes", res);
+        if(std::memcmp(expected, actual.data(), bytes) != 0) {
+          saveVerification(std::string(name) + "-expected.bin", expected, bytes);
+          saveVerification(std::string(name) + "-gpu.bin", actual.data(), bytes);
+          throw StringError("Vulkan input verification mismatch: " + std::string(name));
+        }
+      };
+      verifyInput("spatial", spatialInputData, buffers->inputUploadOffset, spatialInputBytes);
+      verifyInput("global", inputBuffers->userInputGlobalBuffer, buffers->inputGlobalUploadOffset, inputGlobalBytes);
+      if(numMetaFeatures > 0)
+        verifyInput("meta", inputBuffers->userInputMetaBuffer, buffers->inputMetaUploadOffset, inputMetaBytes);
+
+      submitAndWait(evaluationCB, false);
+      std::vector<float> repeatedValue(valueBytes / sizeof(float));
+      std::vector<float> repeatedScore(scoreValueBytes / sizeof(float));
+      vk_helper::copyReadbackBufferToHost(
+        handle->vulkanDevice, buffers->readbackBuffer, buffers->valueReadbackOffset,
+        valueBytes, repeatedValue.data(), &res
+      );
+      CHECK_VK_MSG("Read repeated value output", res);
+      vk_helper::copyReadbackBufferToHost(
+        handle->vulkanDevice, buffers->readbackBuffer, buffers->scoreValueReadbackOffset,
+        scoreValueBytes, repeatedScore.data(), &res
+      );
+      CHECK_VK_MSG("Read repeated score output", res);
+      float valueDifference = 0.0f;
+      float scoreDifference = 0.0f;
+      for(size_t i = 0; i < repeatedValue.size(); i++) {
+        const float difference = std::abs(repeatedValue[i] - inputBuffers->valueResults[i]);
+        valueDifference = std::isfinite(difference) ? std::max(valueDifference, difference) : std::numeric_limits<float>::infinity();
+      }
+      for(size_t i = 0; i < repeatedScore.size(); i++) {
+        const float difference = std::abs(repeatedScore[i] - inputBuffers->scoreValueResults[i]);
+        scoreDifference = std::isfinite(difference) ? std::max(scoreDifference, difference) : std::numeric_limits<float>::infinity();
+      }
+      if(call == 1 || call % 128 == 0 || valueDifference > 0 || scoreDifference > 0) {
+        std::cerr << "Vulkan forward verification: call=" << call << " batch=" << batchSize
+                  << " input=exact valueMaxDiff=" << valueDifference
+                  << " scoreMaxDiff=" << scoreDifference << std::endl;
+      }
+      if(valueDifference > 0.001f || scoreDifference > 0.001f) {
+        saveVerification("spatial.bin", spatialInputData, spatialInputBytes);
+        saveVerification("global.bin", inputBuffers->userInputGlobalBuffer, inputGlobalBytes);
+        saveVerification("value-first.bin", inputBuffers->valueResults, valueBytes);
+        saveVerification("value-repeat.bin", repeatedValue.data(), valueBytes);
+        saveVerification("score-first.bin", inputBuffers->scoreValueResults, scoreValueBytes);
+        saveVerification("score-repeat.bin", repeatedScore.data(), scoreValueBytes);
+        throw StringError("Vulkan identical-forward verification mismatch");
+      }
+      vk_helper::releaseVulkanBuffer(handle->vulkanDevice, verificationReadback);
+    }
+
     bool hasNonfiniteValueHeadOutput = false;
     for(size_t i = 0; i < static_cast<size_t>(batchSize) * inputBuffers->singleValueResultElts; i++) {
       if(!std::isfinite(inputBuffers->valueResults[i])) {
@@ -6343,7 +6476,7 @@ void NeuralNet::getOutput(
       vk_helper::copyDeviceBufferToHost(
         handle->vulkanDevice, buffers->maskSum,
         static_cast<VkDeviceSize>(sizeof(float) * maskSums.size()),
-        maskSums.data(), true, &maskSumReadbackResult
+        maskSums.data(), true, &maskSumReadbackResult, handle->commandPool
       );
       if(maskSumReadbackResult == VK_SUCCESS) {
         std::cerr << "Vulkan value-head nonfinite: batchSize=" << batchSize
@@ -6367,7 +6500,7 @@ void NeuralNet::getOutput(
         vk_helper::copyDeviceBufferToHost(
           handle->vulkanDevice, buffers->trunk,
           static_cast<VkDeviceSize>(sizeof(half_t) * trunkValues.size()),
-          trunkValues.data(), true, &trunkReadbackResult
+          trunkValues.data(), true, &trunkReadbackResult, handle->commandPool
         );
         if(trunkReadbackResult == VK_SUCCESS) {
           for(size_t i = 0; i < trunkValues.size(); i++) {
@@ -6508,7 +6641,8 @@ void NeuralNet::getOutput(
     }
 
     dumpLayerBufferSnapshots(handle);
-    vkResetCommandPool(handle->device, handle->vulkanDevice->commandPool, 0);
+    res = vkResetCommandPool(handle->device, handle->commandPool, 0);
+    CHECK_VK_MSG("Reset handle command pool", res);
 
   #ifdef VK_BENCHMARK
     handle->dumpVulkanBenchmark(computeHandle->model->modelName);
@@ -6737,7 +6871,7 @@ bool NeuralNet::testEvaluateConv(
     inputBytes,
     useNHWC ? inputData : static_cast<const void*>(inputTmp.data()),
     true,
-    &res
+    &res, handle->commandPool
   );
   CHECK_VK_MSG("[TestConv] Failed to create device input buffer with data", res);
 
@@ -6770,7 +6904,7 @@ bool NeuralNet::testEvaluateConv(
   );
   CHECK_VK_MSG("[TestConv] Failed to create device buffer", res);
 
-  VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(device);
+  VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(device, nullptr, handle->commandPool);
   res = vk_helper::beginCommandBuffer(commandBuffer);
   CHECK_VK_MSG("[TestConv] Failed to begin command buffer", res);
   layer->forward(commandBuffer, batchSize, dInput, dOutput, convWorkspace, convWorkspace2);
@@ -6780,7 +6914,7 @@ bool NeuralNet::testEvaluateConv(
   if(useNHWC) {
     std::vector<half_t> outputHalf(outputStorageElts);
     vk_helper::copyDeviceBufferToHost(
-      device, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * outputStorageElts), outputHalf.data(), true, &res
+      device, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * outputStorageElts), outputHalf.data(), true, &res, handle->commandPool
     );
     CHECK_VK_MSG("[TestConv] Failed to copy device output buffer to host", res);
     for(int n = 0; n < batchSize; ++n) {
@@ -6793,12 +6927,15 @@ bool NeuralNet::testEvaluateConv(
     }
   } else {
     vk_helper::copyDeviceBufferToHost(
-      device, dOutput, static_cast<VkDeviceSize>(sizeof(float) * numOutputFloats), outputBuffer.data(), true, &res
+      device, dOutput, static_cast<VkDeviceSize>(sizeof(float) * numOutputFloats), outputBuffer.data(), true, &res, handle->commandPool
     );
   }
   CHECK_VK_MSG("[TestConv] Failed to copy device output buffer to host", res);
-  vkQueueWaitIdle(device->queue);
-  vkDeviceWaitIdle(device->device);
+  {
+    std::lock_guard<std::mutex> lock(device->queueSubmitMutex);
+    vkQueueWaitIdle(device->queue);
+    vkDeviceWaitIdle(device->device);
+  }
   vk_helper::releaseVulkanBuffer(device, dInput);
   vk_helper::releaseVulkanBuffer(device, dOutput);
   vk_helper::releaseVulkanBuffer(device, convWorkspace);
@@ -6881,11 +7018,11 @@ bool NeuralNet::testEvaluateBatchNorm(
         }
       }
       dInput = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded NHWC input buffer", res);
       dMask = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create padded mask buffer", res);
       dOutput = vk_helper::createDeviceBuffer(
@@ -6907,11 +7044,11 @@ bool NeuralNet::testEvaluateBatchNorm(
           maskPadded[static_cast<size_t>(n) * paddedSpatialSize + xy] = maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy];
       }
       dInput = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device input buffer with data", res);
       dMask = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device mask buffer", res);
       dOutput = vk_helper::createDeviceBuffer(
@@ -6920,7 +7057,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to create device output buffer", res);
     }
 
-    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice, nullptr, handle->commandPool);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to begin command buffer", res);
     if(useNHWC) {
@@ -6939,7 +7076,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     if(useNHWC) {
       std::vector<half_t> outputPadded(nhwcStorageElts);
       vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nhwcStorageElts), outputPadded.data(), true, &res
+        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nhwcStorageElts), outputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NHWC output", res);
       for(int n = 0; n < batchSize; ++n)
@@ -6953,7 +7090,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     else {
       std::vector<float> outputPadded(nchwStorageElts);
       vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+        handle->vulkanDevice, dOutput, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateBatchNorm] Failed to copy padded NCHW output", res);
       for(int n = 0; n < batchSize; ++n)
@@ -7065,7 +7202,7 @@ bool NeuralNet::testEvaluateBatchNorm(
         }
       }
       dNCHWInput = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded NCHW input buffer", res);
       dNHWCTrunk = vk_helper::createDeviceBuffer(
@@ -7073,7 +7210,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create NHWC trunk buffer", res);
       dMask = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded mask buffer", res);
       dTrunkScratch = vk_helper::createDeviceBuffer(
@@ -7086,11 +7223,11 @@ bool NeuralNet::testEvaluateBatchNorm(
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create padded NCHW output buffer", res);
 
       nchwToNhwcDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nchwToNhwc.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to allocate NCHW-to-NHWC descriptor set", res);
       nhwcToNchwDS = vk_helper::allocateDescriptorSet(
-        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res
+        handle->vulkanDevice, handle->pipelines->nhwcToNchw.descriptorSetLayout, &res, handle->descriptorPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to allocate NHWC-to-NCHW descriptor set", res);
     }
@@ -7109,11 +7246,11 @@ bool NeuralNet::testEvaluateBatchNorm(
             maskBuffer[static_cast<size_t>(n) * logicalSpatialSize + xy];
       }
       dTrunk = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), false, &res
+        handle->vulkanDevice, byteSizeofVectorContents(inputPadded), inputPadded.data(), false, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device trunk buffer with data", res);
       dMask = vk_helper::createDeviceBufferWithData(
-        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res
+        handle->vulkanDevice, byteSizeofVectorContents(maskPadded), maskPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to create device mask buffer with data", res);
       dTrunkScratch = vk_helper::createDeviceBuffer(
@@ -7137,7 +7274,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       &res
     );
 
-    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice, nullptr, handle->commandPool);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to begin command buffer", res);
     if(useNHWC) {
@@ -7165,7 +7302,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     if(useNHWC) {
       std::vector<half_t> outputPadded(nchwStorageElts);
       vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice, dNCHWOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nchwStorageElts), outputPadded.data(), true, &res
+        handle->vulkanDevice, dNCHWOutput, static_cast<VkDeviceSize>(sizeof(half_t) * nchwStorageElts), outputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to copy padded NCHW output", res);
       for(int n = 0; n < batchSize; ++n) {
@@ -7181,7 +7318,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     else {
       std::vector<float> outputPadded(nchwStorageElts);
       vk_helper::copyDeviceBufferToHost(
-        handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+        handle->vulkanDevice, dTrunk, static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res, handle->commandPool
       );
       for(int n = 0; n < batchSize; ++n)
         for(int c = 0; c < desc->preBN.numChannels; ++c)
@@ -7192,8 +7329,11 @@ bool NeuralNet::testEvaluateBatchNorm(
           }
     }
     CHECK_VK_MSG("[testEvaluateResidualBlock] Failed to copy device trunk buffer to host", res);
-    vkQueueWaitIdle(handle->vulkanDevice->queue);
-    vkDeviceWaitIdle(handle->vulkanDevice->device);
+    {
+      std::lock_guard<std::mutex> lock(handle->vulkanDevice->queueSubmitMutex);
+      vkQueueWaitIdle(handle->vulkanDevice->queue);
+      vkDeviceWaitIdle(handle->vulkanDevice->device);
+    }
     if(dNCHWInput != nullptr)
       vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dNCHWInput);
     if(dNHWCTrunk != nullptr)
@@ -7323,7 +7463,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       useNHWC ? byteSizeofVectorContents(paddedInputHalf) : byteSizeofVectorContents(paddedInputFP32),
       useNHWC ? static_cast<const void*>(paddedInputHalf.data()) : static_cast<const void*>(paddedInputFP32.data()),
       useNHWC,
-      &res
+      &res, handle->commandPool
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device trunk buffer with data", res);
     VulkanBuffer* dMask = vk_helper::createDeviceBufferWithData(
@@ -7331,7 +7471,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       useNHWC ? byteSizeofVectorContents(paddedMaskHalf) : byteSizeofVectorContents(paddedMaskFP32),
       useNHWC ? static_cast<const void*>(paddedMaskHalf.data()) : static_cast<const void*>(paddedMaskFP32.data()),
       true,
-      &res
+      &res, handle->commandPool
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device mask buffer with data", res);
     VulkanBuffer* dTrunkScratch = vk_helper::createDeviceBuffer(
@@ -7362,7 +7502,7 @@ bool NeuralNet::testEvaluateBatchNorm(
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to create device mask sum buffer", res);
     std::vector<float> maskSumTmp(numMaskSumFloats, 0.0f);
-    VkCommandBuffer maskSumsCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer maskSumsCB = vk_helper::allocateCommandBuffer(handle->vulkanDevice, nullptr, handle->commandPool);
     const LocalDim maskSumDim = {
       handle->tuneParams.gPool.XYSTRIDE,
       1,
@@ -7373,15 +7513,15 @@ bool NeuralNet::testEvaluateBatchNorm(
     };
     const Pipeline& maskSumPipeline = handle->pipelines->sumChannels.at(maskSumDim);
     VkDescriptorSet maskSumsDS = vk_helper::allocateDescriptorSet(
-      handle->vulkanDevice, maskSumPipeline.descriptorSetLayout, &res
+      handle->vulkanDevice, maskSumPipeline.descriptorSetLayout, &res, handle->descriptorPool
     );
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to allocate mask sum descriptor set", res);
     vkcompute::computeMaskSums(handle, maskSumsCB, maskSumsDS, batchSize, dMask, dMaskSum);
     vk_helper::submitCommandBuffers(handle->vulkanDevice, {maskSumsCB}, nullptr);
-    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dMaskSum, static_cast<VkDeviceSize>(sizeof(float) * numMaskSumFloats), maskSumTmp.data(), true, &res);
+    vk_helper::copyDeviceBufferToHost(handle->vulkanDevice, dMaskSum, static_cast<VkDeviceSize>(sizeof(float) * numMaskSumFloats), maskSumTmp.data(), true, &res, handle->commandPool);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device mask sum buffer to host", res);
     // printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Mask Sums", maskSumTmp.data(), maskSumTmp.size(), batchSize, 1, 1, 1);
-    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice);
+    VkCommandBuffer commandBuffer = vk_helper::allocateCommandBuffer(handle->vulkanDevice, nullptr, handle->commandPool);
     res = vk_helper::beginCommandBuffer(commandBuffer);
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to begin command buffer", res);
     layer->forward(commandBuffer, batchSize, scratch, dTrunk, dTrunkScratch, dMask, dMaskSum, convWorkspace, convWorkspace2);
@@ -7392,7 +7532,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       std::vector<half_t> outputPadded(nchwStorageElts);
       vk_helper::copyDeviceBufferToHost(
         handle->vulkanDevice, dTrunk,
-        static_cast<VkDeviceSize>(nchwStorageElts * sizeof(half_t)), outputPadded.data(), true, &res
+        static_cast<VkDeviceSize>(nchwStorageElts * sizeof(half_t)), outputPadded.data(), true, &res, handle->commandPool
       );
       CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy NCHW output buffer to host", res);
       for(int n = 0; n < batchSize; ++n)
@@ -7406,7 +7546,7 @@ bool NeuralNet::testEvaluateBatchNorm(
       std::vector<float> outputPadded(nchwStorageElts);
       vk_helper::copyDeviceBufferToHost(
         handle->vulkanDevice, dTrunk,
-        static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res
+        static_cast<VkDeviceSize>(sizeof(float) * nchwStorageElts), outputPadded.data(), true, &res, handle->commandPool
       );
       for(int n = 0; n < batchSize; ++n)
         for(int c = 0; c < trunkChannels; ++c)
@@ -7417,8 +7557,11 @@ bool NeuralNet::testEvaluateBatchNorm(
           }
     }
     CHECK_VK_MSG("[testEvaluateGlobalPoolingResidualBlock] Failed to copy device trunk buffer to host", res);
-    vkQueueWaitIdle(handle->vulkanDevice->queue);
-    vkDeviceWaitIdle(handle->vulkanDevice->device);
+    {
+      std::lock_guard<std::mutex> lock(handle->vulkanDevice->queueSubmitMutex);
+      vkQueueWaitIdle(handle->vulkanDevice->queue);
+      vkDeviceWaitIdle(handle->vulkanDevice->device);
+    }
 
     printFloatBuffer("[testEvaluateGlobalPoolingResidualBlock] Output", outputBuffer.data(), outputBuffer.size(), batchSize, desc->preBN.numChannels, nnYLen, nnXLen);
     vk_helper::releaseVulkanBuffer(handle->vulkanDevice, dTrunk);

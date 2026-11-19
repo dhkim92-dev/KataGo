@@ -1,25 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* @brief Global Pooling Channels NCHW FP32 compute shader (with mask)
-* Computes mean and max pooling over spatial dimensions with mask support.
-*
-* Output layout per (batch, channel):
-*   output[n * cSize * 3 + c]            = mean
-*   output[n * cSize * 3 + c + cSize]    = mean * (sqrt(maskSum) - 14) * 0.1
-*   output[n * cSize * 3 + c + cSize*2]  = max
-*
-* Binding 0: input    - input tensor [N, C, H*W]
-* Binding 1: output   - output tensor [N, C*3]
-* Binding 2: mask     - spatial mask [N, H*W]
-* Binding 3: maskSum  - sum of mask per batch [N]
-*
-* Dispatch: (1, gpoolChannels, batchSize)
-* Each workgroup processes one (batch, channel) and reduces over spatial dimension.
-*
-* Compile-time defines required:
-*   XYSTRIDE - power of 2 reduction stride (e.g., 64)
-*/
-
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Reduce spatial channels into pooled statistics.
+ */
 #include "common.glsl"
 #include "functions.glsl"
 

@@ -1,9 +1,9 @@
 /**
-* @author dhkim92.dev@gmail.com
-* @brief macro definitions
-*/
-
-
+ * @author dhkim92-dev
+ * Vulkan API: 1.1
+ * SPIR-V: 1.3
+ * Define activation macros.
+ */
 #define RELU(x) max(0.0, x)
 // MISH with numerical stability: for large x, tanh(softplus(x)) ≈ 1, so mish(x) ≈ x
 // This matches OpenCL's implementation which uses log1p(exp(x)) with threshold check

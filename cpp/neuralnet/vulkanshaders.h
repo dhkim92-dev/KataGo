@@ -212,6 +212,7 @@ extern "C" {
   DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_batched, vwm, vwn)
   DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS(xgemm_direct_batched_tt, vwmd, vwnd)
   DECLARE_XGEMM_WIDTH_VARIANTS(xgemm_strided_batched_nn, vwmd, vwnd)
+  DECLARE_XGEMM_WIDTH_VARIANTS(transformer_xgemm, vwmd, vwnd)
 
 #undef DECLARE_XGEMM_DIRECT_WIDTH_VARIANTS
 #undef DECLARE_XGEMM_WIDTH_VARIANTS
@@ -1747,6 +1748,7 @@ struct LocalDimHash {
       XgemmTuneParams xgemm;
       XgemmTuneParams xgemm16;
       XgemmDirectTuneParams xgemmDirect;
+      XgemmDirectTuneParams transformerXgemm;
       TransformerTuneParams transformer;
       TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNCHW;
       TransformerCooperativeMatrixTuneParams transformerCooperativeMatrixNHWC;
@@ -1814,11 +1816,17 @@ struct LocalDimHash {
         xgemm16 = xgemm;
 
         xgemmDirect = XgemmDirectTuneParams();
+        transformerXgemm = xgemmDirect;
       }
     };
 
     struct VulkanTuneParams : VulkanTuningProfile {
+      struct TuningRecord {
+        bool completed = false;
+      };
+
       VulkanParams vulkan;
+      std::map<std::string, TuningRecord> tuningRecords;
       VulkanTuneParams() = default;
       VulkanTuneParams(const VulkanTuneParams& other) = default;
       VulkanTuneParams& operator=(const VulkanTuneParams& other) = default;
@@ -1959,6 +1967,7 @@ struct LocalDimHash {
     VkShaderModule shaderModule_xgemm_batched_variants[27] = {};
     VkShaderModule shaderModule_xgemm_direct_batched_tt_variants[9] = {};
     VkShaderModule shaderModule_xgemm_strided_batched_nn_variants[27] = {};
+    VkShaderModule shaderModule_transformer_xgemm_variants[27] = {};
     std::vector<VkShaderModule*> shaderModuleFields;
     // In this code, assume that NCHW is default format if no postfix is given.
 
@@ -2011,6 +2020,7 @@ struct LocalDimHash {
     // note that conv1x1 can be implemented as matmul operation
     // Pipeline stridedBatchedMatmulFp32;
     Pipeline xgemmStridedBatchedFp32;
+    Pipeline transformerXgemm;
 
     // Batch Normalization pipelines
     // note that prediction phase does not need batch normalization operation separately
@@ -2100,6 +2110,7 @@ struct LocalDimHash {
       const tune::VulkanParams& vulkanParams
     );
     VkResult createXgemmStridedBatched(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
+    VkResult createTransformerXgemm(Pipeline& pipeline, const tune::XgemmDirectTuneParams& tuneParams, const tune::VulkanParams& vulkanParams);
     VkResult createBatchNormMaskIdentity(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createBatchNormMaskRelu(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);
     VkResult createBatchNormMaskMish(Pipeline& pipeline, const tune::VulkanParams& vulkanParams, bool useNHWC);

@@ -114,8 +114,10 @@ int MainCmds::tuner(const vector<string>& args) {
         VK_VERSION_MINOR(deviceInfo.properties.apiVersion) < 1
       )
         requiredExtensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
+#if defined(VK_KHR_cooperative_matrix)
       if(canUseCooperativeMatrix)
         requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#endif
 
       vulkanDevice = vk_helper::createVulkanDevice(instance, deviceInfo, requiredExtensions, &logger);
 
