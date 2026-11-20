@@ -2153,6 +2153,9 @@ namespace {
     map<string, VulkanTuneParams::TuningRecord>* tuningRecords = nullptr;
     bool onlyMissing = false;
     mutable string lastPrintedTuningParams = string();
+    // Temporary Tegra X1 single-case diagnostics.
+    bool tegraAttentionProbe = false;
+    bool tegraAttentionTightBuffers = false;
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
@@ -3088,6 +3091,7 @@ namespace {
       // Keep the same inputs on both sides of a scalar/cooperative comparison.
       const bool packedScalarAttention = plan.kernelName == "transformerScaleDotProduct" &&
         !comparesScalarAndCooperativeAttention(context, config);
+      const bool tightScalarAttention = packedScalarAttention && context.tegraAttentionTightBuffers;
       const auto& attentionCases = context.modelInfo.attentionShapes;
       const size_t attentionCaseCount = packedScalarAttention ? std::max(size_t(1), attentionCases.size()) : 1;
       const auto attentionShapeAt = [&](size_t index) -> const AttentionShape& {
@@ -3686,6 +3690,9 @@ namespace {
             elements = gemmBindingElements[binding];
           else if(packedInput)
             elements = attentionPackedElements;
+          else if(tightScalarAttention)
+            // Packed Q/K already have RoPE. The shader still binds both table descriptors.
+            elements = isOutput ? attentionOutputElements : binding == 4 ? batchSize * xySize : 1;
           else if(isPointwise) {
             const int channels = pipeline->name.find("transformer_swiglu") == 0
               ? maxCaseChannels(swiGLUCases, swiGLUChannels) : maxCaseChannels(channelCases, trunkChannels);
@@ -3904,7 +3911,7 @@ namespace {
           size_t bufferBytes = scratchBytes;
           if(isGPool || isGemm)
             bufferBytes = elements * (useHalf ? sizeof(half_t) : sizeof(float));
-          else if(packedInput || isPointwise || winogradTransform)
+          else if(packedInput || tightScalarAttention || isPointwise || winogradTransform)
             bufferBytes = initialBytes;
           if(binding == 1 && filterCopies > 1)
             bufferBytes += (filterCopies - 1) * filterStride;
@@ -4333,8 +4340,25 @@ namespace {
           return false;
       }
       else if(isTransformerAttentionTuner(plan.kernelName)) {
-        if(!ensureBuffers(attentionValidationBuffers, 6, scratchBytes, result, error, "attention validation buffer"))
+        const size_t validationBytes = tightScalarAttention
+          ? attentionOutputElements * (halfBinding(pipelines[0], outputBinding(pipelines[0])) ? sizeof(half_t) : sizeof(float))
+          : scratchBytes;
+        if(!ensureBuffers(attentionValidationBuffers, 6, validationBytes, result, error, "attention validation buffer"))
           return false;
+      }
+      if(context.tegraAttentionProbe && context.logger != nullptr) {
+        const auto bufferBytes = [](const vector<VulkanBuffer*>& buffers) {
+          VkDeviceSize bytes = 0;
+          for(const VulkanBuffer* buffer: buffers)
+            if(buffer != nullptr)
+              bytes += buffer->requestedSize;
+          return bytes;
+        };
+        context.logger->write(
+          "Tegra Attention probe buffers: device=" +
+          to_string(bufferBytes(tuningBuffers) + bufferBytes(attentionValidationBuffers)) +
+          " B, upload=" + to_string(bufferBytes(resources.uploadStagingBuffers)) + " B"
+        );
       }
       else if(isGemm) {
         if(!ensureBuffers(gemmValidationBuffers, plan.gemmCases.size(), gemmOutputBytes, result, error,
@@ -4847,6 +4871,7 @@ namespace {
         cleanup();
         return false;
       }
+      size_t probeSubmission = 0;
       const auto submitCommandBuffer = [&](bool beginNext) -> bool {
         vk_helper::barrierCommandBuffer(
           commandBuffer,
@@ -4865,6 +4890,11 @@ namespace {
           error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
           return false;
         }
+        if(context.tegraAttentionProbe && context.logger != nullptr)
+          context.logger->write(
+            "Tegra Attention probe submit " + to_string(++probeSubmission) + "/" + to_string(plan.timedRuns()) +
+            " groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ)
+          );
         result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
         if(result != VK_SUCCESS) {
           error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result) +
@@ -9313,7 +9343,7 @@ namespace {
       return false;
     const auto& model = context.modelInfo;
     auto limits = context.device->info.properties.limits;
-    if(TransformerScaleDotProductTuner::useTegraDebugLimit(context))
+    if(!context.tegraAttentionProbe && TransformerScaleDotProductTuner::useTegraDebugLimit(context))
       limits.maxComputeSharedMemorySize =
         std::min(limits.maxComputeSharedMemorySize, TransformerScaleDotProductTuner::tegraDebugSharedMemoryLimit);
     if(!config.transformer.isSupported(limits, model.transformerHeadDim, model.transformerVHeadDim))
@@ -9331,6 +9361,64 @@ namespace {
     return config.transformer.getDispatchGroupCountX(seqLen) <= limits.maxComputeWorkGroupCount[0] &&
       static_cast<uint64_t>(std::max(1, context.batchSize)) * std::max(1, maxHeads) <= limits.maxComputeWorkGroupCount[1] &&
       limits.maxComputeWorkGroupCount[2] >= 1;
+  }
+
+  // Temporary Tegra X1 probe. Use an explicit disposable -output with katago tuner.
+  const char* getTegraAttentionProbeCase(const VulkanDevice* device) {
+    return device != nullptr && device->info.deviceName.find("Tegra X1") != string::npos
+      ? std::getenv("KATAGO_VULKAN_TEGRA_ATTN_CASE")
+      : nullptr;
+  }
+
+  void runTegraAttentionProbe(
+    const char* caseSpec, const VulkanDevice* device, int batchSize, int nnXLen, int nnYLen,
+    const VulkanTuner::ModelInfoForTuning& modelInfo, Logger* logger, VulkanTuneParams& tunedConfig
+  ) {
+    const vector<string> values = Global::split(caseSpec, ',');
+    VulkanTuneParams config = tunedConfig;
+    auto& params = config.transformer;
+    if(values.size() != 3 ||
+       !Global::tryStringToInt(values[0], params.ATTN_BLOCK_Q) ||
+       !Global::tryStringToInt(values[1], params.ATTN_BLOCK_KV) ||
+       !Global::tryStringToInt(values[2], params.Q_PER_THREAD))
+      throw StringError("KATAGO_VULKAN_TEGRA_ATTN_CASE must be Q,KV,Q_PER_THREAD");
+    params.USE_TILED_ATTN = 1;
+    config.vulkan = VulkanTuner::getHardwareParams(device->info);
+    config.vulkan.shouldUseFP16Storage = false;
+    config.vulkan.shouldUseFP16Compute = false;
+    config.vulkan.shouldUseCooperativeMatrix = false;
+    config.vulkan.shouldUseNHWC = false;
+
+    const char* dummy = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DUMMY");
+    const bool useDummy = dummy != nullptr && std::strcmp(dummy, "1") == 0;
+    const char* tight = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_TIGHT_BUFFERS");
+    VulkanTimestampTimer timer(device);
+    TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, false, {}, logger, &timer, true};
+    context.tegraAttentionProbe = true;
+    context.tegraAttentionTightBuffers = tight != nullptr && std::strcmp(tight, "1") == 0;
+    using Tuner = TransformerScaleDotProductTuner;
+    if(!isValidTuningConfig<Tuner>(context, config))
+      throw StringError("Tegra Attention probe candidate violates the model or device limits");
+    if(useDummy && device->dummyQueue == VK_NULL_HANDLE)
+      throw StringError("Tegra Attention probe requested a dummy GPU workload without a second queue");
+
+    if(logger != nullptr)
+      logger->write(
+        "Tegra Attention probe " + describeTuningParams(Tuner::name(), config) +
+        " board=" + to_string(nnXLen) + "x" + to_string(nnYLen) + " batch=" + to_string(batchSize) +
+        " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers)
+      );
+    VulkanDummyThread dummyThread(device, logger);
+    if(useDummy)
+      dummyThread.start();
+    const auto measurements = measureConfigs<Tuner>(context, {config}, makeMeasurementPlan(Tuner::name(), context));
+    dummyThread.stopAndJoin();
+    requireTuningDevice(context, "Tegra Attention probe");
+    if(measurements.values.empty() || measurements.values.front().score <= 0.0)
+      throw StringError("Tegra Attention probe failed");
+    if(logger != nullptr)
+      logger->write("Tegra Attention probe PASS calls/sec=" + Global::doubleToString(measurements.values.front().callsPerSecond));
+    tunedConfig = std::move(config);
   }
 
   template<bool NHWC>
@@ -10515,6 +10603,10 @@ void VulkanTuner::tune(
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
+  if(const char* probeCase = getTegraAttentionProbeCase(device)) {
+    runTegraAttentionProbe(probeCase, device, batchSize, nnXLen, nnYLen, modelInfo, logger, tunedConfig);
+    return;
+  }
   if(attentionOnly && (modelInfo.transformerHeadDim <= 0 || modelInfo.transformerVHeadDim <= 0))
     throw StringError("Vulkan attention-only tuning requires a transformer model");
 
@@ -11039,6 +11131,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   enabled_t useFP16Mode,
   enabled_t useNHWCMode
 ) {
+  if(getTegraAttentionProbeCase(device) != nullptr)
+    throw StringError("Run the Tegra Attention probe with 'katago tuner -output <disposable file>'");
   if(didAutoTune != nullptr)
     *didAutoTune = false;
   string filename = tunerFile;
