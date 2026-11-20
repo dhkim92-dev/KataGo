@@ -3059,6 +3059,9 @@ namespace {
       VkResult result = VK_SUCCESS;
       const auto deviceLossGuard = makeScopeGuard([&]() { device->recordDeviceLoss(result, "tuning measurement"); });
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
+      // The Tegra probe can keep the full buffers while executing fewer rows.
+      const size_t validatedBatchSize = context.tegraAttentionProbe
+        ? static_cast<size_t>(plan.batchSizes.front()) : batchSize;
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
       const bool useNHWC = usesGenericNHWC(config);
       const bool modelSized = usesNonCooperativeNCHW(config);
@@ -3372,7 +3375,8 @@ namespace {
           ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
           : attentionOutputChannels);
       const auto attentionOutputElementsForRun = [&](size_t repeat) {
-        return attentionCases.empty() ? attentionOutputElements : batchSize * xySize *
+        return attentionCases.empty() ? (attentionOutputElements / batchSize) * validatedBatchSize
+          : validatedBatchSize * xySize *
           attentionHeadsForRun(repeat).first * std::max(1, context.modelInfo.transformerVHeadDim);
       };
       const size_t attentionInputChannels = static_cast<size_t>(
@@ -3977,7 +3981,7 @@ namespace {
         const auto buffer = [&](size_t binding) -> const vector<float>& {
           return hostFloatBuffers[bindingSourceIndex(pipeline, firstBuffer + binding, binding)];
         };
-        const int cpuBatchSize = std::max(1, context.batchSize);
+        const int cpuBatchSize = static_cast<int>(validatedBatchSize);
         const int cpuXYSize = static_cast<int>(xySize);
         const int cpuChannels = channelsForRun(repeat, trunkChannels);
         const int cpuChannelsPadded = vk_helper::roundUpToMultipleInt(cpuChannels, nhwcChannelAlignment);
@@ -9433,6 +9437,12 @@ namespace {
         throw StringError("KATAGO_VULKAN_TEGRA_ATTN_BATCH must be between 1 and " + to_string(batchSize));
       batchSize = parsedBatch;
     }
+    int dispatchBatchSize = batchSize;
+    const char* probeDispatchBatch = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DISPATCH_BATCH");
+    if(probeDispatchBatch != nullptr &&
+       (!Global::tryStringToInt(probeDispatchBatch, dispatchBatchSize) ||
+        dispatchBatchSize < 1 || dispatchBatchSize > batchSize))
+      throw StringError("KATAGO_VULKAN_TEGRA_ATTN_DISPATCH_BATCH must be between 1 and the probe batch size");
     VulkanTimestampTimer timer(device);
     TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, false, {}, logger, &timer, true};
     context.tegraAttentionProbe = true;
@@ -9448,13 +9458,16 @@ namespace {
       logger->write(
         "Tegra Attention probe " + describeTuningParams(Tuner::name(), config) +
         " board=" + to_string(nnXLen) + "x" + to_string(nnYLen) + " batch=" + to_string(batchSize) +
+        " dispatchBatch=" + to_string(dispatchBatchSize) +
         " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers) +
         " freshCommands=" + to_string(context.tegraAttentionFreshCommands)
       );
     VulkanDummyThread dummyThread(device, logger);
     if(useDummy)
       dummyThread.start();
-    const auto measurements = measureConfigs<Tuner>(context, {config}, makeMeasurementPlan(Tuner::name(), context));
+    auto plan = makeMeasurementPlan(Tuner::name(), context);
+    plan.batchSizes = {dispatchBatchSize};
+    const auto measurements = measureConfigs<Tuner>(context, {config}, plan);
     dummyThread.stopAndJoin();
     requireTuningDevice(context, "Tegra Attention probe");
     if(measurements.values.empty() || measurements.values.front().score <= 0.0)
