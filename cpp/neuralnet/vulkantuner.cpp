@@ -2156,6 +2156,7 @@ namespace {
     // Temporary Tegra X1 single-case diagnostics.
     bool tegraAttentionProbe = false;
     bool tegraAttentionTightBuffers = false;
+    bool tegraAttentionFreshCommands = false;
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
@@ -4872,6 +4873,13 @@ namespace {
         return false;
       }
       size_t probeSubmission = 0;
+      vector<pair<VkCommandBuffer, VkFence>> completedProbeSubmissions;
+      const auto releaseProbeSubmissions = makeScopeGuard([&]() {
+        for(const auto& [completedCommandBuffer, completedFence]: completedProbeSubmissions) {
+          vkFreeCommandBuffers(device->device, commandPool, 1, &completedCommandBuffer);
+          vkDestroyFence(device->device, completedFence, nullptr);
+        }
+      });
       const auto submitCommandBuffer = [&](bool beginNext) -> bool {
         vk_helper::barrierCommandBuffer(
           commandBuffer,
@@ -4890,12 +4898,26 @@ namespace {
           error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
           return false;
         }
-        if(context.tegraAttentionProbe && context.logger != nullptr)
+        const bool logProbe = context.tegraAttentionProbe && context.logger != nullptr;
+        if(logProbe)
           context.logger->write(
             "Tegra Attention probe submit " + to_string(++probeSubmission) + "/" + to_string(plan.timedRuns()) +
             " groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ)
           );
+        const auto probeStart = logProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto logProbeResult = [&](const char* stage) {
+          if(logProbe) {
+            const double elapsedMs = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - probeStart
+            ).count();
+            context.logger->write(
+              "Tegra Attention probe " + to_string(probeSubmission) + " " + stage +
+              "=" + vk_helper::vkErrorToString(result) + " elapsedMs=" + to_string(elapsedMs)
+            );
+          }
+        };
         result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
+        logProbeResult("vkQueueSubmit");
         if(result != VK_SUCCESS) {
           error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -4903,6 +4925,7 @@ namespace {
         }
         commandBufferSubmitted = true;
         result = vk_helper::waitForFence(device, fence, "tuning vkWaitForFences");
+        logProbeResult("vkWaitForFences");
         if(result != VK_SUCCESS) {
           error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -4912,10 +4935,20 @@ namespace {
         if(!beginNext)
           return true;
 
-        result = vkResetCommandBuffer(commandBuffer, 0);
-        if(result != VK_SUCCESS) {
-          error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
-          return false;
+        if(context.tegraAttentionFreshCommands) {
+          // Hold the completed handles so the driver cannot immediately recycle them.
+          completedProbeSubmissions.emplace_back(commandBuffer, fence);
+          commandBuffer = VK_NULL_HANDLE;
+          fence = VK_NULL_HANDLE;
+          if(!ensureCommandResources(result, error))
+            return false;
+        }
+        else {
+          result = vkResetCommandBuffer(commandBuffer, 0);
+          if(result != VK_SUCCESS) {
+            error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
+            return false;
+          }
         }
         result = vk_helper::beginCommandBuffer(commandBuffer);
         if(result != VK_SUCCESS) {
@@ -9392,10 +9425,19 @@ namespace {
     const char* dummy = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DUMMY");
     const bool useDummy = dummy != nullptr && std::strcmp(dummy, "1") == 0;
     const char* tight = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_TIGHT_BUFFERS");
+    const char* fresh = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_FRESH_COMMANDS");
+    const char* probeBatch = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_BATCH");
+    if(probeBatch != nullptr) {
+      int parsedBatch;
+      if(!Global::tryStringToInt(probeBatch, parsedBatch) || parsedBatch < 1 || parsedBatch > batchSize)
+        throw StringError("KATAGO_VULKAN_TEGRA_ATTN_BATCH must be between 1 and " + to_string(batchSize));
+      batchSize = parsedBatch;
+    }
     VulkanTimestampTimer timer(device);
     TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, false, {}, logger, &timer, true};
     context.tegraAttentionProbe = true;
     context.tegraAttentionTightBuffers = tight != nullptr && std::strcmp(tight, "1") == 0;
+    context.tegraAttentionFreshCommands = fresh != nullptr && std::strcmp(fresh, "1") == 0;
     using Tuner = TransformerScaleDotProductTuner;
     if(!isValidTuningConfig<Tuner>(context, config))
       throw StringError("Tegra Attention probe candidate violates the model or device limits");
@@ -9406,7 +9448,8 @@ namespace {
       logger->write(
         "Tegra Attention probe " + describeTuningParams(Tuner::name(), config) +
         " board=" + to_string(nnXLen) + "x" + to_string(nnYLen) + " batch=" + to_string(batchSize) +
-        " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers)
+        " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers) +
+        " freshCommands=" + to_string(context.tegraAttentionFreshCommands)
       );
     VulkanDummyThread dummyThread(device, logger);
     if(useDummy)
