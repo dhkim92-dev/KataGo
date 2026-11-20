@@ -2167,6 +2167,20 @@ namespace {
 #endif
   };
 
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
+  TransformerTuneParams parseAttentionProbeCase(const char* caseSpec) {
+    const vector<string> values = Global::split(caseSpec, ',');
+    TransformerTuneParams params;
+    if(values.size() != 3 ||
+       !Global::tryStringToInt(values[0], params.ATTN_BLOCK_Q) ||
+       !Global::tryStringToInt(values[1], params.ATTN_BLOCK_KV) ||
+       !Global::tryStringToInt(values[2], params.Q_PER_THREAD))
+      throw StringError("Attention probe case must be Q,KV,Q_PER_THREAD");
+    params.USE_TILED_ATTN = 1;
+    return params;
+  }
+#endif
+
   bool usesGenericNHWC(const VulkanTuneParams& config) {
     return config.vulkan.shouldUseNHWC &&
            config.vulkan.canUseCooperativeMatrix &&
@@ -7076,6 +7090,26 @@ namespace {
       }
     }
     const bool checkReference = Tuner::name() == "transformerScaleDotProduct";
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
+    if(checkReference && !context.attentionProbe) {
+      if(const char* firstCase = std::getenv("KATAGO_VULKAN_ATTN_FIRST_CASE")) {
+        const TransformerTuneParams requested = parseAttentionProbeCase(firstCase);
+        const auto first = find_if(configs.begin(), configs.end(), [&](const VulkanTuneParams& config) {
+          const TransformerTuneParams& params = config.transformer;
+          return params.USE_TILED_ATTN == requested.USE_TILED_ATTN &&
+                 params.ATTN_BLOCK_Q == requested.ATTN_BLOCK_Q &&
+                 params.ATTN_BLOCK_KV == requested.ATTN_BLOCK_KV &&
+                 params.Q_PER_THREAD == requested.Q_PER_THREAD &&
+                 isValidTuningConfig<Tuner>(context, config);
+        });
+        if(first == configs.end())
+          throw StringError("KATAGO_VULKAN_ATTN_FIRST_CASE does not match a supported tiled Attention candidate");
+        std::rotate(configs.begin(), first, first + 1);
+        if(context.logger != nullptr)
+          context.logger->write("First scalar Attention candidate " + describeTuningParams(Tuner::name(), configs.front()));
+      }
+    }
+#endif
     const size_t candidateCount = count_if(
       configs.begin(), configs.end(), [&context](const VulkanTuneParams& config) {
         return isValidTuningConfig<Tuner>(context, config);
@@ -7101,6 +7135,11 @@ namespace {
         nullptr,
         false
       );
+      // Remove this block to restore cache reuse for scalar Attention candidates.
+      if(Tuner::name() == "transformerScaleDotProduct") {
+        vkDestroyPipelineCache(context.device->device, localPipelines->cache, nullptr);
+        localPipelines->cache = VK_NULL_HANDLE;
+      }
       sharedPipelines = localPipelines.get();
     }
     vk_shader::ComputePipelines& pipelines = *sharedPipelines;
@@ -7123,7 +7162,7 @@ namespace {
       const size_t currentCandidateIndex = ++candidateIndex;
       try {
         // The previous candidate has finished before the next pipeline is built.
-        // Reuse the pipeline cache and avoid a device-idle wait for every candidate.
+        // Avoid a device-idle wait for every candidate.
         for(Pipeline* pipeline: previousTargets)
           pipelines.destroyPipeline(*pipeline);
         previousTargets.clear();
@@ -9537,15 +9576,8 @@ namespace {
     const char* caseSpec, const VulkanDevice* device, int batchSize, int nnXLen, int nnYLen,
     const VulkanTuner::ModelInfoForTuning& modelInfo, Logger* logger, VulkanTuneParams& tunedConfig
   ) {
-    const vector<string> values = Global::split(caseSpec, ',');
     VulkanTuneParams config = tunedConfig;
-    auto& params = config.transformer;
-    if(values.size() != 3 ||
-       !Global::tryStringToInt(values[0], params.ATTN_BLOCK_Q) ||
-       !Global::tryStringToInt(values[1], params.ATTN_BLOCK_KV) ||
-       !Global::tryStringToInt(values[2], params.Q_PER_THREAD))
-      throw StringError("Attention probe case must be Q,KV,Q_PER_THREAD");
-    params.USE_TILED_ATTN = 1;
+    config.transformer = parseAttentionProbeCase(caseSpec);
     config.vulkan = VulkanTuner::getHardwareParams(device->info);
     config.vulkan.shouldUseFP16Storage = false;
     config.vulkan.shouldUseFP16Compute = false;
