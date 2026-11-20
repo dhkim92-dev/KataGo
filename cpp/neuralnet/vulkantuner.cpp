@@ -1,5 +1,7 @@
 #ifdef USE_VULKAN_BACKEND
 
+// #define KATAGO_VULKAN_ATTN_DIAGNOSTICS
+
 #include "../neuralnet/vulkantuner.h"
 #include "../neuralnet/vulkancompute.h"
 
@@ -9,7 +11,9 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
 #include <cstdlib>
+#endif
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -2153,12 +2157,14 @@ namespace {
     map<string, VulkanTuneParams::TuningRecord>* tuningRecords = nullptr;
     bool onlyMissing = false;
     mutable string lastPrintedTuningParams = string();
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
     // Temporary scalar Attention single-case diagnostics.
     bool attentionProbe = false;
     bool tegraAttentionTightBuffers = false;
     bool tegraAttentionFreshCommands = false;
     bool attentionSkipTimestamps = false;
     bool attentionSkipSnapshots = false;
+#endif
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
@@ -2979,7 +2985,11 @@ namespace {
       vector<float>* cpuReference = nullptr
     ) {
       errorProp = numeric_limits<double>::quiet_NaN();
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       if(!context.attentionSkipTimestamps && !isUsable()) {
+#else
+      if(!isUsable()) {
+#endif
         error = "compute timestamps are not supported";
         return false;
       }
@@ -3061,9 +3071,11 @@ namespace {
       VkResult result = VK_SUCCESS;
       const auto deviceLossGuard = makeScopeGuard([&]() { device->recordDeviceLoss(result, "tuning measurement"); });
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       // The probe can keep the full buffers while executing fewer rows.
       const size_t validatedBatchSize = context.attentionProbe
         ? static_cast<size_t>(plan.batchSizes.front()) : batchSize;
+#endif
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
       const bool useNHWC = usesGenericNHWC(config);
       const bool modelSized = usesNonCooperativeNCHW(config);
@@ -3097,7 +3109,9 @@ namespace {
       // Keep the same inputs on both sides of a scalar/cooperative comparison.
       const bool packedScalarAttention = plan.kernelName == "transformerScaleDotProduct" &&
         !comparesScalarAndCooperativeAttention(context, config);
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       const bool tightScalarAttention = packedScalarAttention && context.tegraAttentionTightBuffers;
+#endif
       const auto& attentionCases = context.modelInfo.attentionShapes;
       const size_t attentionCaseCount = packedScalarAttention ? std::max(size_t(1), attentionCases.size()) : 1;
       const auto attentionShapeAt = [&](size_t index) -> const AttentionShape& {
@@ -3377,8 +3391,12 @@ namespace {
           ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
           : attentionOutputChannels);
       const auto attentionOutputElementsForRun = [&](size_t repeat) {
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         return attentionCases.empty() ? (attentionOutputElements / batchSize) * validatedBatchSize
           : validatedBatchSize * xySize *
+#else
+        return attentionCases.empty() ? attentionOutputElements : batchSize * xySize *
+#endif
           attentionHeadsForRun(repeat).first * std::max(1, context.modelInfo.transformerVHeadDim);
       };
       const size_t attentionInputChannels = static_cast<size_t>(
@@ -3697,9 +3715,11 @@ namespace {
             elements = gemmBindingElements[binding];
           else if(packedInput)
             elements = attentionPackedElements;
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           else if(tightScalarAttention)
             // Packed Q/K already have RoPE. The shader still binds both table descriptors.
             elements = isOutput ? attentionOutputElements : binding == 4 ? batchSize * xySize : 1;
+#endif
           else if(isPointwise) {
             const int channels = pipeline->name.find("transformer_swiglu") == 0
               ? maxCaseChannels(swiGLUCases, swiGLUChannels) : maxCaseChannels(channelCases, trunkChannels);
@@ -3918,7 +3938,11 @@ namespace {
           size_t bufferBytes = scratchBytes;
           if(isGPool || isGemm)
             bufferBytes = elements * (useHalf ? sizeof(half_t) : sizeof(float));
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           else if(packedInput || tightScalarAttention || isPointwise || winogradTransform)
+#else
+          else if(packedInput || isPointwise || winogradTransform)
+#endif
             bufferBytes = initialBytes;
           if(binding == 1 && filterCopies > 1)
             bufferBytes += (filterCopies - 1) * filterStride;
@@ -3983,7 +4007,11 @@ namespace {
         const auto buffer = [&](size_t binding) -> const vector<float>& {
           return hostFloatBuffers[bindingSourceIndex(pipeline, firstBuffer + binding, binding)];
         };
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         const int cpuBatchSize = static_cast<int>(validatedBatchSize);
+#else
+        const int cpuBatchSize = std::max(1, context.batchSize);
+#endif
         const int cpuXYSize = static_cast<int>(xySize);
         const int cpuChannels = channelsForRun(repeat, trunkChannels);
         const int cpuChannelsPadded = vk_helper::roundUpToMultipleInt(cpuChannels, nhwcChannelAlignment);
@@ -4284,15 +4312,21 @@ namespace {
       };
       if(!isGemm && cpuReference != nullptr) {
         const int numValidationRepeats =
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           context.attentionSkipSnapshots ? 1 :
+#endif
           plan.kernelName == "gPool" ? 10 :
           isTransformerAttentionTuner(plan.kernelName) ? 6 :
           plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
           plan.kernelName == "transformerRMSNorm" ||
           plan.kernelName == "spatialRMSNorm" ? 10 : 1;
         map<tuple<int, int, size_t>, pair<size_t, size_t>> referenceByShape;
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         const size_t firstValidationRepeat = context.attentionSkipSnapshots ? plan.totalRuns - 1 : plan.warmupRuns;
         for(size_t repeat = firstValidationRepeat; repeat < firstValidationRepeat + numValidationRepeats; repeat++) {
+#else
+        for(size_t repeat = plan.warmupRuns; repeat < plan.warmupRuns + numValidationRepeats; repeat++) {
+#endif
           const auto dimensions = isTransformerAttentionTuner(plan.kernelName) ? attentionHeadsForRun(repeat)
             : make_pair(channelsForRun(repeat, trunkChannels), swiGLUChannelsForRun(repeat));
           const auto shape = make_tuple(dimensions.first, dimensions.second, packedScalarAttention ? attentionCaseForRun(repeat) : 0);
@@ -4349,12 +4383,17 @@ namespace {
           return false;
       }
       else if(isTransformerAttentionTuner(plan.kernelName)) {
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         const size_t validationBytes = tightScalarAttention
           ? attentionOutputElements * (halfBinding(pipelines[0], outputBinding(pipelines[0])) ? sizeof(half_t) : sizeof(float))
           : scratchBytes;
         if(!ensureBuffers(attentionValidationBuffers, 6, validationBytes, result, error, "attention validation buffer"))
+#else
+        if(!ensureBuffers(attentionValidationBuffers, 6, scratchBytes, result, error, "attention validation buffer"))
+#endif
           return false;
       }
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       if(context.attentionProbe && context.logger != nullptr) {
         const auto bufferBytes = [](const vector<VulkanBuffer*>& buffers) {
           VkDeviceSize bytes = 0;
@@ -4369,6 +4408,7 @@ namespace {
           " B, upload=" + to_string(bufferBytes(resources.uploadStagingBuffers)) + " B"
         );
       }
+#endif
       else if(isGemm) {
         if(!ensureBuffers(gemmValidationBuffers, plan.gemmCases.size(), gemmOutputBytes, result, error,
            "GEMM validation buffer"))
@@ -4423,7 +4463,11 @@ namespace {
 
       const size_t firstTimedPipeline = plan.kernelName == "spatialRMSNorm" ? 2 : 0;
       const size_t timedPipelineCount = plan.kernelName == "spatialRMSNorm" ? 1 : pipelines.size();
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       if(!context.attentionSkipTimestamps && !ensureQueryPool(
+#else
+      if(!ensureQueryPool(
+#endif
         static_cast<uint32_t>(2 * plan.timedRuns() * timedPipelineCount), result, error
       ))
         return false;
@@ -4880,6 +4924,7 @@ namespace {
         cleanup();
         return false;
       }
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       size_t probeSubmission = 0;
       vector<pair<VkCommandBuffer, VkFence>> completedProbeSubmissions;
       const auto releaseProbeSubmissions = makeScopeGuard([&]() {
@@ -4888,6 +4933,7 @@ namespace {
           vkDestroyFence(device->device, completedFence, nullptr);
         }
       });
+#endif
       const auto submitCommandBuffer = [&](bool beginNext) -> bool {
         vk_helper::barrierCommandBuffer(
           commandBuffer,
@@ -4906,6 +4952,7 @@ namespace {
           error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
           return false;
         }
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         const bool logProbe = context.attentionProbe && context.logger != nullptr;
         if(logProbe)
           context.logger->write(
@@ -4924,8 +4971,11 @@ namespace {
             );
           }
         };
+#endif
         result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         logProbeResult("vkQueueSubmit");
+#endif
         if(result != VK_SUCCESS) {
           error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -4933,7 +4983,9 @@ namespace {
         }
         commandBufferSubmitted = true;
         result = vk_helper::waitForFence(device, fence, "tuning vkWaitForFences");
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         logProbeResult("vkWaitForFences");
+#endif
         if(result != VK_SUCCESS) {
           error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -4943,6 +4995,7 @@ namespace {
         if(!beginNext)
           return true;
 
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         if(context.tegraAttentionFreshCommands) {
           // Hold the completed handles so the driver cannot immediately recycle them.
           completedProbeSubmissions.emplace_back(commandBuffer, fence);
@@ -4958,6 +5011,13 @@ namespace {
             return false;
           }
         }
+#else
+        result = vkResetCommandBuffer(commandBuffer, 0);
+        if(result != VK_SUCCESS) {
+          error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
+          return false;
+        }
+#endif
         result = vk_helper::beginCommandBuffer(commandBuffer);
         if(result != VK_SUCCESS) {
           error = "could not begin tuning command buffer: " + vk_helper::vkErrorToString(result);
@@ -5054,12 +5114,18 @@ namespace {
           return false;
       }
       const size_t timedRuns = plan.timedRuns();
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       const auto wallTimerStart = context.attentionSkipTimestamps
         ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if(!context.attentionSkipTimestamps)
         vkCmdResetQueryPool(
           commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns * timedPipelineCount)
         );
+#else
+      vkCmdResetQueryPool(
+        commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns * timedPipelineCount)
+      );
+#endif
       const size_t spatialApplyFirstBuffer = spatialRMSNorm ?
         pipelines[0]->bindingCount + pipelines[1]->bindingCount : 0;
       for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
@@ -5072,13 +5138,21 @@ namespace {
         }
         for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
           const uint32_t pipelineQueryStart = queryStart + static_cast<uint32_t>(2 * timedPipeline);
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           if(!context.attentionSkipTimestamps)
             vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart);
+#else
+          vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart);
+#endif
           recordDispatches(
             commandBuffer, plan.warmupRuns + timedRepeat, firstTimedPipeline + timedPipeline, 1
           );
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           if(!context.attentionSkipTimestamps)
             vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart + 1);
+#else
+          vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart + 1);
+#endif
           if(timedPipeline + 1 < timedPipelineCount)
             vk_helper::barrierCommandBuffer(commandBuffer);
         }
@@ -5243,7 +5317,9 @@ namespace {
           );
         }
         else if(
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
           !context.attentionSkipSnapshots &&
+#endif
           isTransformerAttentionTuner(plan.kernelName) && timedRepeat < attentionValidationBuffers.size()
         ) {
           const Pipeline* attentionPipeline = pipelines[0];
@@ -5284,6 +5360,7 @@ namespace {
         cleanup();
         return false;
       }
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       if(context.attentionProbe && context.logger != nullptr)
         context.logger->write("Attention probe dispatches completed");
       if(context.attentionSkipTimestamps) {
@@ -5291,6 +5368,7 @@ namespace {
           std::chrono::duration<double>(std::chrono::steady_clock::now() - wallTimerStart).count();
       }
       else {
+#endif
         vector<uint64_t> timestamps(2 * timedRuns * timedPipelineCount, 0);
         result = vkGetQueryPoolResults(
           device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
@@ -5326,7 +5404,9 @@ namespace {
           return false;
         }
         callsPerSecond = weightCounted / weightedTimeTaken;
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       }
+#endif
 
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
@@ -5535,11 +5615,13 @@ namespace {
         const uint32_t binding = outputBinding(attentionPipeline);
         const bool useFP16 = halfBinding(attentionPipeline, binding);
         const VkDeviceSize outputBytes = attentionOutputElements * (useFP16 ? sizeof(half_t) : sizeof(float));
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
         if(context.attentionSkipSnapshots)
           return readAttentionValidationBuffers(
             {tuningBuffers[binding]}, outputBytes, {attentionOutputElementsForRun(plan.totalRuns - 1)},
             useFP16, readback, result, error
           );
+#endif
         vector<size_t> outputCounts;
         for(size_t repeat = 0; repeat < attentionValidationBuffers.size(); repeat++)
           outputCounts.push_back(attentionOutputElementsForRun(plan.warmupRuns + repeat));
@@ -7000,7 +7082,11 @@ namespace {
       }
     ) +
       (!checkReference && !configs.empty() && !isValidTuningConfig<Tuner>(context, configs.front()) ? 1 : 0);
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
     if(context.timer == nullptr || (!context.attentionSkipTimestamps && !context.timer->isUsable())) {
+#else
+    if(context.timer == nullptr || !context.timer->isUsable()) {
+#endif
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
       return measurements;
@@ -9303,6 +9389,7 @@ namespace {
   struct TransformerScaleDotProductTuner {
     static string name() { return "transformerScaleDotProduct"; }
 
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
     // Temporary diagnostic for the Tegra X1 scalar Attention device loss.
     static constexpr uint32_t tegraDebugSharedMemoryLimit = 32 * 1024;
     static bool useTegraDebugLimit(const TuningContext& context) {
@@ -9311,6 +9398,7 @@ namespace {
       const char* debug = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DEBUG");
       return debug != nullptr && std::strcmp(debug, "1") == 0;
     }
+#endif
 
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
@@ -9322,6 +9410,7 @@ namespace {
     static vector<VulkanTuneParams> candidates(
       const VulkanTuneParams& current,
       bool full,
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       const TuningContext& context
     ) {
       if(context.logger != nullptr && useTegraDebugLimit(context)) {
@@ -9332,6 +9421,10 @@ namespace {
           " bytes (device limit " + to_string(deviceLimit) + " bytes)"
         );
       }
+#else
+      const TuningContext&
+    ) {
+#endif
       VulkanTuneParams defaults;
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
@@ -9403,10 +9496,14 @@ namespace {
     if(context.device == nullptr)
       return false;
     const auto& model = context.modelInfo;
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
     auto limits = context.device->info.properties.limits;
     if(!context.attentionProbe && TransformerScaleDotProductTuner::useTegraDebugLimit(context))
       limits.maxComputeSharedMemorySize =
         std::min(limits.maxComputeSharedMemorySize, TransformerScaleDotProductTuner::tegraDebugSharedMemoryLimit);
+#else
+    const auto& limits = context.device->info.properties.limits;
+#endif
     if(!config.transformer.isSupported(limits, model.transformerHeadDim, model.transformerVHeadDim))
       return false;
 
@@ -9424,6 +9521,7 @@ namespace {
       limits.maxComputeWorkGroupCount[2] >= 1;
   }
 
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
   // Temporary scalar Attention probe. Use an explicit disposable -output with katago tuner.
   const char* getAttentionProbeCase(const VulkanDevice* device) {
     if(device == nullptr)
@@ -9515,6 +9613,7 @@ namespace {
       );
     tunedConfig = std::move(config);
   }
+#endif
 
   template<bool NHWC>
   struct TransformerScaleDotProductCooperativeMatrixTuner {
@@ -10698,10 +10797,12 @@ void VulkanTuner::tune(
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
   if(const char* probeCase = getAttentionProbeCase(device)) {
     runAttentionProbe(probeCase, device, batchSize, nnXLen, nnYLen, modelInfo, logger, tunedConfig);
     return;
   }
+#endif
   if(attentionOnly && (modelInfo.transformerHeadDim <= 0 || modelInfo.transformerVHeadDim <= 0))
     throw StringError("Vulkan attention-only tuning requires a transformer model");
 
@@ -11226,8 +11327,10 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   enabled_t useFP16Mode,
   enabled_t useNHWCMode
 ) {
+#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
   if(getAttentionProbeCase(device) != nullptr)
     throw StringError("Run the Attention probe with 'katago tuner -output <disposable file>'");
+#endif
   if(didAutoTune != nullptr)
     *didAutoTune = false;
   string filename = tunerFile;
