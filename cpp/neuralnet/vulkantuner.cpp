@@ -2153,11 +2153,12 @@ namespace {
     map<string, VulkanTuneParams::TuningRecord>* tuningRecords = nullptr;
     bool onlyMissing = false;
     mutable string lastPrintedTuningParams = string();
-    // Temporary Tegra X1 single-case diagnostics.
+    // Temporary scalar Attention single-case diagnostics.
     bool attentionProbe = false;
     bool tegraAttentionTightBuffers = false;
     bool tegraAttentionFreshCommands = false;
-    bool attentionDispatchOnly = false;
+    bool attentionSkipTimestamps = false;
+    bool attentionSkipSnapshots = false;
   };
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
@@ -2978,7 +2979,7 @@ namespace {
       vector<float>* cpuReference = nullptr
     ) {
       errorProp = numeric_limits<double>::quiet_NaN();
-      if(!context.attentionDispatchOnly && !isUsable()) {
+      if(!context.attentionSkipTimestamps && !isUsable()) {
         error = "compute timestamps are not supported";
         return false;
       }
@@ -4283,14 +4284,14 @@ namespace {
       };
       if(!isGemm && cpuReference != nullptr) {
         const int numValidationRepeats =
-          context.attentionDispatchOnly ? 1 :
+          context.attentionSkipSnapshots ? 1 :
           plan.kernelName == "gPool" ? 10 :
           isTransformerAttentionTuner(plan.kernelName) ? 6 :
           plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
           plan.kernelName == "transformerRMSNorm" ||
           plan.kernelName == "spatialRMSNorm" ? 10 : 1;
         map<tuple<int, int, size_t>, pair<size_t, size_t>> referenceByShape;
-        const size_t firstValidationRepeat = context.attentionDispatchOnly ? plan.totalRuns - 1 : plan.warmupRuns;
+        const size_t firstValidationRepeat = context.attentionSkipSnapshots ? plan.totalRuns - 1 : plan.warmupRuns;
         for(size_t repeat = firstValidationRepeat; repeat < firstValidationRepeat + numValidationRepeats; repeat++) {
           const auto dimensions = isTransformerAttentionTuner(plan.kernelName) ? attentionHeadsForRun(repeat)
             : make_pair(channelsForRun(repeat, trunkChannels), swiGLUChannelsForRun(repeat));
@@ -4422,7 +4423,7 @@ namespace {
 
       const size_t firstTimedPipeline = plan.kernelName == "spatialRMSNorm" ? 2 : 0;
       const size_t timedPipelineCount = plan.kernelName == "spatialRMSNorm" ? 1 : pipelines.size();
-      if(!context.attentionDispatchOnly && !ensureQueryPool(
+      if(!context.attentionSkipTimestamps && !ensureQueryPool(
         static_cast<uint32_t>(2 * plan.timedRuns() * timedPipelineCount), result, error
       ))
         return false;
@@ -5053,9 +5054,9 @@ namespace {
           return false;
       }
       const size_t timedRuns = plan.timedRuns();
-      const auto dispatchOnlyStart = context.attentionDispatchOnly
+      const auto wallTimerStart = context.attentionSkipTimestamps
         ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if(!context.attentionDispatchOnly)
+      if(!context.attentionSkipTimestamps)
         vkCmdResetQueryPool(
           commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns * timedPipelineCount)
         );
@@ -5071,12 +5072,12 @@ namespace {
         }
         for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
           const uint32_t pipelineQueryStart = queryStart + static_cast<uint32_t>(2 * timedPipeline);
-          if(!context.attentionDispatchOnly)
+          if(!context.attentionSkipTimestamps)
             vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart);
           recordDispatches(
             commandBuffer, plan.warmupRuns + timedRepeat, firstTimedPipeline + timedPipeline, 1
           );
-          if(!context.attentionDispatchOnly)
+          if(!context.attentionSkipTimestamps)
             vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart + 1);
           if(timedPipeline + 1 < timedPipelineCount)
             vk_helper::barrierCommandBuffer(commandBuffer);
@@ -5242,7 +5243,7 @@ namespace {
           );
         }
         else if(
-          !context.attentionDispatchOnly &&
+          !context.attentionSkipSnapshots &&
           isTransformerAttentionTuner(plan.kernelName) && timedRepeat < attentionValidationBuffers.size()
         ) {
           const Pipeline* attentionPipeline = pipelines[0];
@@ -5283,53 +5284,49 @@ namespace {
         cleanup();
         return false;
       }
-      if(context.attentionDispatchOnly) {
+      if(context.attentionProbe && context.logger != nullptr)
+        context.logger->write("Attention probe dispatches completed");
+      if(context.attentionSkipTimestamps) {
         callsPerSecond = timedRuns /
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - dispatchOnlyStart).count();
-        if(context.logger != nullptr)
-          context.logger->write("Attention probe dispatches completed; starting output readback");
-        const uint32_t binding = outputBinding(pipelines[0]);
-        const bool useHalf = halfBinding(pipelines[0], binding);
-        const VkDeviceSize bytes = attentionOutputElements * (useHalf ? sizeof(half_t) : sizeof(float));
-        return readAttentionValidationBuffers(
-          {tuningBuffers[binding]}, bytes, {attentionOutputElementsForRun(plan.totalRuns - 1)}, useHalf, readback, result, error
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - wallTimerStart).count();
+      }
+      else {
+        vector<uint64_t> timestamps(2 * timedRuns * timedPipelineCount, 0);
+        result = vkGetQueryPoolResults(
+          device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
+          timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
         );
-      }
-      vector<uint64_t> timestamps(2 * timedRuns * timedPipelineCount, 0);
-      result = vkGetQueryPoolResults(
-        device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
-        timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
-      );
-      if(result != VK_SUCCESS) {
-        error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
-        cleanup();
-        return false;
-      }
-      double weightCounted = 0.0;
-      double weightedTimeTaken = 0.0;
-      for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
-        const size_t planRun = plan.warmupRuns + timedRepeat;
-        double weight = plan.weightForRun(planRun);
-        for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
-          const size_t queryIndex = (timedRepeat * timedPipelineCount + timedPipeline) * 2;
-          const uint64_t start = timestamps[queryIndex];
-          const uint64_t end = timestamps[queryIndex + 1];
-          if(end <= start) {
-            error = "could not read a valid tuning timestamp";
-            cleanup();
-            return false;
-          }
-          const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
-          weightCounted += weight;
-          weightedTimeTaken += elapsedSeconds * weight;
+        if(result != VK_SUCCESS) {
+          error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
+          cleanup();
+          return false;
         }
+        double weightCounted = 0.0;
+        double weightedTimeTaken = 0.0;
+        for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
+          const size_t planRun = plan.warmupRuns + timedRepeat;
+          double weight = plan.weightForRun(planRun);
+          for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
+            const size_t queryIndex = (timedRepeat * timedPipelineCount + timedPipeline) * 2;
+            const uint64_t start = timestamps[queryIndex];
+            const uint64_t end = timestamps[queryIndex + 1];
+            if(end <= start) {
+              error = "could not read a valid tuning timestamp";
+              cleanup();
+              return false;
+            }
+            const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
+            weightCounted += weight;
+            weightedTimeTaken += elapsedSeconds * weight;
+          }
+        }
+        if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
+          error = "tuning measurement has no weighted runs";
+          cleanup();
+          return false;
+        }
+        callsPerSecond = weightCounted / weightedTimeTaken;
       }
-      if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
-        error = "tuning measurement has no weighted runs";
-        cleanup();
-        return false;
-      }
-      callsPerSecond = weightCounted / weightedTimeTaken;
 
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
@@ -5538,6 +5535,11 @@ namespace {
         const uint32_t binding = outputBinding(attentionPipeline);
         const bool useFP16 = halfBinding(attentionPipeline, binding);
         const VkDeviceSize outputBytes = attentionOutputElements * (useFP16 ? sizeof(half_t) : sizeof(float));
+        if(context.attentionSkipSnapshots)
+          return readAttentionValidationBuffers(
+            {tuningBuffers[binding]}, outputBytes, {attentionOutputElementsForRun(plan.totalRuns - 1)},
+            useFP16, readback, result, error
+          );
         vector<size_t> outputCounts;
         for(size_t repeat = 0; repeat < attentionValidationBuffers.size(); repeat++)
           outputCounts.push_back(attentionOutputElementsForRun(plan.warmupRuns + repeat));
@@ -6998,7 +7000,7 @@ namespace {
       }
     ) +
       (!checkReference && !configs.empty() && !isValidTuningConfig<Tuner>(context, configs.front()) ? 1 : 0);
-    if(context.timer == nullptr || (!context.attentionDispatchOnly && !context.timer->isUsable())) {
+    if(context.timer == nullptr || (!context.attentionSkipTimestamps && !context.timer->isUsable())) {
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
       return measurements;
@@ -9457,6 +9459,9 @@ namespace {
     const char* tight = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_TIGHT_BUFFERS");
     const char* fresh = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_FRESH_COMMANDS");
     const char* dispatchOnly = std::getenv("KATAGO_VULKAN_ATTN_DISPATCH_ONLY");
+    const bool skipBoth = dispatchOnly != nullptr && std::strcmp(dispatchOnly, "1") == 0;
+    const char* skipTimestamps = std::getenv("KATAGO_VULKAN_ATTN_SKIP_TIMESTAMPS");
+    const char* skipSnapshots = std::getenv("KATAGO_VULKAN_ATTN_SKIP_SNAPSHOTS");
     const char* probeBatch = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_BATCH");
     if(probeBatch != nullptr) {
       int parsedBatch;
@@ -9475,7 +9480,8 @@ namespace {
     context.attentionProbe = true;
     context.tegraAttentionTightBuffers = tight != nullptr && std::strcmp(tight, "1") == 0;
     context.tegraAttentionFreshCommands = fresh != nullptr && std::strcmp(fresh, "1") == 0;
-    context.attentionDispatchOnly = dispatchOnly != nullptr && std::strcmp(dispatchOnly, "1") == 0;
+    context.attentionSkipTimestamps = skipBoth || (skipTimestamps != nullptr && std::strcmp(skipTimestamps, "1") == 0);
+    context.attentionSkipSnapshots = skipBoth || (skipSnapshots != nullptr && std::strcmp(skipSnapshots, "1") == 0);
     using Tuner = TransformerScaleDotProductTuner;
     if(!isValidTuningConfig<Tuner>(context, config))
       throw StringError("Attention probe candidate violates the model or device limits");
@@ -9489,21 +9495,22 @@ namespace {
         " dispatchBatch=" + to_string(dispatchBatchSize) +
         " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers) +
         " freshCommands=" + to_string(context.tegraAttentionFreshCommands) +
-        " dispatchOnly=" + to_string(context.attentionDispatchOnly)
+        " timestamps=" + to_string(!context.attentionSkipTimestamps) +
+        " snapshots=" + to_string(!context.attentionSkipSnapshots)
       );
     VulkanDummyThread dummyThread(device, logger);
     if(useDummy)
       dummyThread.start();
     auto plan = makeMeasurementPlan(Tuner::name(), context);
     plan.batchSizes = {dispatchBatchSize};
-    const auto measurements = measureConfigs<Tuner>(context, {config}, plan, nullptr, !context.attentionDispatchOnly);
+    const auto measurements = measureConfigs<Tuner>(context, {config}, plan, nullptr, !context.attentionSkipTimestamps);
     dummyThread.stopAndJoin();
     requireTuningDevice(context, "Attention probe");
     if(measurements.values.empty() || measurements.values.front().score <= 0.0)
       throw StringError("Attention probe failed");
     if(logger != nullptr)
       logger->write(
-        "Attention probe PASS " + string(context.attentionDispatchOnly ? "wall calls/sec=" : "calls/sec=") +
+        "Attention probe PASS " + string(context.attentionSkipTimestamps ? "wall calls/sec=" : "calls/sec=") +
         Global::doubleToString(measurements.values.front().callsPerSecond)
       );
     tunedConfig = std::move(config);
