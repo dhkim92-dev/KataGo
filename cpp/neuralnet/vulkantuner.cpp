@@ -9,6 +9,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -9211,6 +9212,15 @@ namespace {
   struct TransformerScaleDotProductTuner {
     static string name() { return "transformerScaleDotProduct"; }
 
+    // Temporary diagnostic for the Tegra X1 scalar Attention device loss.
+    static constexpr uint32_t tegraDebugSharedMemoryLimit = 32 * 1024;
+    static bool useTegraDebugLimit(const TuningContext& context) {
+      if(context.device == nullptr || context.device->info.deviceName.find("Tegra X1") == string::npos)
+        return false;
+      const char* debug = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DEBUG");
+      return debug != nullptr && std::strcmp(debug, "1") == 0;
+    }
+
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
@@ -9221,8 +9231,16 @@ namespace {
     static vector<VulkanTuneParams> candidates(
       const VulkanTuneParams& current,
       bool full,
-      const TuningContext&
+      const TuningContext& context
     ) {
+      if(context.logger != nullptr && useTegraDebugLimit(context)) {
+        const uint32_t deviceLimit = context.device->info.properties.limits.maxComputeSharedMemorySize;
+        context.logger->write(
+          "Vulkan Tegra X1 debug: scalar Attention shared memory limit " +
+          to_string(std::min(deviceLimit, tegraDebugSharedMemoryLimit)) +
+          " bytes (device limit " + to_string(deviceLimit) + " bytes)"
+        );
+      }
       VulkanTuneParams defaults;
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
@@ -9294,7 +9312,10 @@ namespace {
     if(context.device == nullptr)
       return false;
     const auto& model = context.modelInfo;
-    const auto& limits = context.device->info.properties.limits;
+    auto limits = context.device->info.properties.limits;
+    if(TransformerScaleDotProductTuner::useTegraDebugLimit(context))
+      limits.maxComputeSharedMemorySize =
+        std::min(limits.maxComputeSharedMemorySize, TransformerScaleDotProductTuner::tegraDebugSharedMemoryLimit);
     if(!config.transformer.isSupported(limits, model.transformerHeadDim, model.transformerVHeadDim))
       return false;
 
@@ -10335,6 +10356,14 @@ namespace {
     const auto hasCases = [&](const string& name) {
       return !VulkanTuner::getGemmTuningCases(name, context.modelInfo, config).empty();
     };
+    const auto completeXgemm = [&]() {
+      if(hasCases("xgemm")) {
+        if(config.vulkan.shouldUseFP16Compute)
+          complete(Xgemm16Tuner());
+        else
+          complete(XgemmTuner());
+      }
+    };
     if(config.vulkan.shouldUseCooperativeMatrix) {
       if(!usesGenericNHWC(config) && config.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
          hasCases("hgemmCooperativeMatrixNCHW"))
@@ -10346,6 +10375,8 @@ namespace {
       else if(hasCases("hgemmCooperativeMatrix"))
         complete(HgemmCooperativeMatrixTunerImpl());
     }
+    else
+      completeXgemm();
     if(hasCases("xgemmDirect"))
       complete(XgemmDirectTuner());
     if(hasCases("transformerXgemm") && !tuningComplete("transformerXgemm", context)) {
@@ -10356,12 +10387,8 @@ namespace {
       if(checkpoint)
         checkpoint();
     }
-    if(hasCases("xgemm")) {
-      if(config.vulkan.shouldUseFP16Compute)
-        complete(Xgemm16Tuner());
-      else
-        complete(XgemmTuner());
-    }
+    if(config.vulkan.shouldUseCooperativeMatrix)
+      completeXgemm();
     if(config.vulkan.shouldUseTransformerDualGemmSwiGLU &&
        !tuningComplete("transformerDualGemmSwiGLU", context)) {
       if(!tuneTransformerDualGemmSwiGLU(context, config) ||
@@ -10641,14 +10668,14 @@ void VulkanTuner::tune(
   }
 
   context.selectedGemmConfig = &tunedConfig;
-  tuneCooperativeMatrices(
+  const bool usingCooperativeMatrix = tuneCooperativeMatrices(
     context,
     tunedConfig,
     canUseHgemmCooperativeMatrix,
     canUseHgemmCooperativeMatrixNCHW
   );
-  runTuner<XgemmDirectTuner>(context, tunedConfig);
-  tunedConfig.transformerXgemm = tunedConfig.xgemmDirect;
+  if(usingCooperativeMatrix)
+    runTuner<XgemmDirectTuner>(context, tunedConfig);
   if(!getTunerGemmTuneCases("xgemm", context).empty()) {
     const double xgemmCallsPerSecond = runTuner<XgemmTuner>(context, tunedConfig);
     tunedConfig.xgemm16 = tunedConfig.xgemm;
@@ -10658,6 +10685,11 @@ void VulkanTuner::tune(
   }
   else if(logger != nullptr)
     logger->write("Skipping xgemm/xgemm16 tuning: all model Winograd GEMMs use cooperative matrix");
+
+  // Scalar GEMM tuning selects the precision used by the spatial direct GEMM.
+  if(!usingCooperativeMatrix)
+    runTuner<XgemmDirectTuner>(context, tunedConfig);
+  tunedConfig.transformerXgemm = tunedConfig.xgemmDirect;
 
   runNonGemmTuners(context, tunedConfig);
   dummyThread.stopAndJoin();
