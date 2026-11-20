@@ -1095,19 +1095,30 @@ VkResult vk_helper::endCommandBuffer(
 VkResult vk_helper::submitCommandBuffers(
   const VulkanDevice *device,
   const std::vector<VkCommandBuffer>& commandBuffers,
-  VkFence fence
+  VkFence fence,
+  VkQueue queueOverride
 ) {
   std::lock_guard<std::mutex> lock(device->queueSubmitMutex);
+  if(device->deviceLossStage.load() != nullptr)
+    return VK_ERROR_DEVICE_LOST;
   VkSubmitInfo submitInfo = {};
   submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submitInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
   submitInfo.pCommandBuffers = commandBuffers.data();
-  return vkQueueSubmit(device->queue, 1, &submitInfo, fence);
+  return device->recordDeviceLoss(
+    vkQueueSubmit(queueOverride == VK_NULL_HANDLE ? device->queue : queueOverride, 1, &submitInfo, fence),
+    queueOverride == VK_NULL_HANDLE ? "vkQueueSubmit" : "dummy vkQueueSubmit"
+  );
 }
 
-VkCommandBuffer vk_helper::beginSingleTimeCommandBuffer(
-  const VulkanDevice *device,
-  VkCommandPool commandPool
+VkResult vk_helper::waitForFence(const VulkanDevice* device, VkFence fence, const char* stage) {
+  return device->recordDeviceLoss(vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX), stage);
+}
+
+static VkCommandBuffer beginSingleTimeCommandBuffer(
+  const VulkanDevice* device,
+  VkCommandPool commandPool,
+  VkResult* result
 ) {
   assert(commandPool != VK_NULL_HANDLE);
   VkCommandBufferAllocateInfo allocInfo = {};
@@ -1116,34 +1127,52 @@ VkCommandBuffer vk_helper::beginSingleTimeCommandBuffer(
   allocInfo.commandPool = commandPool;
   allocInfo.commandBufferCount = 1;
 
-  VkCommandBuffer commandBuffer;
-  vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  *result = device->recordDeviceLoss(
+    vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer), "transfer command buffer allocation"
+  );
+  if(*result != VK_SUCCESS)
+    return VK_NULL_HANDLE;
 
   VkCommandBufferBeginInfo beginInfo = {};
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-  vkBeginCommandBuffer(commandBuffer, &beginInfo);
+  *result = device->recordDeviceLoss(vkBeginCommandBuffer(commandBuffer, &beginInfo), "transfer command buffer begin");
+  if(*result != VK_SUCCESS) {
+    vkFreeCommandBuffers(device->device, commandPool, 1, &commandBuffer);
+    return VK_NULL_HANDLE;
+  }
   return commandBuffer;
 }
 
-void vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
+static VkResult submitSingleTimeCommandBufferAndWaitIdle(
   const VulkanDevice *device,
   VkCommandBuffer commandBuffer,
   VkCommandPool commandPool
 ) {
   assert(commandPool != VK_NULL_HANDLE);
-  vkEndCommandBuffer(commandBuffer);
-  VkSubmitInfo submitInfo = {};
-  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &commandBuffer;
-  {
+  VkResult result = device->recordDeviceLoss(vkEndCommandBuffer(commandBuffer), "transfer command buffer end");
+  if(result == VK_SUCCESS) {
     std::lock_guard<std::mutex> lock(device->queueSubmitMutex);
-    CHECK_VK_MSG("vk_helper::submitSingleTimeCommandBufferAndWaitIdle",vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE));
-    CHECK_VK_MSG("vk_helper::waitIdle",vkQueueWaitIdle(device->queue));
+    if(device->deviceLossStage.load() != nullptr)
+      result = VK_ERROR_DEVICE_LOST;
+    else {
+      VkSubmitInfo submitInfo = {};
+      submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submitInfo.commandBufferCount = 1;
+      submitInfo.pCommandBuffers = &commandBuffer;
+      result = device->recordDeviceLoss(vkQueueSubmit(device->queue, 1, &submitInfo, VK_NULL_HANDLE), "transfer vkQueueSubmit");
+      if(result == VK_SUCCESS) {
+        result = device->recordDeviceLoss(vkQueueWaitIdle(device->queue), "transfer vkQueueWaitIdle");
+        // A successful submission may still be pending after other wait errors.
+        if(result != VK_ERROR_DEVICE_LOST)
+          CHECK_VK_MSG("vkQueueWaitIdle after Vulkan transfer", result);
+      }
+    }
   }
   vkFreeCommandBuffers(device->device, commandPool, 1, &commandBuffer);
+  return result;
 }
 
 
@@ -1288,7 +1317,12 @@ VulkanBuffer* vk_helper::createDeviceBufferWithData(
     0,
     size
   );
-  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device, commandPool);
+  VkCommandBuffer commandBuffer = beginSingleTimeCommandBuffer(device, commandPool, result);
+  if(*result != VK_SUCCESS) {
+    releaseVulkanBuffer(device, stagingBuffer);
+    releaseVulkanBuffer(device, deviceBuffer);
+    return nullptr;
+  }
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -1305,16 +1339,12 @@ VulkanBuffer* vk_helper::createDeviceBufferWithData(
     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
-    device,
-    commandBuffer,
-    commandPool
-  );
-  // Release staging buffer
-  vk_helper::releaseVulkanBuffer(
-    device,
-    stagingBuffer
-  );
+  *result = submitSingleTimeCommandBufferAndWaitIdle(device, commandBuffer, commandPool);
+  releaseVulkanBuffer(device, stagingBuffer);
+  if(*result != VK_SUCCESS) {
+    releaseVulkanBuffer(device, deviceBuffer);
+    return nullptr;
+  }
   return deviceBuffer;
 }
 
@@ -1429,7 +1459,9 @@ void vk_helper::copyReadbackBufferToHost(
     *result = VK_ERROR_MEMORY_MAP_FAILED;
     return;
   }
-  *result = vmaInvalidateAllocation(device->allocator, readbackBuffer->allocation, readbackOffset, copySize);
+  *result = device->recordDeviceLoss(
+    vmaInvalidateAllocation(device->allocator, readbackBuffer->allocation, readbackOffset, copySize), "readback invalidate"
+  );
   if(*result != VK_SUCCESS)
     return;
   memcpy(
@@ -1470,7 +1502,11 @@ void vk_helper::copyDeviceBufferToHost(
   }
 
   // Copy device buffer to readback buffer
-  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device, commandPool);
+  VkCommandBuffer commandBuffer = beginSingleTimeCommandBuffer(device, commandPool, result);
+  if(*result != VK_SUCCESS) {
+    releaseVulkanBuffer(device, readbackBuffer);
+    return;
+  }
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -1487,13 +1523,9 @@ void vk_helper::copyDeviceBufferToHost(
     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
     VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
-    device,
-    commandBuffer,
-    commandPool
-  );
-
-  copyReadbackBufferToHost(device, readbackBuffer, 0, copySize, hostPtr, result);
+  *result = submitSingleTimeCommandBufferAndWaitIdle(device, commandBuffer, commandPool);
+  if(*result == VK_SUCCESS)
+    copyReadbackBufferToHost(device, readbackBuffer, 0, copySize, hostPtr, result);
 
   // Release readback buffer
   vk_helper::releaseVulkanBuffer(
@@ -1536,7 +1568,11 @@ void vk_helper::copyHostToDeviceBuffer(
   );
 
   // Copy staging buffer to device buffer
-  VkCommandBuffer commandBuffer = vk_helper::beginSingleTimeCommandBuffer(device, commandPool);
+  VkCommandBuffer commandBuffer = beginSingleTimeCommandBuffer(device, commandPool, result);
+  if(*result != VK_SUCCESS) {
+    releaseVulkanBuffer(device, stagingBuffer);
+    return;
+  }
   VkBufferCopy copyRegion = {};
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
@@ -1553,21 +1589,11 @@ void vk_helper::copyHostToDeviceBuffer(
     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT
   );
-  vk_helper::submitSingleTimeCommandBufferAndWaitIdle(
-    device,
-    commandBuffer,
-    commandPool
-  );
-
-  // Release staging buffer
-  vk_helper::releaseVulkanBuffer(
-    device,
-    stagingBuffer
-  );
-  
-  if(waitForIdle) {
+  *result = submitSingleTimeCommandBufferAndWaitIdle(device, commandBuffer, commandPool);
+  releaseVulkanBuffer(device, stagingBuffer);
+  if(*result == VK_SUCCESS && waitForIdle) {
     std::lock_guard<std::mutex> lock(device->queueSubmitMutex);
-    vkDeviceWaitIdle(device->device);
+    *result = device->recordDeviceLoss(vkDeviceWaitIdle(device->device), "transfer vkDeviceWaitIdle");
   }
 }
 

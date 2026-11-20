@@ -2715,39 +2715,17 @@ struct TransformerAttentionLayer {
     params.ropeNumPairs = ropeNumPairs;
     params.ropeReserved = 0;
 
-    if (useTiled) {
-      auto tuneParams = handle->tuneParams.transformer;
-      uint32_t qPerThread = tuneParams.Q_PER_THREAD;
-      uint32_t totalQPerWG = useCooperativeDispatch
-        ? static_cast<uint32_t>(tuneParams.ATTN_BLOCK_Q) * qPerThread
-        : activePipeline.localSizeX * qPerThread;
-      uint32_t numQGroups = (params.seqLen + totalQPerWG - 1) / totalQPerWG;
-      uint32_t wgCount[3] = {
-        numQGroups,
-        (static_cast<uint32_t>(batchSize) * params.numHeads + activePipeline.localSizeY - 1) / activePipeline.localSizeY,
-        (1 + activePipeline.localSizeZ - 1) / activePipeline.localSizeZ
-      };
-      vkcompute::dispatchPipeline(
-        handle, handle->vulkanDevice, &activePipeline, cb, activeDescriptorSet,
-        &params, sizeof(params), wgCount[0], wgCount[1], wgCount[2],
-        "SCALE_DOT_PRODUCT_ATTENTION"
-      );
-    } else {
-      uint32_t gs[2] = {
-        static_cast<uint32_t>(vk_helper::powerOf2ify(params.seqLen)),
-        static_cast<uint32_t>(batchSize) * params.numHeads
-      };
-      uint32_t wgCount[3] = {
-        (gs[0] + activePipeline.localSizeX - 1) / activePipeline.localSizeX,
-        (gs[1] + activePipeline.localSizeY - 1) / activePipeline.localSizeY,
-        (1 + activePipeline.localSizeZ - 1) / activePipeline.localSizeZ
-      };
-      vkcompute::dispatchPipeline(
-        handle, handle->vulkanDevice, &activePipeline, cb, activeDescriptorSet,
-        &params, sizeof(params), wgCount[0], wgCount[1], wgCount[2],
-        "SCALE_DOT_PRODUCT_ATTENTION_NAIVE"
-      );
-    }
+    const uint32_t queryGroups = handle->tuneParams.transformer.getDispatchGroupCountX(params.seqLen);
+    const uint64_t headGroups = static_cast<uint64_t>(batchSize) * params.numHeads;
+    const auto& limits = handle->vulkanDevice->info.properties.limits;
+    if(queryGroups > limits.maxComputeWorkGroupCount[0] || headGroups > limits.maxComputeWorkGroupCount[1] ||
+       limits.maxComputeWorkGroupCount[2] == 0)
+      throw StringError("Vulkan Scalar Attention dispatch exceeds the device workgroup count limit");
+    vkcompute::dispatchPipeline(
+      handle, handle->vulkanDevice, &activePipeline, cb, activeDescriptorSet,
+      &params, sizeof(params), queryGroups, static_cast<uint32_t>(headGroups), 1,
+      useTiled ? "SCALE_DOT_PRODUCT_ATTENTION" : "SCALE_DOT_PRODUCT_ATTENTION_NAIVE"
+    );
   }
 
 };
@@ -3208,35 +3186,6 @@ struct RMSNormLayer {
 
 };
 
-static bool canUsePackedQKVHgemm(
-  const ComputeHandleInternal* handle,
-  const int inChannels
-) {
-  const auto& hgemmParams = handle->tuneParams.hgemmCooperativeMatrixNCHW;
-  return
-    handle->usingFP16Storage &&
-    handle->tuneParams.vulkan.canUseCooperativeMatrix &&
-    handle->tuneParams.vulkan.shouldUseFP16Storage &&
-    handle->tuneParams.vulkan.shouldUseFP16Compute &&
-    handle->tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-    hgemmParams.isValid() &&
-    handle->paddedNNXYLen % hgemmParams.getRequiredSpatialAlignment() == 0 &&
-    inChannels % hgemmParams.KWG == 0;
-}
-
-static int getPackedQKVOutChannels(
-  const ComputeHandleInternal* handle,
-  const int inChannels,
-  const int logicalOutChannels
-) {
-  if(!canUsePackedQKVHgemm(handle, inChannels))
-    return logicalOutChannels;
-  return vk_helper::roundUpToMultipleInt(
-    logicalOutChannels,
-    handle->tuneParams.hgemmCooperativeMatrixNCHW.NWG
-  );
-}
-
 static MatMulLayerDesc makePackedQKVDesc(
   const TransformerAttentionDesc* desc,
   const int physicalOutChannels
@@ -3317,15 +3266,10 @@ static int getPackedFFNOutChannels(
   const ComputeHandleInternal* handle,
   const TransformerFFNDesc* desc
 ) {
-  const int nchwChannels = getPackedQKVOutChannels(
-    handle,
-    desc->linear1.inChannels,
-    desc->linear1.outChannels + desc->linearGate.outChannels
+  return VulkanTuner::getPackedProjectionOutChannels(
+    handle->tuneParams, handle->usingFP16Storage, handle->paddedNNXYLen,
+    desc->linear1.inChannels, desc->linear1.outChannels + desc->linearGate.outChannels
   );
-  const auto& params = handle->tuneParams.hgemmCooperativeMatrixNHWC;
-  if(!params.isValid())
-    return nchwChannels;
-  return vk_helper::roundUpToMultipleInt(nchwChannels, params.NWG);
 }
 
 struct TransformerAttentionBlock {
@@ -3380,12 +3324,9 @@ struct TransformerAttentionBlock {
     paddedNNXYLen(handle->paddedNNXYLen),
     inChannels(desc->qProj.inChannels),
     qkvLogicalOutChannels(numHeads * qHeadDim + numKVHeads * qHeadDim + numKVHeads * vHeadDim),
-    qkvGemmOutChannels(handle->tuneParams.hgemmCooperativeMatrixNHWC.isValid()
-      ? vk_helper::roundUpToMultipleInt(
-          getPackedQKVOutChannels(handle, desc->qProj.inChannels, qkvLogicalOutChannels),
-          handle->tuneParams.hgemmCooperativeMatrixNHWC.NWG
-        )
-      : getPackedQKVOutChannels(handle, desc->qProj.inChannels, qkvLogicalOutChannels)),
+    qkvGemmOutChannels(VulkanTuner::getPackedProjectionOutChannels(
+      handle->tuneParams, handle->usingFP16Storage, paddedNNXYLen, inChannels, qkvLogicalOutChannels
+    )),
     qkvRowStride(handle->getNHWCChannelsPadded(qkvGemmOutChannels, true)),
     qkvProjDesc(makePackedQKVDesc(desc, qkvGemmOutChannels)),
     preLN(new TransformerRMSNormLayer(handle, &desc->preLN)),
@@ -5635,46 +5576,7 @@ ComputeHandleInternal::ComputeHandleInternal(
       std::cerr << message << std::endl;
   }
 
-  const bool usingFP16TransformerDualGemmSwiGLU =
-    tuneParams.vulkan.canUseFP16Storage &&
-    tuneParams.vulkan.canUseFP16Compute &&
-    tuneParams.vulkan.canUseCooperativeMatrix &&
-    tuneParams.vulkan.shouldUseFP16Storage &&
-    tuneParams.vulkan.shouldUseFP16Compute &&
-    tuneParams.vulkan.shouldUseTransformerDualGemmSwiGLU &&
-    tuneParams.transformerDualGemmSwiGLU.isValid() &&
-    usingFP16Storage;
-  const bool usingFP16NHWCCooperativeMatrix =
-    usingFP16Storage &&
-    tuneParams.vulkan.canUseCooperativeMatrix &&
-    tuneParams.vulkan.shouldUseCooperativeMatrix &&
-    tuneParams.vulkan.shouldUseFP16Compute &&
-    tuneParams.hgemmCooperativeMatrixNHWC.isValid();
-  const bool usingFP16NCHWCooperativeMatrix =
-    usingFP16Storage &&
-    tuneParams.vulkan.canUseCooperativeMatrix &&
-    tuneParams.vulkan.shouldUseHgemmCooperativeMatrixNCHW &&
-    tuneParams.vulkan.shouldUseFP16Compute &&
-    tuneParams.hgemmCooperativeMatrixNCHW.isValid();
-  if(usingFP16NHWCCooperativeMatrix || usingFP16NCHWCooperativeMatrix || usingFP16TransformerDualGemmSwiGLU) {
-    int spatialAlignment = 1;
-    if(usingFP16NHWCCooperativeMatrix) {
-      const auto addNhwcSpatialAlignment = [&](const auto& params) {
-        if(params.MWG > 0)
-          spatialAlignment = std::lcm(spatialAlignment, params.MWG);
-      };
-      addNhwcSpatialAlignment(tuneParams.hgemmCooperativeMatrixNHWC);
-    }
-    if(usingFP16NCHWCooperativeMatrix)
-      spatialAlignment = std::lcm(
-        spatialAlignment, tuneParams.hgemmCooperativeMatrixNCHW.getRequiredSpatialAlignment()
-      );
-    if(usingFP16TransformerDualGemmSwiGLU)
-      spatialAlignment = std::lcm(spatialAlignment, tuneParams.transformerDualGemmSwiGLU.getRequiredSpatialAlignment());
-    this->paddedNNXYLen = vk_helper::roundUpToMultipleInt(nnXLen * nnYLen, spatialAlignment);
-  } else {
-    this->paddedNNXYLen = nnXLen * nnYLen;
-  }
+  this->paddedNNXYLen = VulkanTuner::getPaddedNNXYLen(tuneParams, usingFP16Storage, nnXLen * nnYLen);
 
   #ifdef VK_BENCHMARK
   VkQueryPoolCreateInfo qpCI = {};

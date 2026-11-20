@@ -6,6 +6,7 @@
 #ifdef USE_VULKAN_BACKEND
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <vulkan/vulkan.h>
@@ -68,6 +69,17 @@ struct VulkanDevice {
   // vkQueueSubmit is externally synchronized for each VkQueue handle. Keep
   // submits serialized when the tuner and dummy thread share a device.
   mutable std::mutex queueSubmitMutex;
+  mutable std::atomic<const char*> deviceLossStage{nullptr};
+
+  // Keep the first report from either queue. Stage names have static storage duration.
+  VkResult recordDeviceLoss(VkResult result, const char* stage) const {
+    if(result == VK_ERROR_DEVICE_LOST) {
+      const char* first = nullptr;
+      deviceLossStage.compare_exchange_strong(first, stage);
+    }
+    return result;
+  }
+
   bool skipWaitOnDestruction = false;
   ~VulkanDevice();
 };
@@ -269,19 +281,11 @@ namespace vk_helper {
   VkResult submitCommandBuffers(
     const VulkanDevice *device,
     const std::vector<VkCommandBuffer>& commandBuffers,
-    VkFence fence = VK_NULL_HANDLE
+    VkFence fence = VK_NULL_HANDLE,
+    VkQueue queueOverride = VK_NULL_HANDLE
   );
 
-  VkCommandBuffer beginSingleTimeCommandBuffer(
-    const VulkanDevice *device,
-    VkCommandPool commandPool
-  );
-
-  void submitSingleTimeCommandBufferAndWaitIdle(
-    const VulkanDevice *device,
-    VkCommandBuffer commandBuffer,
-    VkCommandPool commandPool
-  );
+  VkResult waitForFence(const VulkanDevice* device, VkFence fence, const char* stage);
 
 
   VulkanBuffer* createReadOnlyBuffer(

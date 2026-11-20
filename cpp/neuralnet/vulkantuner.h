@@ -73,6 +73,10 @@ namespace VulkanTuner {
     double requiredRatio
   );
   VulkanParams getHardwareParams(const VulkanDeviceInfo& deviceInfo);
+  int getPaddedNNXYLen(const VulkanTuneParams& config, bool usingFP16Storage, int logicalXYSize);
+  int getPackedProjectionOutChannels(
+    const VulkanTuneParams& config, bool usingFP16Storage, int paddedNNXYLen, int inChannels, int logicalOutChannels
+  );
 
   struct GemmTuneCase {
     enum class Kind { Spatial, Dense, Winograd3x3, Winograd5x5 };
@@ -97,7 +101,17 @@ namespace VulkanTuner {
     std::vector<int> channelBiasChannels;
     std::vector<int> rmsNormChannels;
     std::vector<int> swiGLUChannels;
-    std::vector<std::pair<int, int>> attentionHeadCounts;
+    struct AttentionShape {
+      int heads;
+      int kvHeads;
+      int inChannels;
+
+      bool operator==(const AttentionShape& other) const noexcept {
+        return heads == other.heads && kvHeads == other.kvHeads && inChannels == other.inChannels;
+      }
+    };
+    std::vector<AttentionShape> attentionShapes;
+    int transformerAttentionInChannels = 0;
     int numInputChannels = 0;
     int maxConvChannels1x1 = 0;
     int maxConvChannels3x3 = 0;

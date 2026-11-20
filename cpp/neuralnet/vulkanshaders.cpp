@@ -24,6 +24,11 @@ namespace vk_shader {
     constexpr VkPipelineShaderStageCreateFlags fullSubgroupStageFlags = 0;
 #endif
 
+    uint64_t directGemmSharedBytes(const XgemmDirectTuneParams& params, bool useFP16Compute) {
+      return static_cast<uint64_t>(params.WGD) * (2ull * params.WGD + params.PADA + params.PADB) *
+        (useFP16Compute ? sizeof(half_t) : sizeof(float));
+    }
+
     int vectorWidthSlot(uint32_t width) {
       return width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : -1;
     }
@@ -900,14 +905,17 @@ namespace vk_shader {
     if(buildNHWCPipelines && (result = createTransformerSpatialRMSNormSumSq(transformerSpatialRMSNormSumSqNHWC, tuneParams.spatialRMSNorm, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
 
     if ( qHeadDim > 0 && vHeadDim > 0 ) {
-      if((result = createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
+      result = tuneParams.transformer.USE_TILED_ATTN
+        ? createTransformerScaleDotProduct(transformerScaleDotProduct, tuneParams.transformer, qHeadDim, vHeadDim, tuneParams.vulkan)
+        : createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan);
+      if(result != VK_SUCCESS)
+        return result;
       if(supportsNHWC && tuneParams.transformerCooperativeMatrixNCHW.isValid()) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperative, tuneParams.transformerCooperativeMatrixNCHW, qHeadDim, vHeadDim, tuneParams.vulkan, false)) != VK_SUCCESS) return result;
       }
       if(buildTransformerAttentionNHWC) {
         if((result = createTransformerScaleDotProductCooperative(transformerScaleDotProductCooperativeNHWC, tuneParams.transformerCooperativeMatrixNHWC, qHeadDim, vHeadDim, tuneParams.vulkan, true)) != VK_SUCCESS) return result;
       }
-      if((result = createTransformerScaleDotProductNaive(transformerScaleDotProductNaive, qHeadDim, vHeadDim, tuneParams.vulkan)) != VK_SUCCESS) return result;
     }
     return VK_SUCCESS;
   }
@@ -1042,6 +1050,12 @@ namespace vk_shader {
     uint32_t localSizeZ,
     VkPipelineShaderStageCreateFlags stageFlags
   ) {
+    const auto& limits = deviceInfo.properties.limits;
+    if(localSizeX == 0 || localSizeY == 0 || localSizeZ == 0 ||
+       localSizeX > limits.maxComputeWorkGroupSize[0] || localSizeY > limits.maxComputeWorkGroupSize[1] ||
+       localSizeZ > limits.maxComputeWorkGroupSize[2] ||
+       static_cast<uint64_t>(localSizeX) * localSizeY * localSizeZ > limits.maxComputeWorkGroupInvocations)
+      return VK_ERROR_INITIALIZATION_FAILED;
     VkResult res = VK_ERROR_UNKNOWN;
     if(shaderModule == VK_NULL_HANDLE)
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -1582,6 +1596,8 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createXgemmDirectBatchedTT(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams [[maybe_unused]]) {
+    if(directGemmSharedBytes(tuneParams, false) > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     auto spec = XgemmDirectSpec();
     spec.localSizeX = tuneParams.MDIMCD;
     spec.localSizeY = tuneParams.NDIMCD;
@@ -1619,6 +1635,11 @@ namespace vk_shader {
       vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage;
     const bool useFP16Compute = useFP16Storage && vulkanParams.shouldUseFP16Compute;
     const XgemmTuneParams& selectedTuneParams = useFP16Compute ? tuneParams16 : tuneParams;
+    const uint64_t sharedBytes = static_cast<uint64_t>(selectedTuneParams.KWG) *
+      (static_cast<uint64_t>(selectedTuneParams.MWG) + selectedTuneParams.NWG) *
+      (useFP16Storage ? sizeof(half_t) : sizeof(float));
+    if(sharedBytes > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
 
     auto spec = XGEMMBatchedSpec();
     spec.localSizeX = selectedTuneParams.MDIMC;
@@ -1647,6 +1668,11 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createXgemmStridedBatched(Pipeline& pipeline, const XgemmDirectTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+    const bool useFP16Storage = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute &&
+      vulkanParams.shouldUseFP16Storage;
+    const bool useFP16Compute = useFP16Storage && vulkanParams.shouldUseFP16Compute;
+    if(directGemmSharedBytes(tuneParams, useFP16Compute) > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     auto spec = XgemmDirectSpec();
     spec.localSizeX = tuneParams.MDIMCD;
     spec.localSizeY = tuneParams.NDIMCD;
@@ -1662,8 +1688,7 @@ namespace vk_shader {
     auto specData = vk_helper::createSpecData(&spec, sizeof(spec));
     auto mapEntries = vk_helper::createSpecMapEntries(sizeof(spec) / sizeof(int32_t));
     VkSpecializationInfo specializationInfo = vk_helper::createSpecializationInfo(specData, mapEntries);
-    const int precision = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage
-      ? (vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Compute ? 2 : 1) : 0;
+    const int precision = useFP16Storage ? (useFP16Compute ? 2 : 1) : 0;
     const int variant = xgemmVariantIndex(tuneParams.VWMD, tuneParams.VWND, precision);
     if(variant < 0)
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -1691,8 +1716,7 @@ namespace vk_shader {
       "Transformer XGEMM push-constant ABI");
     const bool useFP16Compute = vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute &&
       vulkanParams.shouldUseFP16Storage && vulkanParams.shouldUseFP16Compute;
-    const uint64_t sharedBytes = static_cast<uint64_t>(tuneParams.WGD) *
-      (2ull * tuneParams.WGD + tuneParams.PADA + tuneParams.PADB) * (useFP16Compute ? 2 : 4);
+    const uint64_t sharedBytes = directGemmSharedBytes(tuneParams, useFP16Compute);
     const auto& limits = deviceInfo.properties.limits;
     if(!tuneParams.isValid() || tuneParams.MDIMCD > limits.maxComputeWorkGroupSize[0] ||
        tuneParams.NDIMCD > limits.maxComputeWorkGroupSize[1] ||
@@ -1795,6 +1819,8 @@ namespace vk_shader {
     spec.XYSTRIDE = tuneParams.XYSTRIDE;
     spec.CHANNELSTRIDE = tuneParams.CHANNELSTRIDE;
     spec.LOCALSIZE_TOTAL = spec.XYSTRIDE * spec.CHANNELSTRIDE * tuneParams.BATCHSTRIDE;
+    if(2 * sizeof(float) * spec.LOCALSIZE_TOTAL > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     spec.useNHWC = useNHWC ? 1u : 0u;
     SpecializationData specData(spec);
     if(vulkanParams.canUseFP16Storage && vulkanParams.canUseFP16Compute && vulkanParams.shouldUseFP16Storage)
@@ -1910,6 +1936,8 @@ namespace vk_shader {
     spec.localSizeX = tuneParams.WG_C_SIZE * tuneParams.WG_XY_SIZE;
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
+    if(!subgroup && sizeof(float) * spec.localSizeX > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     spec.C_PER_THREAD = tuneParams.C_PER_THREAD;
     spec.WG_C_SIZE = tuneParams.WG_C_SIZE;
     spec.WG_XY_SIZE = tuneParams.WG_XY_SIZE;
@@ -1949,6 +1977,8 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createTransformerScaleDotProduct(Pipeline& pipeline, const TransformerTuneParams& tuneParams, int qHeadDim, int vHeadDim, const VulkanParams& vulkanParams) {
+    if(!tuneParams.isSupported(deviceInfo.properties.limits, qHeadDim, vHeadDim))
+      return VK_ERROR_INITIALIZATION_FAILED;
     auto spec = ScaleDotProductSpec();
     spec.ATTN_BLOCK_KV = tuneParams.ATTN_BLOCK_KV;
     spec.ATTN_BLOCK_Q = tuneParams.ATTN_BLOCK_Q;
@@ -2063,7 +2093,7 @@ namespace vk_shader {
     auto spec = ScaleDotProductNaiveSpec();
     spec.ATTN_HEAD_DIM = qHeadDim;
     spec.ATTN_V_HEAD_DIM = vHeadDim;
-    spec.localSizeX = 32;
+    spec.localSizeX = TransformerTuneParams::NAIVE_LOCAL_SIZE;
     spec.localSizeY = 1;
     spec.localSizeZ = 1;
     SpecializationData specData(spec);
@@ -2102,6 +2132,8 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createTransformerSpatialRMSNormReduce(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams) {
+    if(sizeof(float) * tuneParams.TILE_SIZE > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     auto spec = TransformerSpatialRMSNormReduceSpec();
     spec.TILE_SIZE = tuneParams.TILE_SIZE;
     spec.localSizeX = spec.TILE_SIZE;
@@ -2115,6 +2147,8 @@ namespace vk_shader {
   }
 
   VkResult ComputePipelines::createTransformerSpatialRMSNormSumSq(Pipeline& pipeline, const TransformerSpatialRmsNormTuneParams& tuneParams, const VulkanParams& vulkanParams, bool useNHWC) {
+    if(sizeof(float) * tuneParams.TILE_SIZE > deviceInfo.properties.limits.maxComputeSharedMemorySize)
+      return VK_ERROR_INITIALIZATION_FAILED;
     auto spec = TransformerSpatialRMSNormSumSqSpec();
     spec.TILE_SIZE = tuneParams.TILE_SIZE;
     spec.useNHWC = useNHWC ? 1 : 0;

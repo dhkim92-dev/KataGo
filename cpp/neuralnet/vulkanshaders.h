@@ -1659,11 +1659,14 @@ struct LocalDimHash {
     );
 
     struct TransformerTuneParams {
+      static constexpr uint32_t NAIVE_LOCAL_SIZE = 32;
       int ATTN_BLOCK_Q=128  ;
       int ATTN_BLOCK_KV=32;
       int Q_PER_THREAD=1;
       int USE_TILED_ATTN=1;
       bool isValid() const;
+      bool isSupported(const VkPhysicalDeviceLimits& limits, int qHeadDim, int vHeadDim) const;
+      uint32_t getDispatchGroupCountX(uint32_t seqLen) const;
     };
 
     struct TransformerCooperativeMatrixTuneParams {
