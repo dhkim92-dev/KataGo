@@ -1,7 +1,5 @@
 #ifdef USE_VULKAN_BACKEND
 
-// #define KATAGO_VULKAN_ATTN_DIAGNOSTICS
-
 #include "../neuralnet/vulkantuner.h"
 #include "../neuralnet/vulkancompute.h"
 
@@ -11,9 +9,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
 #include <cstdlib>
-#endif
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -2135,6 +2131,21 @@ namespace {
 
   class VulkanTimestampTimer;
 
+  VulkanDeviceInfo getTuningDeviceInfo(const VulkanDevice* device) {
+    if(device == nullptr)
+      return {};
+
+    VulkanDeviceInfo info = device->info;
+    if(const char* value = std::getenv("VULKAN_TUNER_SHARED_MEMORY_LIMIT")) {
+      uint64_t requestedLimit = 0;
+      if(!Global::tryStringToUInt64(value, requestedLimit))
+        throw StringError("VULKAN_TUNER_SHARED_MEMORY_LIMIT must be a nonnegative integer in bytes");
+      auto& sharedMemoryLimit = info.properties.limits.maxComputeSharedMemorySize;
+      sharedMemoryLimit = static_cast<uint32_t>(std::min<uint64_t>(sharedMemoryLimit, requestedLimit));
+    }
+    return info;
+  }
+
   struct TuningContext {
     const VulkanDevice* device;
     int batchSize;
@@ -2157,29 +2168,18 @@ namespace {
     map<string, VulkanTuneParams::TuningRecord>* tuningRecords = nullptr;
     bool onlyMissing = false;
     mutable string lastPrintedTuningParams = string();
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-    // Temporary scalar Attention single-case diagnostics.
-    bool attentionProbe = false;
-    bool tegraAttentionTightBuffers = false;
-    bool tegraAttentionFreshCommands = false;
-    bool attentionSkipTimestamps = false;
-    bool attentionSkipSnapshots = false;
-#endif
+    const VulkanDeviceInfo tuningDeviceInfo = getTuningDeviceInfo(device);
   };
 
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-  TransformerTuneParams parseAttentionProbeCase(const char* caseSpec) {
-    const vector<string> values = Global::split(caseSpec, ',');
-    TransformerTuneParams params;
-    if(values.size() != 3 ||
-       !Global::tryStringToInt(values[0], params.ATTN_BLOCK_Q) ||
-       !Global::tryStringToInt(values[1], params.ATTN_BLOCK_KV) ||
-       !Global::tryStringToInt(values[2], params.Q_PER_THREAD))
-      throw StringError("Attention probe case must be Q,KV,Q_PER_THREAD");
-    params.USE_TILED_ATTN = 1;
-    return params;
+  void logTuningSharedMemoryLimit(const TuningContext& context) {
+    const uint32_t limit = context.tuningDeviceInfo.properties.limits.maxComputeSharedMemorySize;
+    const uint32_t deviceLimit = context.device->info.properties.limits.maxComputeSharedMemorySize;
+    if(context.logger != nullptr && limit < deviceLimit)
+      context.logger->write(
+        "Vulkan tuning shared memory limit: " + to_string(limit) + " bytes (device limit " +
+        to_string(deviceLimit) + " bytes)"
+      );
   }
-#endif
 
   bool usesGenericNHWC(const VulkanTuneParams& config) {
     return config.vulkan.shouldUseNHWC &&
@@ -2267,7 +2267,7 @@ namespace {
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
-           isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
+           isWithinCooperativeMatrixDeviceLimits(context.tuningDeviceInfo, params);
   }
 
   bool isValidCooperativeMatrixTuneParams(
@@ -2278,7 +2278,7 @@ namespace {
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
-           isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
+           isWithinCooperativeMatrixDeviceLimits(context.tuningDeviceInfo, params);
   }
 
   bool isValidCooperativeMatrixTuneParams(
@@ -2289,7 +2289,7 @@ namespace {
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
-           isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
+           isWithinCooperativeMatrixDeviceLimits(context.tuningDeviceInfo, params);
   }
 
   bool isValidCooperativeMatrixTuneParams(
@@ -2300,7 +2300,7 @@ namespace {
            isSupportedCooperativeMatrixShape(
              context, params.accType, params.MWARP, params.NWARP, params.KDIM, params.subgroupSize
            ) &&
-           isWithinCooperativeMatrixDeviceLimits(context.device->info, params);
+           isWithinCooperativeMatrixDeviceLimits(context.tuningDeviceInfo, params);
   }
 
   template<typename Tuner>
@@ -2999,11 +2999,7 @@ namespace {
       vector<float>* cpuReference = nullptr
     ) {
       errorProp = numeric_limits<double>::quiet_NaN();
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      if(!context.attentionSkipTimestamps && !isUsable()) {
-#else
       if(!isUsable()) {
-#endif
         error = "compute timestamps are not supported";
         return false;
       }
@@ -3085,11 +3081,6 @@ namespace {
       VkResult result = VK_SUCCESS;
       const auto deviceLossGuard = makeScopeGuard([&]() { device->recordDeviceLoss(result, "tuning measurement"); });
       const size_t batchSize = static_cast<size_t>(std::max(1, context.batchSize));
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      // The probe can keep the full buffers while executing fewer rows.
-      const size_t validatedBatchSize = context.attentionProbe
-        ? static_cast<size_t>(plan.batchSizes.front()) : batchSize;
-#endif
       const size_t logicalXYSize = static_cast<size_t>(std::max(1, context.nnXLen * context.nnYLen));
       const bool useNHWC = usesGenericNHWC(config);
       const bool modelSized = usesNonCooperativeNCHW(config);
@@ -3123,9 +3114,6 @@ namespace {
       // Keep the same inputs on both sides of a scalar/cooperative comparison.
       const bool packedScalarAttention = plan.kernelName == "transformerScaleDotProduct" &&
         !comparesScalarAndCooperativeAttention(context, config);
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      const bool tightScalarAttention = packedScalarAttention && context.tegraAttentionTightBuffers;
-#endif
       const auto& attentionCases = context.modelInfo.attentionShapes;
       const size_t attentionCaseCount = packedScalarAttention ? std::max(size_t(1), attentionCases.size()) : 1;
       const auto attentionShapeAt = [&](size_t index) -> const AttentionShape& {
@@ -3405,12 +3393,7 @@ namespace {
           ? vk_helper::roundUpToMultiple(attentionOutputChannels, size_t(4))
           : attentionOutputChannels);
       const auto attentionOutputElementsForRun = [&](size_t repeat) {
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        return attentionCases.empty() ? (attentionOutputElements / batchSize) * validatedBatchSize
-          : validatedBatchSize * xySize *
-#else
         return attentionCases.empty() ? attentionOutputElements : batchSize * xySize *
-#endif
           attentionHeadsForRun(repeat).first * std::max(1, context.modelInfo.transformerVHeadDim);
       };
       const size_t attentionInputChannels = static_cast<size_t>(
@@ -3729,11 +3712,6 @@ namespace {
             elements = gemmBindingElements[binding];
           else if(packedInput)
             elements = attentionPackedElements;
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          else if(tightScalarAttention)
-            // Packed Q/K already have RoPE. The shader still binds both table descriptors.
-            elements = isOutput ? attentionOutputElements : binding == 4 ? batchSize * xySize : 1;
-#endif
           else if(isPointwise) {
             const int channels = pipeline->name.find("transformer_swiglu") == 0
               ? maxCaseChannels(swiGLUCases, swiGLUChannels) : maxCaseChannels(channelCases, trunkChannels);
@@ -3952,11 +3930,7 @@ namespace {
           size_t bufferBytes = scratchBytes;
           if(isGPool || isGemm)
             bufferBytes = elements * (useHalf ? sizeof(half_t) : sizeof(float));
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          else if(packedInput || tightScalarAttention || isPointwise || winogradTransform)
-#else
           else if(packedInput || isPointwise || winogradTransform)
-#endif
             bufferBytes = initialBytes;
           if(binding == 1 && filterCopies > 1)
             bufferBytes += (filterCopies - 1) * filterStride;
@@ -4021,11 +3995,7 @@ namespace {
         const auto buffer = [&](size_t binding) -> const vector<float>& {
           return hostFloatBuffers[bindingSourceIndex(pipeline, firstBuffer + binding, binding)];
         };
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        const int cpuBatchSize = static_cast<int>(validatedBatchSize);
-#else
         const int cpuBatchSize = std::max(1, context.batchSize);
-#endif
         const int cpuXYSize = static_cast<int>(xySize);
         const int cpuChannels = channelsForRun(repeat, trunkChannels);
         const int cpuChannelsPadded = vk_helper::roundUpToMultipleInt(cpuChannels, nhwcChannelAlignment);
@@ -4326,21 +4296,13 @@ namespace {
       };
       if(!isGemm && cpuReference != nullptr) {
         const int numValidationRepeats =
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          context.attentionSkipSnapshots ? 1 :
-#endif
           plan.kernelName == "gPool" ? 10 :
           isTransformerAttentionTuner(plan.kernelName) ? 6 :
           plan.kernelName == "pointwise" || plan.kernelName == "addChannelBiases" ||
           plan.kernelName == "transformerRMSNorm" ||
           plan.kernelName == "spatialRMSNorm" ? 10 : 1;
         map<tuple<int, int, size_t>, pair<size_t, size_t>> referenceByShape;
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        const size_t firstValidationRepeat = context.attentionSkipSnapshots ? plan.totalRuns - 1 : plan.warmupRuns;
-        for(size_t repeat = firstValidationRepeat; repeat < firstValidationRepeat + numValidationRepeats; repeat++) {
-#else
         for(size_t repeat = plan.warmupRuns; repeat < plan.warmupRuns + numValidationRepeats; repeat++) {
-#endif
           const auto dimensions = isTransformerAttentionTuner(plan.kernelName) ? attentionHeadsForRun(repeat)
             : make_pair(channelsForRun(repeat, trunkChannels), swiGLUChannelsForRun(repeat));
           const auto shape = make_tuple(dimensions.first, dimensions.second, packedScalarAttention ? attentionCaseForRun(repeat) : 0);
@@ -4397,32 +4359,9 @@ namespace {
           return false;
       }
       else if(isTransformerAttentionTuner(plan.kernelName)) {
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        const size_t validationBytes = tightScalarAttention
-          ? attentionOutputElements * (halfBinding(pipelines[0], outputBinding(pipelines[0])) ? sizeof(half_t) : sizeof(float))
-          : scratchBytes;
-        if(!ensureBuffers(attentionValidationBuffers, 6, validationBytes, result, error, "attention validation buffer"))
-#else
         if(!ensureBuffers(attentionValidationBuffers, 6, scratchBytes, result, error, "attention validation buffer"))
-#endif
           return false;
       }
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      if(context.attentionProbe && context.logger != nullptr) {
-        const auto bufferBytes = [](const vector<VulkanBuffer*>& buffers) {
-          VkDeviceSize bytes = 0;
-          for(const VulkanBuffer* buffer: buffers)
-            if(buffer != nullptr)
-              bytes += buffer->requestedSize;
-          return bytes;
-        };
-        context.logger->write(
-          "Attention probe buffers: device=" +
-          to_string(bufferBytes(tuningBuffers) + bufferBytes(attentionValidationBuffers)) +
-          " B, upload=" + to_string(bufferBytes(resources.uploadStagingBuffers)) + " B"
-        );
-      }
-#endif
       else if(isGemm) {
         if(!ensureBuffers(gemmValidationBuffers, plan.gemmCases.size(), gemmOutputBytes, result, error,
            "GEMM validation buffer"))
@@ -4477,11 +4416,7 @@ namespace {
 
       const size_t firstTimedPipeline = plan.kernelName == "spatialRMSNorm" ? 2 : 0;
       const size_t timedPipelineCount = plan.kernelName == "spatialRMSNorm" ? 1 : pipelines.size();
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      if(!context.attentionSkipTimestamps && !ensureQueryPool(
-#else
       if(!ensureQueryPool(
-#endif
         static_cast<uint32_t>(2 * plan.timedRuns() * timedPipelineCount), result, error
       ))
         return false;
@@ -4938,16 +4873,6 @@ namespace {
         cleanup();
         return false;
       }
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      size_t probeSubmission = 0;
-      vector<pair<VkCommandBuffer, VkFence>> completedProbeSubmissions;
-      const auto releaseProbeSubmissions = makeScopeGuard([&]() {
-        for(const auto& [completedCommandBuffer, completedFence]: completedProbeSubmissions) {
-          vkFreeCommandBuffers(device->device, commandPool, 1, &completedCommandBuffer);
-          vkDestroyFence(device->device, completedFence, nullptr);
-        }
-      });
-#endif
       const auto submitCommandBuffer = [&](bool beginNext) -> bool {
         vk_helper::barrierCommandBuffer(
           commandBuffer,
@@ -4966,30 +4891,7 @@ namespace {
           error = "could not reset tuning fence: " + vk_helper::vkErrorToString(result);
           return false;
         }
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        const bool logProbe = context.attentionProbe && context.logger != nullptr;
-        if(logProbe)
-          context.logger->write(
-            "Attention probe submit " + to_string(++probeSubmission) + "/" + to_string(plan.timedRuns()) +
-            " groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ)
-          );
-        const auto probeStart = logProbe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        const auto logProbeResult = [&](const char* stage) {
-          if(logProbe) {
-            const double elapsedMs = std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - probeStart
-            ).count();
-            context.logger->write(
-              "Attention probe " + to_string(probeSubmission) + " " + stage +
-              "=" + vk_helper::vkErrorToString(result) + " elapsedMs=" + to_string(elapsedMs)
-            );
-          }
-        };
-#endif
         result = vk_helper::submitCommandBuffers(device, {commandBuffer}, fence);
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        logProbeResult("vkQueueSubmit");
-#endif
         if(result != VK_SUCCESS) {
           error = "could not submit tuning command buffer: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -4997,9 +4899,6 @@ namespace {
         }
         commandBufferSubmitted = true;
         result = vk_helper::waitForFence(device, fence, "tuning vkWaitForFences");
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        logProbeResult("vkWaitForFences");
-#endif
         if(result != VK_SUCCESS) {
           error = "could not wait for tuning fence: " + vk_helper::vkErrorToString(result) +
             ", last dispatch groups=" + to_string(dispatchX) + "x" + to_string(dispatchY) + "x" + to_string(dispatchZ);
@@ -5009,29 +4908,11 @@ namespace {
         if(!beginNext)
           return true;
 
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        if(context.tegraAttentionFreshCommands) {
-          // Hold the completed handles so the driver cannot immediately recycle them.
-          completedProbeSubmissions.emplace_back(commandBuffer, fence);
-          commandBuffer = VK_NULL_HANDLE;
-          fence = VK_NULL_HANDLE;
-          if(!ensureCommandResources(result, error))
-            return false;
-        }
-        else {
-          result = vkResetCommandBuffer(commandBuffer, 0);
-          if(result != VK_SUCCESS) {
-            error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
-            return false;
-          }
-        }
-#else
         result = vkResetCommandBuffer(commandBuffer, 0);
         if(result != VK_SUCCESS) {
           error = "could not reset tuning command buffer: " + vk_helper::vkErrorToString(result);
           return false;
         }
-#endif
         result = vk_helper::beginCommandBuffer(commandBuffer);
         if(result != VK_SUCCESS) {
           error = "could not begin tuning command buffer: " + vk_helper::vkErrorToString(result);
@@ -5128,18 +5009,9 @@ namespace {
           return false;
       }
       const size_t timedRuns = plan.timedRuns();
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      const auto wallTimerStart = context.attentionSkipTimestamps
-        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if(!context.attentionSkipTimestamps)
-        vkCmdResetQueryPool(
-          commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns * timedPipelineCount)
-        );
-#else
       vkCmdResetQueryPool(
         commandBuffer, queryPool, 0, static_cast<uint32_t>(2 * timedRuns * timedPipelineCount)
       );
-#endif
       const size_t spatialApplyFirstBuffer = spatialRMSNorm ?
         pipelines[0]->bindingCount + pipelines[1]->bindingCount : 0;
       for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
@@ -5152,21 +5024,21 @@ namespace {
         }
         for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
           const uint32_t pipelineQueryStart = queryStart + static_cast<uint32_t>(2 * timedPipeline);
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          if(!context.attentionSkipTimestamps)
-            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart);
-#else
-          vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart);
-#endif
+          vkCmdWriteTimestamp(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            queryPool,
+            pipelineQueryStart
+          );
           recordDispatches(
             commandBuffer, plan.warmupRuns + timedRepeat, firstTimedPipeline + timedPipeline, 1
           );
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          if(!context.attentionSkipTimestamps)
-            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart + 1);
-#else
-          vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, pipelineQueryStart + 1);
-#endif
+          vkCmdWriteTimestamp(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            queryPool,
+            pipelineQueryStart + 1
+          );
           if(timedPipeline + 1 < timedPipelineCount)
             vk_helper::barrierCommandBuffer(commandBuffer);
         }
@@ -5331,9 +5203,6 @@ namespace {
           );
         }
         else if(
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-          !context.attentionSkipSnapshots &&
-#endif
           isTransformerAttentionTuner(plan.kernelName) && timedRepeat < attentionValidationBuffers.size()
         ) {
           const Pipeline* attentionPipeline = pipelines[0];
@@ -5374,53 +5243,41 @@ namespace {
         cleanup();
         return false;
       }
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      if(context.attentionProbe && context.logger != nullptr)
-        context.logger->write("Attention probe dispatches completed");
-      if(context.attentionSkipTimestamps) {
-        callsPerSecond = timedRuns /
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - wallTimerStart).count();
+      vector<uint64_t> timestamps(2 * timedRuns * timedPipelineCount, 0);
+      result = vkGetQueryPoolResults(
+        device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
+        timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
+      );
+      if(result != VK_SUCCESS) {
+        error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
+        cleanup();
+        return false;
       }
-      else {
-#endif
-        vector<uint64_t> timestamps(2 * timedRuns * timedPipelineCount, 0);
-        result = vkGetQueryPoolResults(
-          device->device, queryPool, 0, static_cast<uint32_t>(timestamps.size()),
-          timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
-        );
-        if(result != VK_SUCCESS) {
-          error = "could not read tuning timestamps: " + vk_helper::vkErrorToString(result);
-          cleanup();
-          return false;
-        }
-        double weightCounted = 0.0;
-        double weightedTimeTaken = 0.0;
-        for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
-          const size_t planRun = plan.warmupRuns + timedRepeat;
-          double weight = plan.weightForRun(planRun);
-          for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
-            const size_t queryIndex = (timedRepeat * timedPipelineCount + timedPipeline) * 2;
-            const uint64_t start = timestamps[queryIndex];
-            const uint64_t end = timestamps[queryIndex + 1];
-            if(end <= start) {
-              error = "could not read a valid tuning timestamp";
-              cleanup();
-              return false;
-            }
-            const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
-            weightCounted += weight;
-            weightedTimeTaken += elapsedSeconds * weight;
+      double weightCounted = 0.0;
+      double weightedTimeTaken = 0.0;
+      for(size_t timedRepeat = 0; timedRepeat < timedRuns; timedRepeat++) {
+        const size_t planRun = plan.warmupRuns + timedRepeat;
+        double weight = plan.weightForRun(planRun);
+        for(size_t timedPipeline = 0; timedPipeline < timedPipelineCount; timedPipeline++) {
+          const size_t queryIndex = (timedRepeat * timedPipelineCount + timedPipeline) * 2;
+          const uint64_t start = timestamps[queryIndex];
+          const uint64_t end = timestamps[queryIndex + 1];
+          if(end <= start) {
+            error = "could not read a valid tuning timestamp";
+            cleanup();
+            return false;
           }
+          const double elapsedSeconds = (end - start) * timestampPeriod * 1e-9;
+          weightCounted += weight;
+          weightedTimeTaken += elapsedSeconds * weight;
         }
-        if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
-          error = "tuning measurement has no weighted runs";
-          cleanup();
-          return false;
-        }
-        callsPerSecond = weightCounted / weightedTimeTaken;
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
       }
-#endif
+      if(weightCounted <= 0.0 || weightedTimeTaken <= 0.0) {
+        error = "tuning measurement has no weighted runs";
+        cleanup();
+        return false;
+      }
+      callsPerSecond = weightCounted / weightedTimeTaken;
 
       // Compare only produced values. Input buffers and unused allocation
       // tails must not dilute the relative error; each output has its own type.
@@ -5629,13 +5486,6 @@ namespace {
         const uint32_t binding = outputBinding(attentionPipeline);
         const bool useFP16 = halfBinding(attentionPipeline, binding);
         const VkDeviceSize outputBytes = attentionOutputElements * (useFP16 ? sizeof(half_t) : sizeof(float));
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-        if(context.attentionSkipSnapshots)
-          return readAttentionValidationBuffers(
-            {tuningBuffers[binding]}, outputBytes, {attentionOutputElementsForRun(plan.totalRuns - 1)},
-            useFP16, readback, result, error
-          );
-#endif
         vector<size_t> outputCounts;
         for(size_t repeat = 0; repeat < attentionValidationBuffers.size(); repeat++)
           outputCounts.push_back(attentionOutputElementsForRun(plan.warmupRuns + repeat));
@@ -7090,37 +6940,13 @@ namespace {
       }
     }
     const bool checkReference = Tuner::name() == "transformerScaleDotProduct";
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-    if(checkReference && !context.attentionProbe) {
-      if(const char* firstCase = std::getenv("KATAGO_VULKAN_ATTN_FIRST_CASE")) {
-        const TransformerTuneParams requested = parseAttentionProbeCase(firstCase);
-        const auto first = find_if(configs.begin(), configs.end(), [&](const VulkanTuneParams& config) {
-          const TransformerTuneParams& params = config.transformer;
-          return params.USE_TILED_ATTN == requested.USE_TILED_ATTN &&
-                 params.ATTN_BLOCK_Q == requested.ATTN_BLOCK_Q &&
-                 params.ATTN_BLOCK_KV == requested.ATTN_BLOCK_KV &&
-                 params.Q_PER_THREAD == requested.Q_PER_THREAD &&
-                 isValidTuningConfig<Tuner>(context, config);
-        });
-        if(first == configs.end())
-          throw StringError("KATAGO_VULKAN_ATTN_FIRST_CASE does not match a supported tiled Attention candidate");
-        std::rotate(configs.begin(), first, first + 1);
-        if(context.logger != nullptr)
-          context.logger->write("First scalar Attention candidate " + describeTuningParams(Tuner::name(), configs.front()));
-      }
-    }
-#endif
     const size_t candidateCount = count_if(
       configs.begin(), configs.end(), [&context](const VulkanTuneParams& config) {
         return isValidTuningConfig<Tuner>(context, config);
       }
     ) +
       (!checkReference && !configs.empty() && !isValidTuningConfig<Tuner>(context, configs.front()) ? 1 : 0);
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-    if(context.timer == nullptr || (!context.attentionSkipTimestamps && !context.timer->isUsable())) {
-#else
     if(context.timer == nullptr || !context.timer->isUsable()) {
-#endif
       if(context.logger != nullptr)
         context.logger->write("Skipping Vulkan tuner " + Tuner::name() + ": compute timestamps are unavailable");
       return measurements;
@@ -7131,15 +6957,10 @@ namespace {
     if(sharedPipelines == nullptr) {
       localPipelines = std::make_unique<vk_shader::ComputePipelines>(
         context.device->device,
-        context.device->info,
+        context.tuningDeviceInfo,
         nullptr,
         false
       );
-      // Remove this block to restore cache reuse for scalar Attention candidates.
-      if(Tuner::name() == "transformerScaleDotProduct") {
-        vkDestroyPipelineCache(context.device->device, localPipelines->cache, nullptr);
-        localPipelines->cache = VK_NULL_HANDLE;
-      }
       sharedPipelines = localPipelines.get();
     }
     vk_shader::ComputePipelines& pipelines = *sharedPipelines;
@@ -7162,7 +6983,7 @@ namespace {
       const size_t currentCandidateIndex = ++candidateIndex;
       try {
         // The previous candidate has finished before the next pipeline is built.
-        // Avoid a device-idle wait for every candidate.
+        // Reuse the pipeline cache and avoid a device-idle wait for every candidate.
         for(Pipeline* pipeline: previousTargets)
           pipelines.destroyPipeline(*pipeline);
         previousTargets.clear();
@@ -7727,7 +7548,7 @@ namespace {
       vk_shader::ComputePipelines& pipelines, vector<const Pipeline*>& targets
     ) {
       const auto& p = config.transformerXgemm;
-      const auto& limits = context.device->info.properties.limits;
+      const auto& limits = context.tuningDeviceInfo.properties.limits;
       const uint64_t sharedBytes = static_cast<uint64_t>(p.WGD) * (2ULL * p.WGD + p.PADA + p.PADB) *
         (config.vulkan.shouldUseFP16Storage && config.vulkan.shouldUseFP16Compute ? 2 : 4);
       if(!p.isValid() || p.MDIMCD > limits.maxComputeWorkGroupSize[0] ||
@@ -7771,7 +7592,7 @@ namespace {
           plan.workloadWeights.assign(plan.gemmCases.size(), 1.0);
           plan.warmupRuns = 0;
           plan.totalRuns = plan.gemmCases.size();
-          vk_shader::ComputePipelines pipelines(context.device->device, context.device->info, nullptr, false);
+          vk_shader::ComputePipelines pipelines(context.device->device, context.tuningDeviceInfo, nullptr, false);
           vector<const Pipeline*> targets;
           if(TransformerXgemmTuner::create(validation, testConfig, pipelines, targets) != VK_SUCCESS ||
              pipelines.createXgemmStridedBatched(pipelines.xgemmStridedBatchedFp32,
@@ -7824,7 +7645,7 @@ namespace {
     auto plan = makeMeasurementPlan("transformerXgemm", projection);
     plan.warmupRuns = 8 * plan.gemmCases.size();
     plan.totalRuns = 40 * plan.gemmCases.size();
-    vk_shader::ComputePipelines pipelines(context.device->device, context.device->info, nullptr, false);
+    vk_shader::ComputePipelines pipelines(context.device->device, context.tuningDeviceInfo, nullptr, false);
     const VulkanTuneParams incumbent = config;
     const auto baseline = measureConfigs<TransformerXgemmTuner>(
       projection, {incumbent}, plan, nullptr, true, &pipelines);
@@ -8291,7 +8112,7 @@ namespace {
       context.logger->write("Transformer pre-norm model counts: plain=" +
       to_string(context.modelInfo.transformerPlainNormCount) + " fused=" + to_string(context.modelInfo.transformerFusedNormCount));
     const int channels = VulkanTuner::getTransformerFFNInputChannelsForTuning(context.modelInfo);
-    const auto& limits = context.device->info.properties.limits;
+    const auto& limits = context.tuningDeviceInfo.properties.limits;
     const int channelAlignment = std::lcm(
       4,
       std::lcm(config.hgemmCooperativeMatrixNHWC.NWG, config.hgemmCooperativeMatrixNHWC.KWG)
@@ -8328,7 +8149,7 @@ namespace {
             if(!p.isValid() || invocations > limits.maxComputeWorkGroupInvocations ||
                invocations > limits.maxComputeWorkGroupSize[0] || invocations * sizeof(float) > limits.maxComputeSharedMemorySize ||
                c * items >= 2 * channels || (mode != 0 && c * items < channels) ||
-               (mode == 2 && !canUseTransformerRMSNormSubgroup(context.device->info, p)))
+               (mode == 2 && !canUseTransformerRMSNormSubgroup(context.tuningDeviceInfo, p)))
               continue;
             if(none_of(candidates.begin(), candidates.end(), [&](const auto& other) { return describe(p) == describe(other); }))
               candidates.push_back(p);
@@ -8336,7 +8157,7 @@ namespace {
 
     ComputePipelines pipelines(
       context.device->device,
-      context.device->info,
+      context.tuningDeviceInfo,
       nullptr,
       false
     );
@@ -8559,7 +8380,7 @@ namespace {
     plan.totalRuns = 40 * cases.size();
     vk_shader::ComputePipelines pipelines(
       context.device->device,
-      context.device->info,
+      context.tuningDeviceInfo,
       nullptr,
       false
     );
@@ -9428,17 +9249,6 @@ namespace {
   struct TransformerScaleDotProductTuner {
     static string name() { return "transformerScaleDotProduct"; }
 
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-    // Temporary diagnostic for the Tegra X1 scalar Attention device loss.
-    static constexpr uint32_t tegraDebugSharedMemoryLimit = 32 * 1024;
-    static bool useTegraDebugLimit(const TuningContext& context) {
-      if(context.device == nullptr || context.device->info.deviceName.find("Tegra X1") == string::npos)
-        return false;
-      const char* debug = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DEBUG");
-      return debug != nullptr && std::strcmp(debug, "1") == 0;
-    }
-#endif
-
     static bool isValid(const VulkanTuneParams& config) { return config.transformer.isValid(); }
     static VulkanTuneParams reference(const VulkanTuneParams& current, const VulkanTuneParams& defaults) {
       VulkanTuneParams result = current;
@@ -9449,21 +9259,8 @@ namespace {
     static vector<VulkanTuneParams> candidates(
       const VulkanTuneParams& current,
       bool full,
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-      const TuningContext& context
-    ) {
-      if(context.logger != nullptr && useTegraDebugLimit(context)) {
-        const uint32_t deviceLimit = context.device->info.properties.limits.maxComputeSharedMemorySize;
-        context.logger->write(
-          "Vulkan Tegra X1 debug: scalar Attention shared memory limit " +
-          to_string(std::min(deviceLimit, tegraDebugSharedMemoryLimit)) +
-          " bytes (device limit " + to_string(deviceLimit) + " bytes)"
-        );
-      }
-#else
       const TuningContext&
     ) {
-#endif
       VulkanTuneParams defaults;
       VulkanTuneParams naive = current;
       naive.transformer.USE_TILED_ATTN = 0;
@@ -9535,14 +9332,7 @@ namespace {
     if(context.device == nullptr)
       return false;
     const auto& model = context.modelInfo;
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-    auto limits = context.device->info.properties.limits;
-    if(!context.attentionProbe && TransformerScaleDotProductTuner::useTegraDebugLimit(context))
-      limits.maxComputeSharedMemorySize =
-        std::min(limits.maxComputeSharedMemorySize, TransformerScaleDotProductTuner::tegraDebugSharedMemoryLimit);
-#else
-    const auto& limits = context.device->info.properties.limits;
-#endif
+    const auto& limits = context.tuningDeviceInfo.properties.limits;
     if(!config.transformer.isSupported(limits, model.transformerHeadDim, model.transformerVHeadDim))
       return false;
 
@@ -9559,93 +9349,6 @@ namespace {
       static_cast<uint64_t>(std::max(1, context.batchSize)) * std::max(1, maxHeads) <= limits.maxComputeWorkGroupCount[1] &&
       limits.maxComputeWorkGroupCount[2] >= 1;
   }
-
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-  // Temporary scalar Attention probe. Use an explicit disposable -output with katago tuner.
-  const char* getAttentionProbeCase(const VulkanDevice* device) {
-    if(device == nullptr)
-      return nullptr;
-    if(const char* probeCase = std::getenv("KATAGO_VULKAN_ATTN_CASE"))
-      return probeCase;
-    return device->info.deviceName.find("Tegra X1") != string::npos
-      ? std::getenv("KATAGO_VULKAN_TEGRA_ATTN_CASE")
-      : nullptr;
-  }
-
-  void runAttentionProbe(
-    const char* caseSpec, const VulkanDevice* device, int batchSize, int nnXLen, int nnYLen,
-    const VulkanTuner::ModelInfoForTuning& modelInfo, Logger* logger, VulkanTuneParams& tunedConfig
-  ) {
-    VulkanTuneParams config = tunedConfig;
-    config.transformer = parseAttentionProbeCase(caseSpec);
-    config.vulkan = VulkanTuner::getHardwareParams(device->info);
-    config.vulkan.shouldUseFP16Storage = false;
-    config.vulkan.shouldUseFP16Compute = false;
-    config.vulkan.shouldUseCooperativeMatrix = false;
-    config.vulkan.shouldUseNHWC = false;
-
-    const char* dummy = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DUMMY");
-    const bool useDummy = dummy != nullptr && std::strcmp(dummy, "1") == 0;
-    const char* tight = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_TIGHT_BUFFERS");
-    const char* fresh = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_FRESH_COMMANDS");
-    const char* dispatchOnly = std::getenv("KATAGO_VULKAN_ATTN_DISPATCH_ONLY");
-    const bool skipBoth = dispatchOnly != nullptr && std::strcmp(dispatchOnly, "1") == 0;
-    const char* skipTimestamps = std::getenv("KATAGO_VULKAN_ATTN_SKIP_TIMESTAMPS");
-    const char* skipSnapshots = std::getenv("KATAGO_VULKAN_ATTN_SKIP_SNAPSHOTS");
-    const char* probeBatch = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_BATCH");
-    if(probeBatch != nullptr) {
-      int parsedBatch;
-      if(!Global::tryStringToInt(probeBatch, parsedBatch) || parsedBatch < 1 || parsedBatch > batchSize)
-        throw StringError("KATAGO_VULKAN_TEGRA_ATTN_BATCH must be between 1 and " + to_string(batchSize));
-      batchSize = parsedBatch;
-    }
-    int dispatchBatchSize = batchSize;
-    const char* probeDispatchBatch = std::getenv("KATAGO_VULKAN_TEGRA_ATTN_DISPATCH_BATCH");
-    if(probeDispatchBatch != nullptr &&
-       (!Global::tryStringToInt(probeDispatchBatch, dispatchBatchSize) ||
-        dispatchBatchSize < 1 || dispatchBatchSize > batchSize))
-      throw StringError("KATAGO_VULKAN_TEGRA_ATTN_DISPATCH_BATCH must be between 1 and the probe batch size");
-    VulkanTimestampTimer timer(device);
-    TuningContext context{device, batchSize, nnXLen, nnYLen, modelInfo, false, {}, logger, &timer, true};
-    context.attentionProbe = true;
-    context.tegraAttentionTightBuffers = tight != nullptr && std::strcmp(tight, "1") == 0;
-    context.tegraAttentionFreshCommands = fresh != nullptr && std::strcmp(fresh, "1") == 0;
-    context.attentionSkipTimestamps = skipBoth || (skipTimestamps != nullptr && std::strcmp(skipTimestamps, "1") == 0);
-    context.attentionSkipSnapshots = skipBoth || (skipSnapshots != nullptr && std::strcmp(skipSnapshots, "1") == 0);
-    using Tuner = TransformerScaleDotProductTuner;
-    if(!isValidTuningConfig<Tuner>(context, config))
-      throw StringError("Attention probe candidate violates the model or device limits");
-    if(useDummy && device->dummyQueue == VK_NULL_HANDLE)
-      throw StringError("Attention probe requested a dummy GPU workload without a second queue");
-
-    if(logger != nullptr)
-      logger->write(
-        "Attention probe " + describeTuningParams(Tuner::name(), config) +
-        " board=" + to_string(nnXLen) + "x" + to_string(nnYLen) + " batch=" + to_string(batchSize) +
-        " dispatchBatch=" + to_string(dispatchBatchSize) +
-        " dummy=" + to_string(useDummy) + " tightBuffers=" + to_string(context.tegraAttentionTightBuffers) +
-        " freshCommands=" + to_string(context.tegraAttentionFreshCommands) +
-        " timestamps=" + to_string(!context.attentionSkipTimestamps) +
-        " snapshots=" + to_string(!context.attentionSkipSnapshots)
-      );
-    VulkanDummyThread dummyThread(device, logger);
-    if(useDummy)
-      dummyThread.start();
-    auto plan = makeMeasurementPlan(Tuner::name(), context);
-    plan.batchSizes = {dispatchBatchSize};
-    const auto measurements = measureConfigs<Tuner>(context, {config}, plan, nullptr, !context.attentionSkipTimestamps);
-    dummyThread.stopAndJoin();
-    requireTuningDevice(context, "Attention probe");
-    if(measurements.values.empty() || measurements.values.front().score <= 0.0)
-      throw StringError("Attention probe failed");
-    if(logger != nullptr)
-      logger->write(
-        "Attention probe PASS " + string(context.attentionSkipTimestamps ? "wall calls/sec=" : "calls/sec=") +
-        Global::doubleToString(measurements.values.front().callsPerSecond)
-      );
-    tunedConfig = std::move(config);
-  }
-#endif
 
   template<bool NHWC>
   struct TransformerScaleDotProductCooperativeMatrixTuner {
@@ -9730,7 +9433,7 @@ namespace {
       configs.insert(configs.end(), nativeConfigs.begin(), nativeConfigs.end());
       configs.erase(remove_if(configs.begin(), configs.end(), [&context](const VulkanTuneParams& config) {
         return !isValidCooperativeMatrixConfig(
-          context.device->info, params(config), context.modelInfo.transformerHeadDim,
+          context.tuningDeviceInfo, params(config), context.modelInfo.transformerHeadDim,
           context.modelInfo.transformerVHeadDim, NHWC
         );
       }), configs.end());
@@ -9765,7 +9468,7 @@ namespace {
     return context.device != nullptr && config.vulkan.canUseCooperativeMatrix &&
            config.vulkan.canUseFP16Storage && config.vulkan.canUseFP16Compute &&
            isValidCooperativeMatrixConfig(
-             context.device->info, params,
+              context.tuningDeviceInfo, params,
              context.modelInfo.transformerHeadDim, context.modelInfo.transformerVHeadDim, NHWC
            );
   }
@@ -9786,7 +9489,7 @@ namespace {
     using Tuner = TransformerScaleDotProductCooperativeMatrixTuner<true>;
     vk_shader::ComputePipelines pipelines(
       context.device->device,
-      context.device->info,
+      context.tuningDeviceInfo,
       nullptr,
       false
     );
@@ -10386,7 +10089,7 @@ namespace {
 
     vk_shader::ComputePipelines legacyPipelines(
       context.device->device,
-      context.device->info,
+      context.tuningDeviceInfo,
       nullptr,
       false
     );
@@ -10462,7 +10165,7 @@ namespace {
     TransformerDualGemmSwiGLUTuneParams bestCandidate;
     vk_shader::ComputePipelines candidatePipelines(
       context.device->device,
-      context.device->info,
+      context.tuningDeviceInfo,
       nullptr,
       false
     );
@@ -10829,12 +10532,6 @@ void VulkanTuner::tune(
     throw StringError("VulkanTuner::tune: device is null");
   if(!tunedConfig.isValid())
     tunedConfig = VulkanTuneParams();
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-  if(const char* probeCase = getAttentionProbeCase(device)) {
-    runAttentionProbe(probeCase, device, batchSize, nnXLen, nnYLen, modelInfo, logger, tunedConfig);
-    return;
-  }
-#endif
   if(attentionOnly && (modelInfo.transformerHeadDim <= 0 || modelInfo.transformerVHeadDim <= 0))
     throw StringError("Vulkan attention-only tuning requires a transformer model");
 
@@ -10848,14 +10545,15 @@ void VulkanTuner::tune(
   initializeTuningRecords(records);
   const auto recordGuard = makeScopeGuard([&]() { tunedConfig.tuningRecords = std::move(records); });
   VulkanTimestampTimer timer(device);
-  VulkanDummyThread dummyThread(device, logger);
-  // Projection tuning represents an otherwise idle, single-server inference GPU.
-  if(!attentionOnly && !transformerGemmOnly && !transformerFFNOnly && !transformerPreNormOnly && !transformerResidualOnly)
-    dummyThread.start();
   TuningContext context{
     device, batchSize, nnXLen, nnYLen, modelInfo, full,
     getCooperativeMatrixTuneShapes(device), logger, &timer, printOnlyOnImprovement
   };
+  logTuningSharedMemoryLimit(context);
+  VulkanDummyThread dummyThread(device, logger);
+  // Projection tuning represents an otherwise idle, single-server inference GPU.
+  if(!attentionOnly && !transformerGemmOnly && !transformerFFNOnly && !transformerPreNormOnly && !transformerResidualOnly)
+    dummyThread.start();
   context.tuningRecords = &records;
   if(logger != nullptr) {
     logger->write(
@@ -10905,7 +10603,7 @@ void VulkanTuner::tune(
     validation.rmsNorm = tunedConfig.transformerPreNorm;
     ComputePipelines pipelines(
       device->device,
-      device->info,
+      context.tuningDeviceInfo,
       logger
     );
     VkResult result = pipelines.createTransformerRMSNorm(
@@ -11359,10 +11057,6 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
   enabled_t useFP16Mode,
   enabled_t useNHWCMode
 ) {
-#ifdef KATAGO_VULKAN_ATTN_DIAGNOSTICS
-  if(getAttentionProbeCase(device) != nullptr)
-    throw StringError("Run the Attention probe with 'katago tuner -output <disposable file>'");
-#endif
   if(didAutoTune != nullptr)
     *didAutoTune = false;
   string filename = tunerFile;
@@ -11435,6 +11129,8 @@ VulkanTuneParams VulkanTuner::loadOrAutoTune(
     device, DEFAULT_BATCH_SIZE, nnXLen, nnYLen, modelInfo, false,
     getCooperativeMatrixTuneShapes(device), logger, &timer, true
   };
+  if(cacheLoaded)
+    logTuningSharedMemoryLimit(context);
   context.tuningRecords = &records;
   const auto save = [&]() {
     params.tuningRecords = records;
